@@ -1,0 +1,193 @@
+---
+title: 'Production Checklist'
+description: 'A synthesizing pre-production checklist tying backend locking, version pinning, plan review, secrets handling, static analysis, dependency ordering, and testing back to the rest of the course.'
+sidebar:
+  order: 4
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## The idea in one sentence
+
+Shipping Terraform and Terragrunt to production on GCP is not one big decision but a checklist of smaller ones — each covered earlier in this course — that all have to hold true at the same time.
+
+## The checklist
+
+None of these are new ideas at this point. What is new is seeing them side by side as one list, because production readiness is really just all of them being true simultaneously, not any single one of them done especially well.
+
+- **Remote GCS backend with its built-in locking configured from day one.** A `backend "gcs"` block set up before the first `apply`, not retrofitted after a corrupted state file forces the issue. GCS needs no separate lock-table resource — locking is inherent to the backend. Covered in State Management.
+- **Provider and module versions pinned, not floating.** The committed `.terraform.lock.hcl` pins exact provider versions and checksums; module `source` references use a specific tag or version constraint, never a branch name that can move underneath you. Covered in Foundations and Modules.
+- **Every `plan` reviewed in CI before every `apply`**, with reviewers specifically watching for unexpected `-/+` resource replacements rather than skimming the plan like a code diff. Covered in this module's CI/CD lesson.
+- **Sensitive values kept out of variables and, where possible, out of state**, pulled from Secret Manager via a `data` source instead of typed into a `tfvars` file, with IAM tightly restricting who can read the state bucket. Covered in State Management and this module's secrets lesson.
+- **`tflint`, a security scanner, and ideally policy-as-code wired into CI**, so known-bad patterns and organizational rules are enforced mechanically instead of depending on a human catching every case by eye. Covered in this module's policy-as-code lesson.
+- **Terragrunt `dependency` blocks driving rollout order**, not a person remembering that the VPC has to apply before the database. Covered in Terragrunt Fundamentals.
+- **`terraform test` / `.tftest.hcl` coverage for any module doing something non-trivial**, so a refactor of a module's internals gets caught by an assertion instead of by a surprised downstream consumer. Covered in Modules.
+
+```hcl
+# gke/terragrunt.hcl and cloudsql/terragrunt.hcl both use dependency blocks
+# so rollout order is driven by Terragrunt, not a person's memory.
+dependency "vpc" {
+  config_path = "../vpc"
+
+  mock_outputs = {
+    network_self_link         = "mock-network-self-link"
+    private_subnet_self_links = ["mock-subnet-self-link"]
+  }
+  mock_outputs_allowed_terraform_commands = ["plan"]
+}
+
+inputs = {
+  network_self_link = dependency.vpc.outputs.network_self_link
+  subnetwork        = dependency.vpc.outputs.private_subnet_self_links[0]
+}
+```
+
+```hcl
+# modules/cloudsql/tests/main.tftest.hcl
+run "sets_expected_database_version" {
+  command = plan
+
+  variables {
+    instance_name = "app-db-test"
+  }
+
+  assert {
+    condition     = google_sql_database_instance.this.database_version == "POSTGRES_15"
+    error_message = "Cloud SQL module did not default to the POSTGRES_15 engine"
+  }
+}
+```
+
+## One coherent system: a real repo layout
+
+Put all of it together and this course adds up to a single, concrete shape — not a list of disconnected facts, but one repository that actually looks like this:
+
+```
+infra/
+├── root.hcl
+├── vpc/
+│   └── terragrunt.hcl
+├── gke/
+│   └── terragrunt.hcl
+└── cloudsql/
+    └── terragrunt.hcl
+```
+
+`root.hcl` at the top holds the shared backend configuration and provider generation, included by every unit below it:
+
+```hcl
+# infra/root.hcl
+remote_state {
+  backend = "gcs"
+
+  generate = {
+    path      = "backend.tf"
+    if_exists = "overwrite_terragrunt"
+  }
+
+  config = {
+    bucket   = "acme-terraform-state"
+    prefix   = "${path_relative_to_include()}/terraform.tfstate"
+    project  = "acme-prod-123456"
+    location = "US"
+  }
+}
+```
+
+```hcl
+# infra/cloudsql/terragrunt.hcl
+include "root" {
+  path = find_in_parent_folders("root.hcl")
+}
+
+terraform {
+  source = "../../modules/cloudsql"
+}
+
+dependency "vpc" {
+  config_path = "../vpc"
+  mock_outputs = {
+    network_self_link         = "mock-network-self-link"
+    private_subnet_self_links = ["mock-subnet-self-link"]
+  }
+  mock_outputs_allowed_terraform_commands = ["plan"]
+}
+
+inputs = {
+  network_self_link = dependency.vpc.outputs.network_self_link
+  subnetwork        = dependency.vpc.outputs.private_subnet_self_links[0]
+}
+```
+
+Every piece here traces back to an earlier lesson: the built-in GCS locking is the State Management module's locking story; `root.hcl` plus `include` is Terragrunt Fundamentals' DRY backend pattern; the `dependency` block is what lets `cloudsql` reference `vpc`'s real output without a person remembering which unit has to apply first; and the `../../modules/cloudsql` source, pinned in a real repo to a tag rather than left floating, is Modules' versioning discipline.
+
+The whole tree ships through exactly the CI/CD shape from earlier in this module: `terragrunt run --all plan` runs on every pull request touching `infra/`, posts its output for review, and `terragrunt run --all apply` runs only after merge to main, authenticated through the same Workload Identity Federation rather than a downloaded key. Nothing here is a new mechanism — it is the same pieces from every earlier module, wired together into one system that deploys `vpc`, then `gke` and `cloudsql` behind it, in the order the `dependency` blocks describe, gated by a plan a human actually read.
+
+<Mermaid title="root.hcl plus three dependent units, deployed through a CI pipeline that gates plan and apply" code={productionRepoDiagram} />
+
+export const productionRepoDiagram = `flowchart TB
+  root["root.hcl: shared GCS backend, built-in locking"]
+  root --> vpc["vpc unit"]
+  root --> gke["gke unit"]
+  root --> cloudsql["cloudsql unit"]
+  vpc -->|dependency block: network_self_link, subnet links| gke
+  vpc -->|dependency block: network_self_link, subnet links| cloudsql
+  pr["Pull request"] -->|terragrunt run --all plan| review["Reviewed for -/+ replacements"]
+  review -->|merge to main| apply["terragrunt run --all apply"]
+  apply --> vpc
+  apply --> gke
+  apply --> cloudsql`;
+
+<Callout title="The one-line takeaway">
+Production readiness is a **checklist**, not a single decision: a GCS backend with built-in locking from day one, pinned provider and module versions, every `plan` reviewed in CI for unexpected replacements, secrets kept out of variables and state where possible with IAM tightly restricting the state bucket, `tflint`/a scanner/policy-as-code wired into CI, Terragrunt **`dependency`** blocks driving rollout order instead of human memory, and `terraform test` coverage for non-trivial modules. Put together, it is one coherent system — a **`root.hcl`** shared backend, several units wired together with `dependency` blocks, deployed through a pipeline that runs `terragrunt run --all plan` on every pull request and `terragrunt run --all apply` only after merge — not a pile of separate facts.
+</Callout>
+
+export const quizProductionChecklist = [
+  {
+    q: 'Why does pinning module versions to a specific tag matter, rather than pointing source at a floating branch',
+    options: [
+      'It has no real effect since Terraform always re-downloads the latest code anyway',
+      'An unpinned module can change underneath a configuration between runs with no diff to review, so a plan can shift for reasons that have nothing to do with your own changes',
+      'Pinning versions is only relevant for the Terraform binary itself, not modules',
+      'Floating branches are actually the recommended production pattern',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why should a remote GCS backend with its built-in locking be configured from day one rather than added later',
+    options: [
+      'Locking only matters once a team exceeds fifty engineers',
+      'Local state does not survive a second teammate or a CI run touching the same infrastructure, and retrofitting a backend after a corrupted or conflicting state file is far harder than starting with one',
+      'Locking is only needed for destroy operations, not apply',
+      'GCS backends cannot be configured until after the first apply',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why do Terragrunt dependency blocks matter for a multi-unit rollout instead of relying on an engineer applying units in the right order manually',
+    options: [
+      'dependency blocks are purely cosmetic and do not affect apply order',
+      'They let one unit reference another real, computed output directly, and drive apply order automatically, instead of depending on a person remembering that vpc must apply before cloudsql',
+      'dependency blocks replace the need for a remote backend entirely',
+      'dependency blocks only work within a single terragrunt.hcl file, never across units',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why does reviewing a plan in CI specifically for -/+ replacements matter as part of this checklist',
+    options: [
+      'Because -/+ always indicates a syntax error in the configuration',
+      'Because a forced replacement destroys and recreates a resource, which can mean real data loss or downtime if an unreviewed plan is approved and applied',
+      'Because -/+ only appears when using Terragrunt, never plain Terraform',
+      'Because CI cannot run terraform plan without first seeing a -/+ line',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="production-and-ecosystem/production-checklist" questions={quizProductionChecklist} />
+
+<ProgressTracker client:visible id="production-and-ecosystem/production-checklist" />

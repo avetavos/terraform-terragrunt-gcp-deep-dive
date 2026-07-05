@@ -1,0 +1,124 @@
+---
+title: 'Running Many Units at Once'
+description: 'run --all command ปัจจุบัน scope มันด้วย --filter รันแบบ non-interactive ใน CI และใช้ before_hook กับ after_hook รอบ operation ของ unit'
+sidebar:
+  order: 4
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## ไอเดียในหนึ่งประโยค
+
+`terragrunt run --all plan` กับ `terragrunt run --all apply` operate กับทุก unit ใต้ directory tree ปัจจุบันพร้อมกัน ตามลำดับ dependency ที่ Terragrunt คำนวณเองจาก `dependency` block ของแต่ละ unit และ scope ให้แคบลงได้ด้วย `--filter` หรือห่อด้วย `before_hook`/`after_hook` สำหรับอะไรก็ตามที่ต้องเกิดขึ้นรอบ ๆ run ของ unit ใดตัวหนึ่ง
+
+## run --all: operate กับทุก unit พร้อมกัน
+
+apply unit `vpc` แล้วค่อย `compute` แล้วค่อย `database` ทีละตัวด้วยมือทำได้ แต่ไม่ scale เกินไปกว่า unit ไม่กี่ตัว แถมยังผลักภาระให้คุณต้องจำลำดับที่ถูกต้องเองอยู่ดี `run --all` ตัดปัญหานี้ทิ้งด้วยการชี้ Terragrunt ไปที่ directory แล้วสั่งให้มันรัน command ที่กำหนดกับทุก unit ข้างใต้นั้น
+
+```bash
+terragrunt run --all plan
+terragrunt run --all apply
+```
+
+นี่คือ syntax ของ command ปัจจุบัน คุ้มค่าที่จะพูดให้ชัดว่ามันมาแทนอะไร เพราะ content จำนวนมากบนอินเทอร์เน็ตยังสอน syntax เก่าอยู่ `terragrunt run-all plan` แบบไม่มีช่องว่างก่อน `--all` เป็น deprecated แล้ว ส่วน command เก่ากว่าคือ `terragrunt plan-all` กับ `terragrunt apply-all` ถูกเอาออกไปหมดแล้ว รันบน Terragrunt version ปัจจุบันไม่ได้เลย ถ้า tutorial, blog post, หรือ internal wiki ไหนยังโชว์ `plan-all` หรือ `apply-all` อยู่ ให้ถือว่านั่นคือสัญญาณว่า content นั้นเก่ากว่า CLI ปัจจุบัน และต้อง verify ส่วนที่เหลือก่อนเชื่อ
+
+## scope ด้วย --filter และรันแบบ non-interactive ใน CI
+
+รัน `run --all` จากบนสุดของ repository เลยแตะทุก unit ในนั้นหมด ซึ่งไม่ค่อยใช่สิ่งที่คุณต้องการตอน iterate เร็ว ๆ กับส่วนใดส่วนหนึ่งของ tree flag `--filter` scope `run --all` ให้แคบลงเหลือแค่บาง unit ตาม path
+
+```bash
+terragrunt run --all --filter './project-a/**' -- plan
+```
+
+`--filter` คือวิธี scope multi-unit run แบบรวมและเป็นปัจจุบัน มันมาแทน flag เก่าอย่าง `--queue-include-dir` กับ `--queue-exclude-dir` ซึ่งยังมีอยู่เป็น alias แต่ไม่ใช่วิธีที่แนะนำให้เขียนอีกต่อไป double dash ก่อน `plan` แยก flag ของ Terragrunt เองออกจาก command ที่จะรันกับแต่ละ unit ที่ match
+
+CI pipeline ต้องการ flag เพิ่มอีกตัวหนึ่ง ปกติ Terragrunt ถาม confirmation ก่อน operation บางอย่าง ซึ่งไม่มีความหมายใน pipeline run แบบ non-interactive `--non-interactive` ข้าม prompt เหล่านั้นไป มาแทน flag เก่าอย่าง `--terragrunt-non-interactive`
+
+```bash
+terragrunt run --all --non-interactive -- apply
+```
+
+## before_hook กับ after_hook: รัน command รอบ operation ของ unit
+
+`dependency` block กับ `run --all` จัดการเรื่องลำดับ resource ข้าม unit แต่ workflow จริงจำนวนไม่น้อยต้องการรัน shell command ตามใจที่ผูกกับ operation ของ unit ใดตัวหนึ่งโดยเฉพาะ เช่น validate อะไรบางอย่างก่อน `plan` หรือแจ้งทีมหลัง `apply` สำเร็จ `before_hook` กับ `after_hook` block ที่ประกาศข้างใน `terraform` block ของ unit ทำสิ่งนั้นตรง ๆ
+
+```hcl
+# compute/terragrunt.hcl
+terraform {
+  before_hook "validate_naming" {
+    commands = ["plan", "apply"]
+    execute  = ["./scripts/validate-naming.sh"]
+  }
+
+  after_hook "notify_slack" {
+    commands     = ["apply"]
+    execute      = ["./scripts/notify-slack.sh", "compute unit applied"]
+    run_on_error = false
+  }
+}
+```
+
+`commands` list ว่า Terragrunt command ไหนบ้าง trigger hook นี้ `validate_naming` ข้างบนรันก่อนทั้ง `plan` และ `apply` บน unit นี้ ส่วน `notify_slack` รันเฉพาะหลัง `apply` ที่สำเร็จ `execute` คือ command จริงที่ Terragrunt รัน เขียนเป็น list ไม่ใช่ shell string เดี่ยว ๆ `run_on_error = false` บน `notify_slack` แปลว่าการแจ้งเตือน Slack fire เฉพาะตอน `apply` สำเร็จจริงเท่านั้น ถ้าตั้งเป็น `true` hook จะ fire แม้ run นั้น fail ก็ตาม ซึ่งเหมาะกับ hook ที่ต้อง cleanup หรือแจ้งเตือนตอน fail ไม่ว่าผลจะออกมายังไง
+
+<Mermaid title="run --all apply กระจายตามลำดับ dependency พร้อม hook หลัง unit หนึ่งเสร็จ" code={runAllDiagram} />
+
+export const runAllDiagram = `flowchart TD
+  cmd["terragrunt run --all apply"]
+  cmd --> vpc["vpc unit"]
+  vpc --> compute["compute unit (depends on vpc)"]
+  vpc --> database["database unit (depends on vpc)"]
+  compute --> hook["after_hook: notify_slack"]`;
+
+<Callout title="สรุปหนึ่งบรรทัด">
+`terragrunt run --all plan` กับ `terragrunt run --all apply` คือ command ปัจจุบันสำหรับ operate กับทุก unit ใต้ directory tree ตามลำดับที่ Terragrunt คำนวณจาก `dependency` block ของแต่ละ unit syntax เก่าอย่าง `terragrunt run-all <command>` เป็น deprecated แล้ว และ `plan-all`/`apply-all` ถูกเอาออกไปทั้งหมด ให้ถือว่า content ไหนสอนแบบนั้นเป็นข้อมูลเก่า scope `run --all` ให้แคบลงเหลือบางส่วนของ tree ด้วย `--filter` (ซึ่งมาแทน `--queue-include-dir`/`--queue-exclude-dir`) และข้าม confirmation prompt ใน CI ด้วย `--non-interactive` `before_hook` กับ `after_hook` block ข้างใน `terraform` block ของ unit รัน shell command ตามใจก่อนหรือหลัง Terragrunt command เฉพาะบน unit นั้น เหมาะกับ validate ก่อน `plan` หรือแจ้งเตือนหลัง `apply`
+</Callout>
+
+export const quizRunAll = [
+  {
+    q: 'command ปัจจุบันสำหรับรัน plan กับทุก unit ใต้ directory tree ปัจจุบันคืออะไร',
+    options: [
+      'terragrunt plan-all',
+      'terragrunt run-all plan',
+      'terragrunt run --all plan',
+      'terragrunt apply-all --dry-run',
+    ],
+    answer: 2,
+  },
+  {
+    q: 'อะไรคือความจริงเกี่ยวกับ plan-all, apply-all, และ run-all ในปัจจุบัน',
+    options: [
+      'ทั้งสามอย่างยังทำงานเหมือนเดิมทุกประการและแนะนำให้ใช้เท่ากัน',
+      'plan-all กับ apply-all ถูกเอาออกไปทั้งหมดแล้ว และ run-all เป็น deprecated โดยให้ใช้ run --all แทน',
+      'run-all ถูกเอาออกไปแล้ว ส่วน plan-all/apply-all คือ command ปัจจุบันที่แนะนำ',
+      'ทั้งหมดเป็นแค่ alias ของ run --all ที่ทำงานเหมือนกันเป๊ะโดยไม่มี warning ใด ๆ',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'before_hook หรือ after_hook block ให้คุณทำอะไรได้',
+    options: [
+      'เปลี่ยนลำดับที่ unit ถูก apply ระหว่าง run --all',
+      'รัน shell command ตามใจที่ผูกกับ Terragrunt command เฉพาะบน unit นั้น ก่อนหรือหลังมันรัน',
+      'แทนที่ dependency block สำหรับอ่าน output ของ unit อื่น',
+      'generate mock_outputs ให้ dependency เองอัตโนมัติ',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'อะไรเป็นตัวกำหนดลำดับที่ unit ถูกประมวลผลระหว่าง run --all apply',
+    options: [
+      'ลำดับตัวอักษรของชื่อ directory แต่ละ unit',
+      'ลำดับที่ unit ปรากฏใน root.hcl',
+      'dependency graph ที่ Terragrunt คำนวณจาก dependency block ของแต่ละ unit',
+      'ลำดับที่ before_hook block ถูกประกาศไว้',
+    ],
+    answer: 2,
+  },
+];
+
+<Quiz client:visible id="terragrunt-fundamentals/running-many-units-at-once" questions={quizRunAll} />
+
+<ProgressTracker client:visible id="terragrunt-fundamentals/running-many-units-at-once" />

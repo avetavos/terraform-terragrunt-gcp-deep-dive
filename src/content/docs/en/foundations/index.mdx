@@ -1,0 +1,32 @@
+---
+title: 'Terraform & Terragrunt for GCP — From Zero to Hero'
+description: 'A developer-focused, zero-to-hero course on Terraform and Terragrunt targeting Google Cloud — HCL, state, variables and modules, multi-environment design, Terragrunt, and running infrastructure as code in production.'
+sidebar:
+  order: 1
+---
+
+import Callout from '../../../../components/Callout.astro';
+
+**Terraform** is a declarative infrastructure-as-code tool: you describe the cloud resources you want in HCL, and Terraform figures out how to make reality match — creating, updating, or destroying resources as needed. This course is written **for developers** — people who write and review Terraform changes, manage state across a team, and have to make infrastructure changes safely in production.
+
+Every example in this course targets **Google Cloud (GCP)**, using real resource types (`google_compute_instance`, `google_storage_bucket`, `google_service_account`, and so on) and a real GCS remote backend — the HCL syntax, state model, and Terragrunt concepts you learn transfer directly to any other provider; only the resource type names and backend configuration change. Where current practice is easy to get wrong from stale tutorials — like Terragrunt's `run --all` command replacing the deprecated `run-all`/`plan-all` — this course teaches the current, correct form and says so explicitly.
+
+## What this course covers
+
+| Module | You will learn |
+| --- | --- |
+| **Foundations** | Infrastructure as Code, HCL syntax, providers and resources, the dependency graph, the Terraform workflow |
+| **State Management** | The state file, remote backends and locking, drift detection and import, sensitive data in state |
+| **Variables & Data Flow** | Input variables, outputs and locals, expressions and functions, count vs for_each |
+| **Modules** | Writing reusable modules, composition and sources, versioning, testing with `terraform test` |
+| **Multi-Environment** | The dev/staging/prod problem, Terraform workspaces, directory-per-environment, why Terragrunt exists |
+| **Terragrunt Fundamentals** | `root.hcl`, DRY configuration with `include`, `dependency` blocks between units, running many units at once |
+| **Production & Ecosystem** | CI/CD for infrastructure, policy as code and static analysis, secrets and credentials, a production checklist |
+
+## How to read it
+
+Each lesson opens with the idea in one sentence, shows real HCL and CLI commands, has a diagram of the moving parts, and ends with a one-line takeaway plus a short quiz. Work top to bottom — later modules assume the resource, state, and dependency-graph vocabulary from these first lessons.
+
+<Callout title="The one-line takeaway">
+Terraform is **declarative infrastructure as code**: you describe desired GCP resources in HCL, and Terraform plans and applies the changes needed to get there, tracking everything in **state**. This course teaches Terraform and Terragrunt from a developer's seat — the workflow, the guarantees, and the production behavior — starting from HCL itself.
+</Callout>

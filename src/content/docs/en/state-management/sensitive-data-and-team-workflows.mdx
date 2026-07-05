@@ -1,0 +1,123 @@
+---
+title: 'Sensitive Data and Team Workflows'
+description: 'What sensitive equals true actually protects against, how to really protect a GCS state bucket, and why a shared backend alone does not solve team workflow at scale.'
+sidebar:
+  order: 4
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## The idea in one sentence
+
+Marking a variable or output `sensitive = true` hides its value from CLI output, but the value is still stored in **plaintext** inside the state file, so protecting state itself is a separate, and more important, problem.
+
+## What sensitive = true actually does
+
+You can mark a variable or an output as sensitive:
+
+```hcl
+variable "db_password" {
+  type      = string
+  sensitive = true
+}
+
+output "db_password" {
+  value     = var.db_password
+  sensitive = true
+}
+```
+
+With this in place, `terraform plan` and `terraform apply` print `(sensitive value)` instead of the real password in the terminal, and it is redacted from CI logs the same way. This is a genuinely useful feature — it stops a secret from ending up in a build log that a dozen people can read, or on a screen during a pairing session.
+
+It is also frequently misunderstood. `sensitive = true` is a **display-redaction** feature, not an encryption feature. The actual value is still written into `terraform.tfstate` in plaintext, exactly as covered in the first lesson of this module. Anyone who can read the raw state file can read the password regardless of how many resources or variables were marked sensitive along the way.
+
+## Actually protecting the state file
+
+Since redaction does not protect the file at rest, protection has to happen at the storage layer instead:
+
+- Rely on Cloud Storage's server-side encryption for the state bucket. GCS encrypts objects at rest by default, and you can layer a customer-managed Cloud KMS key on top via the backend's `kms_encryption_key` argument if your organization requires it.
+- Restrict who can read the bucket with IAM, scoped as tightly as possible. Grant `roles/storage.objectViewer` on the specific state bucket to the specific principals who need it — a CI service account, a small platform team — rather than granting broad access at the project level. Treat the state file itself as a secret, because for practical purposes it is one.
+
+Where possible, avoid putting long-lived secrets into Terraform configuration or state at all. Instead of a variable holding a raw password, pull the value in at apply time from a secrets manager:
+
+```hcl
+data "google_secret_manager_secret_version" "db_password" {
+  secret = "db-password"
+}
+
+resource "google_sql_user" "app" {
+  name     = "app_admin"
+  instance = google_sql_database_instance.main.name
+  password = data.google_secret_manager_secret_version.db_password.secret_data
+}
+```
+
+This does not make the value vanish from state entirely — the resource attribute Terraform sets still gets recorded the same way it always does. What it does change is where the secret's long-term source of truth lives: Secret Manager, with its own access policies, audit logging, and rotation story, instead of a Terraform variable that someone has to remember to pass in securely every single run.
+
+## Where a shared backend stops being enough
+
+Earlier lessons in this module got state onto a shared GCS backend with built-in locking, which already fixes the worst team problems — divergent local files and corrupted concurrent writes. But it does not fully solve how a growing team should work together. If everyone still runs `terraform apply` from their own laptop whenever they feel like it, concurrent applies simply queue up behind the lock instead of colliding, and there is still no natural point where a second person reviews a change before it takes effect against real infrastructure.
+
+That gap — a reviewable, auditable place for changes to be approved before `apply` runs against shared state — is exactly what CI/CD for infrastructure closes, and it is covered later in this course.
+
+<Mermaid title="A sensitive variable still lands in state as plaintext, while a data source pulls a secret at apply time instead of storing it as a variable" code={sensitiveDataDiagram} />
+
+export const sensitiveDataDiagram = `flowchart LR
+  varInput["variable db_password (sensitive = true)"] -->|redacted in CLI output| cli["terraform plan / apply output"]
+  varInput -->|value still written| state["terraform.tfstate (plaintext)"]
+  secretManager["Secret Manager secret version"] -->|read via data source at apply time| resource["google_sql_user.app"]
+  resource --> state`;
+
+<Callout title="The one-line takeaway">
+`sensitive = true` only redacts a value from **CLI output and logs** — the value is still written into `terraform.tfstate` in **plaintext**, so it is not a substitute for protecting the state file itself. Real protection means relying on GCS server-side encryption at rest and scoping IAM roles like `roles/storage.objectViewer` tightly to only the principals that need to read the state bucket. For long-lived credentials, prefer pulling the value from a service like Secret Manager through a `data` source at apply time over storing it as a Terraform variable, since the secret's source of truth then lives in a system built for access control and rotation rather than in state.
+</Callout>
+
+export const quizSensitive = [
+  {
+    q: 'What does marking a variable sensitive = true actually protect against',
+    options: [
+      'It encrypts the value inside terraform.tfstate so it cannot be read even with file access',
+      'It redacts the value from CLI output such as plan and apply logs, but the value is still written to state in plaintext',
+      'It prevents the value from ever being stored in state at all',
+      'It automatically rotates the value on a schedule',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is the real way to protect a GCS-backed state bucket at rest',
+    options: [
+      'Marking every variable in the configuration as sensitive',
+      'Renaming the state file to something less obvious',
+      'Relying on GCS server-side encryption and scoping IAM roles like roles/storage.objectViewer tightly to only the principals who need access',
+      'Storing a copy of the state file locally as a backup in case the bucket is compromised',
+    ],
+    answer: 2,
+  },
+  {
+    q: 'Why is pulling a secret from Secret Manager via a data source often preferred over a Terraform variable for long-lived credentials',
+    options: [
+      'Because data sources never get written into the state file at all',
+      'Because the secret then lives in a system with its own access control, audit logging, and rotation, rather than depending on someone passing a variable in securely every run',
+      'Because Terraform variables cannot hold string values',
+      'Because data sources run before the GCS backend is configured',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'A team already has a shared GCS backend with built-in locking. What gap still remains for a growing team',
+    options: [
+      'There is no gap left; a shared backend with locking fully solves team workflow',
+      'Locking itself stops working once more than two people are on the team',
+      'There is still no natural review step before a change is applied against shared state, and everyone applying from their own laptop still does not scale well',
+      'GCS backends cannot be shared by more than one engineer at a time',
+    ],
+    answer: 2,
+  },
+];
+
+<Quiz client:visible id="state-management/sensitive-data-and-team-workflows" questions={quizSensitive} />
+
+<ProgressTracker client:visible id="state-management/sensitive-data-and-team-workflows" />

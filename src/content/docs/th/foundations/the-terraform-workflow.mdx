@@ -1,0 +1,146 @@
+---
+title: 'The Terraform Workflow'
+description: 'คำสั่ง init, plan, apply และ destroy, การ save plan ลงไฟล์ก่อน apply และหน้าที่ของ provider dependency lock file'
+sidebar:
+  order: 4
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## ไอเดียในหนึ่งประโยค
+
+สี่คำสั่งครอบคลุมงานที่คุณทำเกือบทุกวัน `terraform init` เตรียม working directory ให้พร้อม `terraform plan` แสดง dry-run diff ให้ดู `terraform apply` รันมันจริง และ `terraform destroy` รื้อทุกอย่างที่ configuration จัดการอยู่ทิ้ง
+
+## init, plan, apply
+
+`terraform init` คือคำสั่งแรกที่คุณรันในทุกไดเรกทอรี และรันอีกครั้งหลังเพิ่ม provider หรือ module ใหม่ มันอ่าน `required_providers` block, ดาวน์โหลด provider plugin ที่ตรงกัน แล้วเตรียม backend ที่เก็บ state ให้พร้อม
+
+```bash
+terraform init
+```
+
+`terraform plan` คือ **dry run** มันอ่าน real GCP state, เทียบกับ configuration ของคุณ แล้วพิมพ์ diff ออกมา คือ resource ไหนจะถูกสร้าง อัปเดต in-place หรือลบ โดยยังไม่เปลี่ยนแปลงอะไรจริง
+
+```bash
+terraform plan
+```
+
+```
+# example output
+Terraform will perform the following actions:
+
+  # google_storage_bucket.reports will be created
+  + resource "google_storage_bucket" "reports" {
+      + name     = "acme-monthly-reports"
+      + location = "US"
+      + id       = (known after apply)
+    }
+
+Plan: 1 to add, 0 to change, 0 to destroy.
+```
+
+`terraform apply` รัน plan จริง มันคำนวณ diff ใหม่อีกครั้ง (ยกเว้นคุณส่ง saved plan file ให้มันตามที่จะพูดถึงด้านล่าง) แสดงให้คุณดู ถามยืนยัน แล้วค่อยเรียก GCP API จริงเพื่อสร้าง อัปเดต หรือลบ resource
+
+```bash
+terraform apply
+```
+
+`terraform destroy` คือด้านตรงข้ามของ apply มันคำนวณ plan เพื่อลบทุก resource ที่ configuration นี้จัดการอยู่ และหลังยืนยันแล้วก็ลบมันทิ้ง
+
+```bash
+terraform destroy
+```
+
+<Mermaid title="The core Terraform workflow, with destroy as a separate path" code={workflowDiagram} />
+
+export const workflowDiagram = `flowchart LR
+  init["terraform init"] --> plan["terraform plan"]
+  plan --> review{"Review the diff"}
+  review --> apply["terraform apply"]
+  apply --> real["Real infrastructure updated"]
+  init -.-> destroy["terraform destroy"]
+  destroy -.-> gone["Managed resources removed"]`;
+
+## Save plan ก่อน apply
+
+`terraform apply` เฉย ๆ จะคำนวณ plan ของตัวเองใหม่ทันทีก่อนรันจริง ระหว่างช่วงเวลาที่คุณ review output ของ `plan` กับตอนที่มีคนรัน `apply` โลกจริงอาจเปลี่ยนไปแล้ว คนอื่น apply การเปลี่ยนแปลงที่ขัดกัน quota ของ GCP เปลี่ยน หรืออะไรก็ได้ plan ที่ `apply` คำนวณใหม่ตอนนั้นอาจไม่ใช่อันเดียวกับที่คุณ review ไปแล้ว
+
+การ save plan ลงไฟล์ปิดช่องว่างนี้ `apply` จะถูกสั่งให้รัน**ตรง**ไฟล์นั้น โดยไม่คำนวณใหม่
+
+```bash
+terraform plan -out=tfplan
+terraform apply tfplan
+```
+
+รูปแบบนี้สำคัญที่สุดใน CI/CD pipeline สามารถรัน `plan -out=tfplan`, โพสต์ diff ให้คน review และรัน `apply tfplan` หลังได้รับ approve เท่านั้น ทำให้มั่นใจได้ว่าสิ่งที่ apply ไปคือสิ่งที่คนอนุมัติเป๊ะ ๆ
+
+## Provider dependency lock file
+
+ตอนที่ `terraform init` resolve version constraint ใน `required_providers` มันจะเขียนเวอร์ชันที่เลือกและ cryptographic checksum ลงใน `.terraform.lock.hcl` ในไดเรกทอรีเดียวกับ configuration ของคุณ
+
+```hcl
+# .terraform.lock.hcl (excerpt — Terraform manages this file's contents)
+provider "registry.terraform.io/hashicorp/google" {
+  version     = "6.12.0"
+  constraints = "~> 6.0"
+  hashes = [
+    "h1:examplehashvaluegeneratedbyterraforminit=",
+  ]
+}
+```
+
+ไฟล์นี้ควร**ถูก commit เข้า version control** มันคือ provider-level analogue ของ `package-lock.json` หรือ `Gemfile.lock` ถ้าไม่มีมัน การรัน `terraform init` แต่ละครั้ง — โน้ตบุ๊กคุณวันนี้ โน้ตบุ๊กเพื่อนร่วมทีมพรุ่งนี้ CI runner สัปดาห์หน้า — อาจ resolve `~> 6.0` ไปคนละ patch release กัน และความต่างเล็ก ๆ ของ behavior ใน provider ก็อาจทำให้เครื่องคนอื่นได้ plan ที่ต่างออกไปโดยไม่มีเหตุผลที่มองเห็น เมื่อ commit lock file ไว้ ทุกครั้งที่ `init` จะติดตั้งเวอร์ชันเดิมเป๊ะ ๆ จนกว่าจะมีคนตั้งใจรัน `terraform init -upgrade` เพื่อขยับ constraint ไปข้างหน้า
+
+<Callout title="สรุปหนึ่งบรรทัด">
+loop ที่ใช้ทุกวันคือ **init** (ติดตั้ง provider, เตรียม backend), **plan** (dry-run diff ไม่เปลี่ยนอะไรจริง), **apply** (รัน plan จริงกับ GCP) และ **destroy** (รื้อทุกอย่างที่จัดการอยู่ทิ้ง) การ save plan ด้วย `plan -out=tfplan` แล้วรัน `apply tfplan` การันตีว่า plan ที่ review ไว้คือสิ่งที่รันจริง และ **`.terraform.lock.hcl`** ที่ commit ไว้ pin เวอร์ชันและ checksum ของ provider ให้ทุกคนในทีมและทุก CI run ได้ provider เดียวกันเป๊ะ ๆ
+</Callout>
+
+export const quizWorkflow = [
+  {
+    q: 'terraform plan ทำอะไรจริง ๆ',
+    options: [
+      'apply การเปลี่ยนแปลงทันทีโดยไม่ถามยืนยัน',
+      'คำนวณและแสดง diff ระหว่าง configuration กับ state จริงแบบ dry run โดยไม่เปลี่ยนแปลง infrastructure ใด ๆ',
+      'ดาวน์โหลด provider plugin',
+      'ลบ resource ทั้งหมดที่ configuration จัดการอยู่',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ทำไมถึงควร save plan ลงไฟล์ด้วย plan -out=tfplan ก่อนรัน apply',
+    options: [
+      'ทำให้ plan รันเร็วขึ้น',
+      'จำเป็นก่อนที่ terraform init จะรันได้',
+      'การันตีว่า plan ที่ review ไว้คือสิ่งที่ถูก apply โดยไม่มีความเสี่ยงที่ apply จะคำนวณ plan ใหม่ที่ต่างออกไปถ้า infrastructure จริงเปลี่ยนไประหว่างนั้น',
+      'อนุมัติ plan ให้อัตโนมัติโดยไม่ต้องยืนยัน',
+    ],
+    answer: 2,
+  },
+  {
+    q: '.terraform.lock.hcl มีไว้ทำอะไร และควร commit เข้า git หรือไม่',
+    options: [
+      'เก็บ credential ที่ sensitive และห้าม commit เด็ดขาด',
+      'บันทึกเวอร์ชันและ checksum ของ provider ที่ init เลือกไว้ ควร commit เพื่อให้ทุกคนในทีมและทุก CI run ได้ provider เดียวกันเป๊ะ ๆ',
+      'เป็นไฟล์ cache ชั่วคราวที่ Terraform ลบเองอัตโนมัติ',
+      'เก็บ Terraform state และควร commit คู่กับ state นั้น',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'terraform destroy ทำอะไร',
+    options: [
+      'ลบแค่ไฟล์ .terraform.lock.hcl เท่านั้น',
+      'คำนวณ plan เพื่อลบทุก resource ที่ configuration จัดการอยู่ และหลังยืนยันแล้วก็ลบมันทิ้ง',
+      'ย้อน configuration file กลับไปเวอร์ชันที่ commit ล่าสุด',
+      'ถอนการติดตั้ง Terraform CLI',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="foundations/the-terraform-workflow" questions={quizWorkflow} />
+
+<ProgressTracker client:visible id="foundations/the-terraform-workflow" />

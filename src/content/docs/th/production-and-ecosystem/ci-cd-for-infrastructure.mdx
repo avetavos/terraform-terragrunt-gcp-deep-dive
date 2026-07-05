@@ -1,0 +1,183 @@
+---
+title: 'CI/CD for Infrastructure'
+description: 'plan กับ apply แม็ปเข้ากับ pull request และ merge ยังไง ทำไม plan ต้อง review ละเอียดกว่า code diff ทั่วไป และ Workload Identity Federation แทนที่ service account key ที่ต้องเก็บระยะยาวใน CI ได้ยังไง'
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## ไอเดียในหนึ่งประโยค
+
+pipeline สำหรับ infrastructure แบบมาตรฐานจะรัน `plan` อัตโนมัติทุกครั้งที่มี pull request ให้คนมา review และเก็บ `apply` ไว้ให้รันหลัง merge เข้า main branch เท่านั้น โดยใช้ credential ของ GCP แบบ short-lived ผ่าน Workload Identity Federation แทนที่การเก็บ service account key ที่ดาวน์โหลดมาไว้ใน CI
+
+## Plan ทุก pull request, apply หลัง merge เท่านั้น
+
+pattern ที่ทีมส่วนใหญ่มาลงตัวตรงกันคือเลียนแบบ CI/CD ของ application code แต่มีจุดต่างสำคัญตรงว่าแต่ละ stage ทำอะไรจริง ๆ
+
+- **Pull request เปิดหรือถูกอัปเดต** → รัน `terraform plan` (หรือ `terragrunt run --all plan` สำหรับ Terragrunt setup แบบหลาย unit) แล้วโพสต์ diff ที่ได้เป็น comment บน pull request ยังไม่มีอะไรใน GCP เปลี่ยนแปลง นี่คือ dry run ที่หน้าที่เดียวคือทำให้ reviewer เห็นการเปลี่ยนแปลงที่เสนอมาก่อนที่ใครจะ approve
+- **Merge เข้า main** → รัน `terraform apply` (หรือ `terragrunt run --all apply`) จาก pipeline เอง ไม่ใช่จาก laptop ของใครสักคน สำหรับ production โดยเฉพาะ step นี้มักถูก gate ด้วย manual approval คือต้องมี reviewer หรือทีมที่มีชื่อระบุมา approve run ใน CI system ก่อนที่ apply job จะเริ่มรันได้ ถึงแม้ plan จะถูก review ไปแล้วตอน pull request ก็ตาม
+
+```yaml
+name: terraform
+
+on:
+  pull_request:
+    paths:
+      - 'infra/**'
+  push:
+    branches:
+      - main
+    paths:
+      - 'infra/**'
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+jobs:
+  plan:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/111122223333/locations/global/workloadIdentityPools/github-pool/providers/github-provider
+          service_account: github-actions-terraform@acme-prod-123456.iam.gserviceaccount.com
+      - uses: hashicorp/setup-terraform@v3
+      - run: terragrunt run --all plan -no-color | tee plan.txt
+      - run: gh pr comment ${{ github.event.pull_request.number }} --body-file plan.txt
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  apply:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/111122223333/locations/global/workloadIdentityPools/github-pool/providers/github-provider
+          service_account: github-actions-terraform@acme-prod-123456.iam.gserviceaccount.com
+      - uses: hashicorp/setup-terraform@v3
+      - run: terragrunt run --all apply --non-interactive
+```
+
+บรรทัด `environment: production` คือตัวที่ทำให้เกิด manual approval gate — GitHub Actions จะกัน `apply` job ไว้จนกว่าคนที่มีสิทธิ์บน environment นั้นจะ approve run นั้น สังเกตว่าไม่มี job ไหนเลยที่ต้อง checkout service account key file ที่ดาวน์โหลดมา ทั้งสอง job authenticate ผ่าน Workload Identity Federation ซึ่งจะอธิบายต่อไป
+
+## ทำไม plan ต้อง review ละเอียดกว่า code diff ทั่วไป
+
+pull request ของ application code ถูก review เรื่อง logic, test, style — worst case คือ bug หลุดไปแล้วค่อย rollback แต่ infrastructure `apply` ทำสิ่งที่ code deploy ทำไม่ได้ คือทำลาย GCP resource ที่มี state จริงแล้วสร้างใหม่ตั้งแต่ต้น บางครั้งแค่เปลี่ยนโค้ดบรรทัดเดียว
+
+Terraform เรียกสิ่งนี้ว่า **forced replacement** argument บาง argument ของ resource บางตัวอัปเดตแบบ in-place ไม่ได้ เปลี่ยนมันแปลว่า provider ไม่มี API call แบบ "แก้ attribute นี้" มีแต่ "ทำลายแล้วสร้างใหม่" อย่าง `name` ของ Cloud SQL instance, `zone` ของ Compute Engine instance หรือ `name` ของ persistent disk ใน configuration บางแบบก็เข้าข่ายนี้ทั้งหมด พอเกิดแบบนี้ `terraform plan` จะติดเครื่องหมาย resource นั้นด้วย `-/+` แทนที่จะเป็น `~` แบบ in-place
+
+```bash
+# terraform plan output — this is the line to stop and read carefully
+  # google_sql_database_instance.main must be replaced
+-/+ resource "google_sql_database_instance" "main" {
+      ~ name             = "app-db" -> "app-db-renamed" # forces replacement
+        database_version = "POSTGRES_15"
+        region           = "us-central1"
+    }
+```
+
+`-/+` บน stateful resource อย่าง database หรือ persistent disk แปลว่าข้อมูลอาจหายจริงหรือ downtime จริงได้ในวินาทีที่มีคน approve run นั้น — resource เก่าหายไปก่อนที่ resource ใหม่จะเกิดขึ้นด้วยซ้ำ นี่คือเหตุผลตรง ๆ ว่าทำไมการ review infrastructure plan จะสแกนผ่าน ๆ ไม่ได้ reviewer ต้องสแกนหาบรรทัด `-/+` โดยเฉพาะแล้วถามว่า replacement นั้นคาดไว้แล้วและปลอดภัยไหม ไม่ใช่แค่อ่าน plan แบบที่อ่าน code diff เพื่อดู style กับ logic
+
+## Credential แบบ short-lived ผ่าน Workload Identity Federation
+
+pipeline รุ่นเก่าเก็บ service account key JSON file ที่ดาวน์โหลดมาไว้เป็น CI secret แล้วชี้ `GOOGLE_APPLICATION_CREDENTIALS` ไปที่ไฟล์นั้นก่อนรันทุกครั้ง key นั้นใช้ได้ทั้ง `plan` และ `apply` เท่า ๆ กัน ซึ่งนั่นแหละคือปัญหา ถ้ามันหลุดออกไปสักครั้ง — จาก log ที่ตั้งค่าผิด, dependency ที่ถูกแฮ็ก, หรือ workflow file ที่ echo environment variable ออกมา — มันจะยังใช้งานได้ต่อไปจนกว่าจะมีใครไปเจอแล้วเพิกถอนเอง เพราะ key แบบนี้ไม่มี expiry ในตัว
+
+current best practice คือแทนที่ key นั้นด้วย **Workload Identity Federation** Workload Identity Pool และ provider ที่ตั้งค่าไว้ใน GCP project จะ trust OIDC token issuer ของ GitHub และ attribute condition บน provider จะอนุญาตแค่ repository กับ branch ที่ระบุไว้เท่านั้นให้ใช้งานได้ `google-github-actions/auth` จะยื่น GitHub identity token แบบ short-lived ที่เซ็นด้วย cryptographic ของ workflow run นั้นให้ provider ตัวนั้น แล้ว provider จะแลกมันเป็น GCP credential แบบชั่วคราวที่ scope ให้ impersonate `service_account` ที่ระบุไว้ — ใช้ได้แค่ตลอดอายุของ job นั้นเท่านั้น ไม่มีอะไรเกินกว่านั้น
+
+```yaml
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud via Workload Identity Federation
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/111122223333/locations/global/workloadIdentityPools/github-pool/providers/github-provider
+          service_account: github-actions-terraform@acme-prod-123456.iam.gserviceaccount.com
+
+      - name: Terraform plan
+        run: terraform plan
+```
+
+ไม่ต้องมี service account key ให้ดาวน์โหลดหรือเก็บเป็น CI secret เลยสักตัว ไม่มีอะไรระยะยาวให้หลุด, หมุนเวียน, หรือลืมดูแลอีกต่อไป `permissions: id-token: write` คือสิ่งที่ทำให้ workflow ขอ identity token นั้นได้ตั้งแต่แรก ถ้าไม่มีบรรทัดนี้ `google-github-actions/auth` จะไม่มีอะไรให้ยื่นให้ Workload Identity Pool provider เลย
+
+<Mermaid title="Pull request เรียก plan ให้ review, merge เข้า main เรียก apply หลัง approval gate, Workload Identity Federation ส่ง credential แบบ short-lived ให้ทั้งคู่" code={cicdPipelineDiagram} />
+
+export const cicdPipelineDiagram = `flowchart LR
+  pr["Pull request"] -->|triggers| plan["terragrunt run --all plan"]
+  plan -->|posted as| comment["PR comment for review"]
+  comment -->|approved and merged| main["Merge to main"]
+  main -->|triggers, gated by approval| apply["terragrunt run --all apply"]
+  wif["Workload Identity Federation"] -->|short-lived credentials| plan
+  wif -->|short-lived credentials| apply`;
+
+<Callout title="สรุปหนึ่งบรรทัด">
+IaC pipeline แบบมาตรฐานรัน **`plan`** ทุก pull request แล้วโพสต์เป็น comment ให้คน review และเก็บ **`apply`** ไว้หลัง merge เข้า main ปกติจะ gate ด้วย manual approval สำหรับ production เพราะ `apply` สามารถทำให้เกิด **forced replacement** (`-/+` ใน plan คือทำลายแล้วสร้างใหม่) แทนที่จะเป็น in-place update ที่ปลอดภัย การ review infrastructure plan เลยต้องสแกนหาบรรทัดพวกนั้นโดยเฉพาะ ไม่ใช่แค่อ่านผ่าน ๆ แบบ code diff และ CI credential ควรมาจาก **Workload Identity Federation** แบบ short-lived (`google-github-actions/auth` แลก GitHub OIDC token เป็น credential ชั่วคราวโดย impersonate service account) แทนที่ service account key JSON file ที่ดาวน์โหลดมาเก็บเป็น CI secret
+</Callout>
+
+export const quizCicdPipeline = [
+  {
+    q: 'ใน IaC CI/CD pipeline แบบมาตรฐาน อะไรควร trigger terraform plan กับ terraform apply',
+    options: [
+      'plan กับ apply ควรรันทุกครั้งที่มี pull request เหมือนกันทั้งคู่',
+      'plan รันอัตโนมัติทุก pull request ที่แตะ infrastructure code เพื่อ review ส่วน apply รันแค่หลัง merge เข้า main มักถูก gate ด้วย approval สำหรับ production',
+      'apply ควรรันบน pull request เพื่อให้การเปลี่ยนแปลง live อยู่แล้วก่อน review',
+      'plan กับ apply ควรรันจาก laptop ของ engineer ด้วยมือทั้งคู่',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ทำไม infrastructure plan ต้อง review ละเอียดกว่า application code diff ทั่วไป',
+    options: [
+      'infrastructure code สั้นกว่าเสมอ เลยใช้เวลา review น้อยกว่าไม่ว่ายังไง',
+      'apply สามารถบังคับ resource replacement คือทำลายแล้วสร้าง stateful resource ใหม่ ซึ่งอาจแปลว่าข้อมูลหายจริงหรือ downtime จริงถ้าไม่จับ -/+ ใน plan ก่อน approve',
+      'terraform plan review ได้แค่คนเดียวเท่านั้น',
+      'application code review กับ infrastructure plan review เหมือนกันทุกอย่างในทางปฏิบัติ',
+    ],
+    answer: 1,
+  },
+  {
+    q: '-/+ ข้าง resource ใน terraform plan output หมายความว่าอะไร',
+    options: [
+      'resource นั้นจะถูก update in-place โดยไม่มี downtime',
+      'resource นั้นต้องถูกทำลายแล้วสร้างใหม่เพราะ argument ที่เปลี่ยนบังคับให้ replace แทนที่จะ update in-place',
+      'Terraform ตัดสินใจไม่ได้ว่า resource เปลี่ยนหรือเปล่า',
+      'resource นั้นจะถูก import จาก infrastructure ที่มีอยู่แล้ว',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ทำไม Workload Identity Federation ถึงดีกว่า service account key JSON file ที่ดาวน์โหลดมาเก็บเป็น CI secret',
+    options: [
+      'Workload Identity Federation ช้ากว่าแต่ปลอดภัยกว่า เลยใช้แค่กับ production',
+      'มันออก credential แบบ short-lived และ scope เฉพาะแต่ละ run โดยให้ CI system แลก identity token ที่ trust ได้เป็น access ชั่วคราวผ่านการ impersonate service account เลยไม่ต้องมี key file ให้ดาวน์โหลด เก็บ หรือหมุนเวียนใน CI อีกเลย',
+      'Workload Identity Federation ทำให้ไม่ต้องมี service account อีกต่อไป',
+      'terraform apply ต้องมี service account key ที่ดาวน์โหลดมาถึงจะทำงานได้',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="production-and-ecosystem/ci-cd-for-infrastructure" questions={quizCicdPipeline} />
+
+<ProgressTracker client:visible id="production-and-ecosystem/ci-cd-for-infrastructure" />

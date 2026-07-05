@@ -1,0 +1,202 @@
+---
+title: 'Count and For Each'
+description: 'สร้าง resource ซ้ำหลายชุดด้วย count และ for_each ปัญหา index เลื่อนที่ทำให้ count เสี่ยงกับ list ที่มีลำดับ และ for expression ต่างจาก for_each meta-argument อย่างไร'
+sidebar:
+  order: 4
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## ไอเดียในหนึ่งประโยค
+
+`count` กับ `for_each` สร้าง resource มากกว่าหนึ่งชุดจาก block เดียวเหมือนกัน แต่ addressing แต่ละชุดต่างกันโดยพื้นฐาน และความต่างนี้เองที่ตัดสินว่าจะเพิ่มหรือลบทีหลังได้ปลอดภัยแค่ไหน
+
+## count — meta-argument แบบตัวเลข
+
+`count` รับจำนวนเต็มแล้วสร้าง resource ที่แทบจะเหมือนกันตามจำนวนนั้น โดย index ตั้งแต่ `0` ถึง `count - 1` ภายใน resource `count.index` บอกตำแหน่งของชุดปัจจุบัน ส่วนภายนอก แต่ละชุดถูก address ด้วย numeric index เดียวกันนี้
+
+```hcl
+variable "instance_count" {
+  type        = number
+  description = "Number of Compute Engine instances to launch"
+  default     = 3
+}
+
+resource "google_compute_instance" "web" {
+  count        = var.instance_count
+  name         = "web-${count.index}"
+  machine_type = "e2-medium"
+  zone         = "us-central1-a"
+
+  boot_disk {
+    initialize_params {
+      image = "debian-cloud/debian-12"
+    }
+  }
+
+  network_interface {
+    network = "default"
+    access_config {}
+  }
+}
+```
+
+ด้วย `instance_count = 3` Terraform สร้าง `google_compute_instance.web[0]`, `web[1]`, และ `web[2]` แต่ละอันถูก address จากภายนอกด้วย index ในวงเล็บนั้น — `google_compute_instance.web[0]` หมายถึงชุดแรกโดยเฉพาะ `web[1]` คือชุดที่สอง เรียงกันไป
+
+## ปัญหา index เลื่อน
+
+จุดอ่อนจริง ๆ ของ `count` คือ identity ของแต่ละชุดไม่มีอะไรมากไปกว่าตำแหน่งของมันใน list สมมติว่าแทนที่จะเป็นตัวเลขธรรมดา `count` ขับเคลื่อนด้วย list ของชื่อ:
+
+```hcl
+variable "instance_names" {
+  type        = list(string)
+  description = "Names of Compute Engine instances to launch"
+  default     = ["web-a", "web-b", "web-c"]
+}
+
+resource "google_compute_instance" "web" {
+  count        = length(var.instance_names)
+  name         = var.instance_names[count.index]
+  machine_type = "e2-medium"
+  zone         = "us-central1-a"
+
+  boot_disk {
+    initialize_params {
+      image = "debian-cloud/debian-12"
+    }
+  }
+
+  network_interface {
+    network = "default"
+    access_config {}
+  }
+}
+```
+
+ตรงนี้ `web[0]` คือ `"web-a"`, `web[1]` คือ `"web-b"`, และ `web[2]` คือ `"web-c"` ทีนี้ลบ `"web-b"` ออกจากกลางๆ list เหลือ `["web-a", "web-c"]` Terraform ไม่เข้าใจว่า `"web-b"` ถูกลบไปโดยเฉพาะ มันเห็นแค่ว่า index `1` ตอนนี้ map ไปหาชื่อที่ต่างจากเดิม และ index `2` ไม่มีอยู่แล้ว plan ที่ Terraform สร้างออกมาคือ destroy `web[2]` (`"web-c"` ตัวเก่าไม่มี index แล้ว) แล้ว destroy กับ recreate `web[1]` ด้วยชื่อใหม่ `"web-c"` ทั้งที่ในความเป็นจริงมีแค่ `"web-b"` ที่ควรถูกแตะต้อง ทุก resource ที่ index เลื่อนจะโดน destroy แล้ว recreate พร้อม downtime, IP address ที่เปลี่ยน, และ disk ที่หายไปตามมา แค่เพราะมันขยับตำแหน่งใน list
+
+## for_each — address ด้วย key ที่ stable ไม่ใช่ตำแหน่ง
+
+`for_each` รับ map หรือ set ของ string แล้วสร้าง resource instance หนึ่งชุดต่อหนึ่ง key โดย address ด้วย key นั้นแทนที่จะเป็น numeric index
+
+```hcl
+variable "instances" {
+  type        = map(string)
+  description = "Map of instance key to machine type"
+  default = {
+    primary   = "e2-medium"
+    secondary = "e2-small"
+    batch     = "e2-standard-2"
+  }
+}
+
+resource "google_compute_instance" "web" {
+  for_each     = var.instances
+  name         = "web-${each.key}"
+  machine_type = each.value
+  zone         = "us-central1-a"
+
+  boot_disk {
+    initialize_params {
+      image = "debian-cloud/debian-12"
+    }
+  }
+
+  network_interface {
+    network = "default"
+    access_config {}
+  }
+}
+```
+
+แต่ละ instance ถูก address จากภายนอกเป็น `google_compute_instance.web["primary"]`, `web["secondary"]`, และ `web["batch"]` ภายใน resource `each.key` คือ key ของ map และ `each.value` คือค่าที่ผูกกับ key นั้น ทีนี้ลบ `"secondary"` ออกจาก map ทั้งหมด Terraform destroy แค่ `google_compute_instance.web["secondary"]` เท่านั้นและไม่แตะอะไรอื่นเลย — `web["primary"]` กับ `web["batch"]` ถูก key ด้วยชื่อของตัวเอง ไม่ใช่ตำแหน่ง เลยไม่ถูกกระทบเลยแม้ key กลางๆ จะหายไป
+
+## for expression — comprehension ไม่ใช่ resource meta-argument
+
+`for` expression คือ comprehension แบบทั่วไปที่แปลง collection หนึ่งเป็นอีก collection หนึ่ง มันไม่เกี่ยวอะไรกับการสร้าง resource หลายชุดโดยตัวมันเอง แค่บังเอิญใช้คำว่า "for" ร่วมกับ `for_each` ซึ่งทำให้คนสับสนกันบ่อย
+
+```hcl
+variable "instance_names" {
+  type        = list(string)
+  description = "Names of Compute Engine instances"
+  default     = ["web-a", "web-b", "web-c"]
+}
+
+locals {
+  # for expression producing a list: transform each name to uppercase
+  upper_names = [for name in var.instance_names : upper(name)]
+
+  # for expression producing a map: build a lookup from name to a derived label
+  name_to_label = { for name in var.instance_names : name => "label-${name}" }
+}
+```
+
+`[for name in var.instance_names : upper(name)]` คือ `for` expression ที่สร้าง list ใหม่ `{ for name in var.instance_names : name => "label-${name}" }` คือ `for` expression ที่สร้าง map ใหม่ ทั้งสองอันไม่ใช่ `for_each` meta-argument บน resource block เลย — `for` expression แปลงข้อมูลที่มีอยู่แล้วให้เป็นข้อมูลอีกแบบ ในขณะที่ `for_each` meta-argument บน resource ตัดสินว่าจะสร้าง resource นั้นกี่ instance และ key อะไร address แต่ละอัน การใช้ `for` expression สร้าง map แล้วส่งต่อให้ `for_each` ของ resource เป็นเรื่องปกติมากและเจอบ่อย
+
+<Mermaid title="count shifts every index after a mid-list removal; for_each only touches the removed key" code={countForEachDiagram} />
+
+export const countForEachDiagram = `flowchart TB
+  subgraph count_case["count with a list"]
+    direction LR
+    c0["web[0] = web-a"] --> c1["web[1] = web-b"] --> c2["web[2] = web-c"]
+    c2 -.remove web-b.-> shift["web[1] destroyed and recreated, web[2] destroyed"]
+  end
+  subgraph foreach_case["for_each with a map"]
+    direction LR
+    f0["web[primary]"] --- f1["web[secondary]"] --- f2["web[batch]"]
+    f1 -.remove secondary.-> untouched["only web[secondary] destroyed, primary and batch undisturbed"]
+  end`;
+
+<Callout title="The one-line takeaway">
+**`count`** สร้าง resource ที่มีเลขกำกับ address ด้วย integer index ธรรมดา (`web[0]`, `web[1]`) — ลบ item ออกจากกลาง list ที่มันอ้างอิงจะทำให้ index ถัดไปทุกตัวเลื่อนลงมาหนึ่งขั้น ทำให้ Terraform destroy แล้ว recreate ทุกชุดที่อยู่หลัง item ที่ลบ ไม่ใช่แค่ชุดเดียวที่ตั้งใจจะลบ **`for_each`** สร้าง resource ที่ address ด้วย map หรือ set key ที่ stable (`web["primary"]`) แทน ลบ key เดียวจะ destroy แค่ resource instance นั้นเท่านั้น key อื่นทุกตัวไม่ถูกกระทบเลย **`for` expression** (`[for x in list : ...]`, `{for k, v in map : k => v}`) เป็นคนละแนวคิดกันเลย — มันคือ comprehension ที่แปลง collection หนึ่งเป็นอีก collection หนึ่ง ต่างจาก `for_each` resource meta-argument แม้คำจะซ้ำกัน
+</Callout>
+
+export const quizCountForEach = [
+  {
+    q: 'เกิดอะไรขึ้นกันแน่เมื่อลบ item กลาง list ที่ขับเคลื่อน resource แบบ count',
+    options: [
+      'Terraform ปฏิเสธที่จะ plan จนกว่า list จะกลับไปมีความยาวเท่าเดิม',
+      'ทุก index หลัง item ที่ลบเลื่อนลงหนึ่งขั้น ทำให้ Terraform destroy แล้ว recreate resource เหล่านั้น ทั้งที่ควรมีแค่หนึ่งชุดที่ถูกลบ',
+      'Terraform เปลี่ยนเลข resource ใหม่ให้อัตโนมัติโดยไม่ destroy หรือ recreate เลย',
+      'มีแค่ item ที่ลบเท่านั้นที่ถูก destroy ส่วน index อื่นไม่ถูกแตะเลย',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ทำไม for_each ถึงหลีกเลี่ยงปัญหา index เลื่อนที่ count มี',
+    options: [
+      'for_each จริงๆ แล้วไม่รองรับการลบ item ออกจาก map เลย',
+      'for_each ใช้ numeric index ภายในเหมือนกันแบบลับๆ เลยมีปัญหาเดียวกัน',
+      'for_each address แต่ละ resource instance ด้วย map หรือ set key ที่ stable ไม่ใช่ตำแหน่ง เลยทำให้ลบ key เดียวกระทบแค่ key นั้น',
+      'for_each recreate ทุก resource ทุกครั้งที่ apply ไม่ว่าจะมีอะไรเปลี่ยนหรือไม่',
+    ],
+    answer: 2,
+  },
+  {
+    q: 'for expression ต่างจาก for_each resource meta-argument อย่างไร',
+    options: [
+      'เป็นชื่อสองชื่อของ feature เดียวกันเป๊ะ ไม่ต่างกันเลย',
+      'for expression คือ comprehension ที่แปลง collection หนึ่งเป็นอีกอัน ส่วน for_each บน resource ตัดสินว่าจะสร้าง resource instance กี่ตัวและ key อะไร',
+      'for expression ใช้ได้แค่ใน variable block เท่านั้น ใช้ใน locals ไม่ได้',
+      'for_each meta-argument ใช้ได้แค่กับ list เท่านั้น ใช้กับ map ไม่ได้',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'resource instance แต่ละตัวถูก address อย่างไรเมื่อใช้ for_each กับ map',
+    options: [
+      'ด้วย numeric index เริ่มจากศูนย์อย่าง web[0]',
+      'ด้วย map key อย่าง web["primary"]',
+      'ด้วยตำแหน่งในไฟล์ Terraform configuration เท่านั้น',
+      'for_each ไม่รองรับการ address แต่ละ instance แยกกันเลย',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="variables-and-data-flow/count-and-for-each" questions={quizCountForEach} />
+
+<ProgressTracker client:visible id="variables-and-data-flow/count-and-for-each" />

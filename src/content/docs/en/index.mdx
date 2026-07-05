@@ -1,0 +1,60 @@
+---
+title: Terraform & Terragrunt for GCP — From Zero to Hero
+description: Master Terraform and Terragrunt on Google Cloud from first principles — HCL, providers, resources and the dependency graph, remote state and locking, variables and modules, multi-environment patterns, Terragrunt DRY configuration and dependencies, and running infrastructure as code in production with CI/CD and policy as code.
+template: splash
+hero:
+  tagline: A standalone, developer-focused course on Terraform and Terragrunt, targeting Google Cloud. From HCL and the Terraform workflow to remote state, modules, multi-environment design, and Terragrunt's DRY configuration and dependency ordering — taught through real HCL, the CLI, and diagrams.
+  actions:
+    - text: Start here
+      link: /terraform-gcp/en/foundations/
+      icon: right-arrow
+      variant: primary
+    - text: Jump to State Management
+      link: /terraform-gcp/en/state-management/the-state-file/
+      icon: open-book
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+## What you'll learn
+
+<CardGrid>
+  <Card title="Foundations" icon="rocket">
+    Infrastructure as Code, HCL syntax, providers and resources, the dependency graph, and the init/plan/apply workflow. [Start →](/terraform-gcp/en/foundations/)
+  </Card>
+  <Card title="State Management" icon="seti:config">
+    The state file, remote backends and locking, drift detection and import, and sensitive data in state. [Manage state →](/terraform-gcp/en/state-management/the-state-file/)
+  </Card>
+  <Card title="Variables & Data Flow" icon="seti:html">
+    Input variables, outputs and locals, expressions and functions, and count vs for_each. [Wire it up →](/terraform-gcp/en/variables-and-data-flow/input-variables/)
+  </Card>
+  <Card title="Modules" icon="puzzle">
+    Writing reusable modules, composition and sources, versioning, and testing with `terraform test`. [Compose →](/terraform-gcp/en/modules/writing-a-reusable-module/)
+  </Card>
+  <Card title="Multi-Environment" icon="random">
+    The dev/staging/prod problem, Terraform workspaces, the directory-per-environment pattern, and why Terragrunt exists. [Scale out →](/terraform-gcp/en/multi-environment/the-multi-environment-problem/)
+  </Card>
+  <Card title="Terragrunt Fundamentals" icon="seti:plan">
+    `root.hcl`, DRY configuration with `include`, `dependency` blocks between units, and running many units at once. [Go DRY →](/terraform-gcp/en/terragrunt-fundamentals/terragrunt-hcl-and-the-root-config/)
+  </Card>
+  <Card title="Production & Ecosystem" icon="approve-check">
+    CI/CD for infrastructure, policy as code and static analysis, secrets and credentials, and a production checklist. [Ship it →](/terraform-gcp/en/production-and-ecosystem/ci-cd-for-infrastructure/)
+  </Card>
+</CardGrid>
+
+## How this course works
+
+<CardGrid>
+  <Card title="The model first, then the HCL" icon="rocket">
+    Every topic starts from a model — the dependency graph, the state file, the DRY problem Terragrunt solves — so Terraform's behavior becomes mechanism you understand, not HCL you copy-paste.
+  </Card>
+  <Card title="Current practice, verified" icon="random">
+    Written against current Terraform and Terragrunt practice and checked against the official docs via context7 — including Terragrunt's `run --all` CLI redesign that many older tutorials still get wrong.
+  </Card>
+  <Card title="Real GCP, real tradeoffs" icon="approve-check">
+    Not "here's a resource block" but "here's what remote state actually buys you, and where a shared workspace's isolation still breaks down." You'll reason about infrastructure changes with confidence.
+  </Card>
+  <Card title="Diagrams that explain" icon="puzzle">
+    The dependency graph, the Terraform workflow, state locking, and Terragrunt's unit dependency ordering as theme-aware Mermaid diagrams. Bilingual (English / ไทย) with saved quiz progress.
+  </Card>
+</CardGrid>

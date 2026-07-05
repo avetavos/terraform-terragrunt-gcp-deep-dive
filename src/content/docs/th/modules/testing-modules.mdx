@@ -1,0 +1,144 @@
+---
+title: 'Testing Modules'
+description: 'ความแตกต่างระหว่าง terraform validate, terraform plan และ terraform test พร้อมตัวอย่างไฟล์ tftest.hcl สำหรับ module gcs-bucket'
+sidebar:
+  order: 4
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## The idea in one sentence
+
+`terraform validate`, `terraform plan` และ `terraform test` แต่ละตัวตรวจสอบคนละเรื่องกันจริง ๆ — syntax, diff ของโลกจริง และ behavior ที่ถูก assert จริง — การผ่านตัวหนึ่งไม่ได้แปลว่าอีกตัวจะผ่านด้วย
+
+## สามระดับความมั่นใจที่ต่างกัน
+
+มันน่าเผลอคิดว่า `validate`, `plan` และ `test` เป็นสามวิธีที่ถามคำถามเดียวกัน แต่จริง ๆ แล้วมันตรวจคนละเรื่องกัน และแต่ละตัวจับ mistake คนละแบบที่อีกสองตัวจับไม่ได้เลย
+
+`terraform validate` ตรวจว่า HCL ของคุณ syntax ถูกต้องและ consistent กันภายใน — ว่า `variable` ทุกตัวที่ถูกอ้างอิงมีอยู่จริง type ตรงกัน argument ที่ required ครบ ที่สำคัญคือ `validate` ไม่เคยคุยกับ GCP เลย มันไม่มี credential ไม่เรียก API ไหนเลย และบอกไม่ได้ว่า `project_id` เป็นของจริงหรือ account ของคุณมีสิทธิ์สร้าง `google_storage_bucket` หรือเปล่า
+
+```bash
+terraform validate
+# Success! The configuration is valid.
+```
+
+`terraform plan` ไปไกลกว่านั้น มัน authenticate เข้า GCP API จริง อ่าน state ปัจจุบันของ resource ที่มีอยู่ และคำนวณ diff ว่าอะไรจะเปลี่ยน นี่จับ error กลุ่มที่ `validate` จับไม่ได้เลย — ค่า `location` ที่ API ปฏิเสธ, `project_id` ที่ credential ของคุณเข้าไม่ถึง, quota ที่เกิน แต่ `plan` ก็ยังไม่ได้ assert อะไรเลยว่าผลลัพธ์ถูกต้องตามที่คุณตั้งใจไว้ มันแค่โชว์ให้ดูว่าจะเกิดอะไรขึ้น
+
+```bash
+terraform plan
+# google_storage_bucket.this will be created
+#   + name     = "acme-app-logs"
+#   + location = "US"
+```
+
+`terraform test` เป็นตัวเดียวในสามตัวที่ assert behavior ที่คาดหวังไว้จริง ๆ — ว่าชื่อ bucket ตรงกับที่คุณส่งเข้าไปจริงไหม output ตัวหนึ่งมีค่าตรงกับที่คาดไว้จริงไหม การผ่าน `validate` หรือแม้แต่ `plan` ที่ clean บอกแค่ว่า configuration well-formed และ GCP ยอมรับมัน ไม่มีตัวไหนบอกว่า module ตัวนี้ทำงานตามที่คุณออกแบบไว้จริงหรือเปล่า
+
+## native test framework ของ Terraform
+
+native test framework ของ Terraform ที่เปิดตัวใน Terraform 1.6 รันไฟล์ `.tftest.hcl` ผ่านคำสั่ง `terraform test` ไฟล์ test หนึ่งไฟล์มี `variables` block ระดับบนสุดสำหรับค่า input เฉพาะของ test และมี `run` block หนึ่งตัวขึ้นไป แต่ละตัวมี `assert` block หนึ่งตัวขึ้นไปที่มี `condition` expression กับ `error_message` ที่จะโชว์เมื่อ condition นั้นเป็นเท็จ
+
+```hcl
+# tests/gcs_bucket.tftest.hcl
+variables {
+  bucket_name = "acme-app-logs-test"
+  project_id  = "acme-app-test"
+}
+
+run "bucket_name_matches_input" {
+  command = plan
+
+  assert {
+    condition     = google_storage_bucket.this.name == var.bucket_name
+    error_message = "Bucket name did not match the bucket_name input variable"
+  }
+}
+```
+
+ตัวอย่างนี้ test module `gcs-bucket` จากก่อนหน้านี้ในโมดูลนี้ มัน assert ว่า resource ของ bucket ข้างใน module ได้ `name` ตรงกับที่ caller ส่งเข้ามาเป็น `bucket_name` เป๊ะ ไม่ใช่แค่ว่า configuration syntax ถูกต้อง หรือ GCP ยอมรับมันเท่านั้น
+
+## command = plan เทียบกับ command = apply
+
+ทุก `run` block มี `command` argument และการเลือกระหว่างสองค่าของมันคือ tradeoff จริง ไม่ใช่แค่พิธีการ `command = plan` คำนวณ plan แล้ว assert กับค่าที่ plan ไว้ โดยไม่สร้าง resource จริงเลยแม้แต่ตัวเดียว มันเร็ว ฟรี และรันได้ทุก commit อย่างปลอดภัย นี่คือเหตุผลที่มันควรครอบคลุม test case ส่วนใหญ่ของคุณ
+
+```hcl
+run "bucket_name_matches_input" {
+  command = plan
+
+  assert {
+    condition     = google_storage_bucket.this.name == var.bucket_name
+    error_message = "Bucket name did not match the bucket_name input variable"
+  }
+}
+```
+
+`command = apply` สร้าง resource จริงใน GCP จริง ๆ assert กับ attribute ที่เกิดขึ้นจริงของมัน แล้ว teardown ทุกอย่างทิ้งตอนท้ายไฟล์ test นี่คือ integration testing ของจริง — มันจับสิ่งที่ plan-only test จับไม่ได้ เช่น naming collision ที่ GCP API ปฏิเสธเฉพาะตอน apply เท่านั้น — แต่มันช้ากว่าและเสียค่าใช้จ่าย cloud resource จริงชั่วครู่ ดังนั้นควรเลือกใช้มันอย่างตั้งใจ ไม่ใช่ใช้เป็น default
+
+```hcl
+run "bucket_actually_created" {
+  command = apply
+
+  assert {
+    condition     = google_storage_bucket.this.url != ""
+    error_message = "Bucket was not actually created in GCP"
+  }
+}
+```
+
+<Mermaid title="Three levels of confidence: terraform validate, terraform plan, and terraform test" code={testingLevelsDiagram} />
+
+export const testingLevelsDiagram = `flowchart LR
+  v["terraform validate: HCL syntax and internal consistency only"] --> p["terraform plan: talks to the real GCP API, shows the diff"] --> t["terraform test: asserts specific expected behavior via .tftest.hcl"]`;
+
+<Callout title="The one-line takeaway">
+`terraform validate`, `terraform plan` และ `terraform test` ตรวจสามเรื่องที่ต่างกัน และไม่มีตัวไหนแทนที่กันได้ `validate` ตรวจแค่ **HCL syntax และ internal consistency** โดยไม่เคยคุยกับ GCP เลย `plan` คุยกับ **GCP API** จริงและโชว์ diff แต่ไม่ assert ว่าอะไรถูกต้อง ส่วน `terraform test` เป็นตัวเดียวที่ **assert** behavior ที่คาดหวังไว้จริง ๆ ผ่านไฟล์ `.tftest.hcl` ที่มี `variables`, `run` block และ `assert` condition ภายใน `run` block `command = plan` assert กับ plan ที่คำนวณไว้อย่างเร็วและไม่มีค่าใช้จ่าย ส่วน `command = apply` สร้างและทำลาย resource จริงเพื่อ integration testing ของจริง การผ่าน `validate` หรือแม้แต่ `plan` ที่ clean ไม่ใช่หลักฐานว่า module ทำงานได้ — มีแค่ `test` ที่ assert กับ behavior จริงเท่านั้นที่เป็นหลักฐานนั้น
+</Callout>
+
+export const quizTestingModules = [
+  {
+    q: 'terraform validate ตรวจอะไรได้ และตรวจอะไรไม่ได้เลย',
+    options: [
+      'มันตรวจว่า GCP ยอมรับทุกค่า แต่ตรวจ HCL syntax ไม่ได้',
+      'มันตรวจ HCL syntax และ internal configuration consistency เท่านั้น และไม่เคยคุยกับ GCP เลย',
+      'มันตรวจ attribute จริงของ resource หลังสร้างเสร็จ แต่ไม่ตรวจ syntax',
+      'มันตรวจทั้ง syntax และ live GCP state เหมือนกับ terraform plan เป๊ะ',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ใน tftest.hcl run block ความต่างระหว่าง command = plan กับ command = apply คืออะไร',
+    options: [
+      'ไม่มีความต่างเลย ทั้งคู่สร้าง resource จริง',
+      'command = plan ใช้ได้แค่กับ resource ของ GCP ส่วน command = apply ใช้ได้แค่กับ provider อื่น',
+      'command = plan assert กับ plan ที่คำนวณไว้โดยไม่สร้าง resource จริง ส่วน command = apply สร้างและทำลาย resource จริงเพื่อ integration testing ของจริง',
+      'command = apply เร็วกว่าเพราะข้าม assert block ไปเลย',
+    ],
+    answer: 2,
+  },
+  {
+    q: 'ทำไมการผ่าน terraform validate ไม่ได้แปลว่า module ทำงานได้จริงกับ GCP จริง',
+    options: [
+      'validate เหมือนกับ test เป๊ะ ดังนั้นผ่านตัวหนึ่งแปลว่าผ่านอีกตัวเสมอ',
+      'validate ไม่เคยติดต่อ GCP API เลย จึงจับค่าที่ถูกปฏิเสธ, quota ที่เกิน หรือผลลัพธ์ที่ผิดซึ่ง API เผยให้เห็นแค่ตอน plan หรือ apply ไม่ได้',
+      'validate ใช้ได้แค่กับ resource ของ AWS ไม่ใช่ GCP',
+      'validate จะ fail เสมอถ้ายังไม่มี resource จริงอยู่ก่อน',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'assert block ภายใน run block ต้องมีอะไรบ้าง',
+    options: [
+      'condition expression กับ error_message ที่โชว์เมื่อ condition นั้นเป็นเท็จ',
+      'มีแค่ command argument อย่างเดียว ไม่มีอย่างอื่น',
+      'ไฟล์ tf แยกต่างหากสำหรับทุก assertion',
+      'provider block ที่ define GCP provider ใหม่',
+    ],
+    answer: 0,
+  },
+];
+
+<Quiz client:visible id="modules/testing-modules" questions={quizTestingModules} />
+
+<ProgressTracker client:visible id="modules/testing-modules" />

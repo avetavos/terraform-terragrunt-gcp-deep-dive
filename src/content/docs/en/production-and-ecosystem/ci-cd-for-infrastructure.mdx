@@ -1,0 +1,183 @@
+---
+title: 'CI/CD for Infrastructure'
+description: 'How plan and apply map onto pull requests and merges, why a plan needs sharper review than a code diff, and how Workload Identity Federation replaces long-lived service account keys in CI.'
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## The idea in one sentence
+
+A standard infrastructure pipeline runs `plan` automatically on every pull request for a human to review, and reserves `apply` for after merge to the main branch — using short-lived, Workload-Identity-Federated GCP credentials instead of a downloaded service account key stored in CI.
+
+## Plan on every pull request, apply only after merge
+
+The pattern most teams converge on mirrors application CI/CD, with one important difference in what each stage actually does:
+
+- **Pull request opened or updated** → run `terraform plan` (or `terragrunt run --all plan` for a multi-unit Terragrunt setup) and post the resulting diff as a comment on the pull request. Nothing in GCP changes yet — this is a dry run whose only job is to make the proposed change visible to a reviewer before anyone approves it.
+- **Merge to main** → run `terraform apply` (or `terragrunt run --all apply`) from the pipeline itself, not from anyone's laptop. For production specifically, this step is frequently gated behind a manual approval — a named reviewer or team has to approve the run in the CI system before the apply job is allowed to start, even though the plan was already reviewed at the pull-request stage.
+
+```yaml
+name: terraform
+
+on:
+  pull_request:
+    paths:
+      - 'infra/**'
+  push:
+    branches:
+      - main
+    paths:
+      - 'infra/**'
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+jobs:
+  plan:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/111122223333/locations/global/workloadIdentityPools/github-pool/providers/github-provider
+          service_account: github-actions-terraform@acme-prod-123456.iam.gserviceaccount.com
+      - uses: hashicorp/setup-terraform@v3
+      - run: terragrunt run --all plan -no-color | tee plan.txt
+      - run: gh pr comment ${{ github.event.pull_request.number }} --body-file plan.txt
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  apply:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/111122223333/locations/global/workloadIdentityPools/github-pool/providers/github-provider
+          service_account: github-actions-terraform@acme-prod-123456.iam.gserviceaccount.com
+      - uses: hashicorp/setup-terraform@v3
+      - run: terragrunt run --all apply --non-interactive
+```
+
+The `environment: production` line is what supplies the manual approval gate — GitHub Actions holds the `apply` job until someone with permission on that environment approves the run. Notice that neither job ever checks out a downloaded service account key file; both authenticate through Workload Identity Federation, covered next.
+
+## Why a plan deserves sharper review than a typical code diff
+
+A pull request against application code is reviewed for logic, tests, and style — worst case, a bug ships and gets rolled back. An infrastructure `apply` can do something a code deploy cannot: destroy real, stateful GCP resources and rebuild them from scratch, sometimes because of a single one-line change.
+
+Terraform calls this a **forced replacement**. Certain arguments on certain resources cannot be updated in place — changing them means the provider has no API call for "modify this attribute," only "destroy and create a new one." A Cloud SQL instance's `name`, a Compute Engine instance's `zone`, or a persistent disk's `name` in some configurations all fall into this category. When that happens, `terraform plan` marks the resource with `-/+` instead of the in-place `~`:
+
+```bash
+# terraform plan output — this is the line to stop and read carefully
+  # google_sql_database_instance.main must be replaced
+-/+ resource "google_sql_database_instance" "main" {
+      ~ name             = "app-db" -> "app-db-renamed" # forces replacement
+        database_version = "POSTGRES_15"
+        region           = "us-central1"
+    }
+```
+
+A `-/+` on a stateful resource like a database or a persistent disk can mean real data loss or real downtime the moment someone approves the run — the old resource is gone before the new one exists. This is exactly why reviewing an infrastructure plan cannot be a skim. A reviewer has to specifically scan for `-/+` lines and ask whether that replacement is expected and safe, not just read the plan the way they would read a code diff for style and logic.
+
+## Short-lived credentials via Workload Identity Federation
+
+Older pipelines stored a downloaded service account key JSON file as a CI secret and pointed `GOOGLE_APPLICATION_CREDENTIALS` at it before every run. That key works for `plan` and `apply` equally well, which is exactly the problem: if it ever leaks — from a misconfigured log, a compromised dependency, or a workflow file that echoes environment variables — it keeps working until someone manually finds and revokes it, since the key has no built-in expiry.
+
+Current best practice replaces that key with **Workload Identity Federation**. A Workload Identity Pool and provider configured in the GCP project trusts GitHub's OIDC token issuer, and an attribute condition on the provider allows only specific repositories and branches to use it. `google-github-actions/auth` presents the workflow run's short-lived, cryptographically signed GitHub identity token to that provider, which exchanges it for temporary GCP credentials scoped to impersonate the `service_account` you name — valid for the lifetime of the job and nothing beyond it.
+
+```yaml
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud via Workload Identity Federation
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/111122223333/locations/global/workloadIdentityPools/github-pool/providers/github-provider
+          service_account: github-actions-terraform@acme-prod-123456.iam.gserviceaccount.com
+
+      - name: Terraform plan
+        run: terraform plan
+```
+
+No service account key ever needs to be downloaded or stored as a CI secret at all — there is nothing long-lived to leak, rotate, or forget about. `permissions: id-token: write` is what allows the workflow to request that identity token in the first place; without it, `google-github-actions/auth` has nothing to present to the Workload Identity Pool provider.
+
+<Mermaid title="A pull request triggers plan for review; merge to main triggers apply behind an approval gate; Workload Identity Federation supplies short-lived credentials to both" code={cicdPipelineDiagram} />
+
+export const cicdPipelineDiagram = `flowchart LR
+  pr["Pull request"] -->|triggers| plan["terragrunt run --all plan"]
+  plan -->|posted as| comment["PR comment for review"]
+  comment -->|approved and merged| main["Merge to main"]
+  main -->|triggers, gated by approval| apply["terragrunt run --all apply"]
+  wif["Workload Identity Federation"] -->|short-lived credentials| plan
+  wif -->|short-lived credentials| apply`;
+
+<Callout title="The one-line takeaway">
+A standard IaC pipeline runs **`plan`** on every pull request and posts it as a comment for human review, and reserves **`apply`** for after merge to main, typically behind a manual approval gate for production; because an `apply` can trigger a **forced replacement** (`-/+` in the plan — destroy then recreate) rather than a safe in-place update, reviewing an infrastructure plan requires specifically scanning for those lines, not just skimming it like a code diff; and CI credentials should come from short-lived **Workload Identity Federation** (`google-github-actions/auth` exchanging a GitHub OIDC token for temporary credentials by impersonating a service account) rather than a downloaded service account key JSON file stored as a CI secret.
+</Callout>
+
+export const quizCicdPipeline = [
+  {
+    q: 'In a standard IaC CI/CD pipeline, what should trigger terraform plan versus terraform apply',
+    options: [
+      'Both plan and apply should run on every pull request',
+      'plan runs automatically on every pull request touching infrastructure code for review; apply runs only after merge to main, often behind an approval gate for production',
+      'apply should run on pull requests so changes are already live before review',
+      'plan and apply should both be run manually from an engineer laptop',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why does an infrastructure plan need more careful review than a typical application code diff',
+    options: [
+      'Infrastructure code is always shorter, so review takes less time regardless',
+      'An apply can force a resource replacement, destroying and recreating a stateful resource, which can mean real data loss or downtime if the -/+ in the plan is not caught before approval',
+      'Terraform plans cannot be reviewed by more than one person',
+      'Application code review and infrastructure plan review are functionally identical',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does a -/+ next to a resource in terraform plan output mean',
+    options: [
+      'The resource will be updated in place with no downtime',
+      'The resource must be destroyed and recreated because a changed argument forces replacement rather than an in-place update',
+      'Terraform could not determine whether the resource changed',
+      'The resource will be imported from existing infrastructure',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why is Workload Identity Federation preferred over a downloaded service account key JSON file stored as a CI secret',
+    options: [
+      'Workload Identity Federation is slower but more secure, so it is only used for production',
+      'It issues short-lived, scoped credentials for each run by having the CI system exchange a trusted identity token for temporary access while impersonating a service account, so no static key file ever needs to be downloaded, stored, or rotated in CI',
+      'Workload Identity Federation removes the need for a service account entirely',
+      'A downloaded service account key is required for terraform apply to work at all',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="production-and-ecosystem/ci-cd-for-infrastructure" questions={quizCicdPipeline} />
+
+<ProgressTracker client:visible id="production-and-ecosystem/ci-cd-for-infrastructure" />

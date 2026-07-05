@@ -1,0 +1,216 @@
+---
+title: 'HCL, Providers, and Resources'
+description: 'HCL block syntax, the terraform and provider blocks, resource versus data blocks, and how Terraform builds a dependency graph.'
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## The idea in one sentence
+
+Every piece of Terraform configuration is a **block** written in HCL — `terraform`, `provider`, `resource`, and `data` are the four you will write constantly, and together they tell Terraform what plugins to load, how to talk to GCP, what to create, and what to read.
+
+## HCL block syntax
+
+HCL (HashiCorp Configuration Language) is built from blocks. The general shape is a block type, zero or more quoted labels, and a body of arguments in braces:
+
+```hcl
+block_type "label1" "label2" {
+  argument = value
+}
+```
+
+A `resource` block, for instance, takes two labels; a `provider` block takes one. Comments use `#` or `//` for a single line, and `/* */` for a multi-line block. Strings support interpolation with `${...}`, though referencing another value directly (`name = google_storage_bucket.reports.name`) does not need the `${}` wrapper — that syntax is only needed inside a larger string.
+
+```hcl
+# A single-line comment.
+// Also a single-line comment.
+
+resource "google_storage_bucket" "reports" {
+  name = "acme-monthly-reports-${var.environment}" # interpolation inside a string
+}
+```
+
+## The `terraform` and `provider` blocks
+
+The `terraform` block configures Terraform itself: which version of Terraform is allowed to run this configuration, and which providers it needs — including where each provider comes from and which versions are acceptable.
+
+```hcl
+terraform {
+  required_version = ">= 1.7.0"
+
+  required_providers {
+    google = {
+      source  = "hashicorp/google"
+      version = "~> 6.0"
+    }
+  }
+}
+```
+
+`source` is the provider's registry address (`hashicorp/google` resolves to the official Google Cloud provider on the Terraform Registry), and `version` is a constraint, not a pin — `~> 6.0` allows any `6.x` release.
+
+The `provider` block then configures one instance of a provider you declared above — for GCP, this is where the project and region (and, in real projects, things like credentials) live:
+
+```hcl
+provider "google" {
+  project = "acme-app"
+  region  = "us-central1"
+}
+```
+
+## `resource` blocks: the two labels that matter
+
+A `resource` block is how you tell Terraform "this thing should exist." It always has two labels:
+
+```hcl
+resource "google_compute_instance" "web" {
+  name         = "web-vm"
+  machine_type = "e2-medium"
+  zone         = "us-central1-a"
+
+  boot_disk {
+    initialize_params {
+      image = "debian-cloud/debian-12"
+    }
+  }
+
+  network_interface {
+    network = "default"
+  }
+}
+```
+
+- The first label, `google_compute_instance`, is the resource **type** — defined by the provider, and it determines which arguments are valid and which GCP API Terraform calls.
+- The second label, `web`, is a **name** you choose — it only has meaning inside this configuration.
+
+Together they form the resource's **address**, `google_compute_instance.web`, which is how you reference this resource's attributes anywhere else in your configuration — for example, `google_compute_instance.web.id` or `google_compute_instance.web.self_link`.
+
+## `data` blocks: reading without owning
+
+A `data` block reads information about something that already exists — infrastructure this configuration does not manage and will never create, update, or destroy. It is Terraform's read-only lookup.
+
+```hcl
+data "google_compute_image" "debian" {
+  family  = "debian-12"
+  project = "debian-cloud"
+}
+
+resource "google_compute_instance" "web" {
+  name         = "web-vm"
+  machine_type = "e2-medium"
+  zone         = "us-central1-a"
+
+  boot_disk {
+    initialize_params {
+      image = data.google_compute_image.debian.self_link
+    }
+  }
+
+  network_interface {
+    network = "default"
+  }
+}
+```
+
+`data.google_compute_image.debian.self_link` reads exactly like a resource address, with `data.` in front — the type and name labels work the same way, but nothing about a `data` block ever shows up as a create, update, or destroy in a plan. It only ever reads.
+
+## The dependency graph
+
+Terraform does not apply your configuration top to bottom the way it is written. Instead, it builds a **DAG** (directed acyclic graph) of every resource and data source, and uses it to work out the correct order — and which resources are independent enough to be created **in parallel**.
+
+Edges in that graph come from two places:
+
+- **Implicit dependencies** — whenever one resource's argument references another resource's attribute (like `google_compute_subnetwork.app` referencing `google_compute_network.vpc.id`, or an instance referencing a subnetwork's ID), Terraform infers that the referenced resource must exist first.
+- **Explicit dependencies** — `depends_on` on a resource, used when one resource genuinely depends on another but that relationship is not visible through any attribute reference (for example, an IAM binding that must exist before an application starts relying on it, with no direct argument linking the two).
+
+```hcl
+resource "google_compute_network" "vpc" {
+  name                    = "app-network"
+  auto_create_subnetworks = false
+}
+
+resource "google_compute_subnetwork" "app" {
+  name          = "app-subnet"
+  ip_cidr_range = "10.0.1.0/24"
+  region        = "us-central1"
+  network       = google_compute_network.vpc.id # implicit dependency on google_compute_network.vpc
+}
+
+resource "google_compute_instance" "web" {
+  name         = "web-vm"
+  machine_type = "e2-medium"
+  zone         = "us-central1-a"
+
+  boot_disk {
+    initialize_params {
+      image = data.google_compute_image.debian.self_link
+    }
+  }
+
+  network_interface {
+    subnetwork = google_compute_subnetwork.app.id # implicit dependency on google_compute_subnetwork.app
+  }
+}
+```
+
+<Mermaid title="Terraform builds a DAG from references, applying independent branches in parallel" code={dagDiagram} />
+
+export const dagDiagram = `flowchart LR
+  network["google_compute_network.vpc"] --> subnet["google_compute_subnetwork.app"] --> instance["google_compute_instance.web"]
+  bucket["google_storage_bucket.logs (unrelated, applies in parallel)"]`;
+
+<Callout title="The one-line takeaway">
+HCL configuration is made of **blocks**: `terraform` declares required providers and versions, `provider` configures how Terraform talks to GCP, `resource` blocks (identified by a **type** and a chosen **name**, together forming an **address**) declare things Terraform should create and manage, and `data` blocks only **read** existing infrastructure without owning it; Terraform builds a **dependency graph (DAG)** from implicit references and explicit `depends_on`, applying independent resources in parallel.
+</Callout>
+
+export const quizHcl = [
+  {
+    q: 'In `resource "google_compute_instance" "web" { ... }`, what do the two labels represent',
+    options: [
+      'Both labels are arbitrary names with no special meaning',
+      'The first label is the resource type (defined by the provider); the second is a name you choose, and together they form the resource address',
+      'The first label is the GCP region, the second is the zone',
+      'The first label is the provider name, the second is the resource type',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is the key difference between a resource block and a data block',
+    options: [
+      'A data block is just a resource block with a different name',
+      'A resource block declares something Terraform creates and manages; a data block only reads information about existing infrastructure without creating, updating, or destroying it',
+      'Data blocks can only be used with the Google provider',
+      'Resource blocks cannot be referenced elsewhere in the configuration',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'How does Terraform decide the order in which to create resources',
+    options: [
+      'Strictly top to bottom, in the order they appear in the file',
+      'Alphabetically by resource name',
+      'It builds a dependency graph (DAG) from implicit attribute references and explicit depends_on, then orders and parallelizes accordingly',
+      'It always creates every resource at exactly the same time',
+    ],
+    answer: 2,
+  },
+  {
+    q: 'Which correctly describes the terraform block required_providers argument',
+    options: [
+      'It sets the GCP region for all resources',
+      'It specifies each provider needed, including its registry source and an acceptable version constraint',
+      'It lists every resource type used in the configuration',
+      'It is only needed when using data blocks',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="foundations/hcl-providers-and-resources" questions={quizHcl} />
+
+<ProgressTracker client:visible id="foundations/hcl-providers-and-resources" />

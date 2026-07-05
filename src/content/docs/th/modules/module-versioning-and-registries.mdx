@@ -1,0 +1,128 @@
+---
+title: 'Module Versioning and Registries'
+description: 'ทำไมการ pin version ของ module ถึงสำคัญ ความหมายของ pessimistic constraint operator และเมื่อไหร่ที่ควรใช้ private module source แทน public Registry'
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## The idea in one sentence
+
+**`version`** constraint บน module บอกว่า release ไหนของ Registry module หรือ Git-tagged module ที่ Terraform ได้รับอนุญาตให้ resolve ด้วยเหตุผลเดียวกับที่ version constraint ของ provider สำคัญ — ถ้าไม่มีมัน `terraform init -upgrade` ธรรมดา ๆ ครั้งหนึ่งอาจดึง module release ใหม่ที่มี breaking change เข้ามาโดยไม่มีใคร review ก่อนเลย
+
+## ทำไมการ pin version ของ module ถึงสำคัญ
+
+นี่คือปัญหาเดียวกับที่ provider dependency lock file แก้ไข แค่ขยับขึ้นมาอีกชั้นหนึ่ง เมื่อ `module` block ดึง source มาจาก public Registry หรือ Git tag โดยไม่มี `version` constraint Terraform จะ resolve release ล่าสุดที่มีอยู่ทุกครั้งที่ `init` รันแบบ cold — clone ใหม่ใน CI, laptop เครื่องใหม่, cache ที่ถูกสร้างใหม่ ถ้าคนเขียน module ปล่อย breaking change มาใน release ใหม่นั้น — variable ที่เปลี่ยนชื่อ, default ที่ต่างไป, resource ที่ตอนนี้ต้อง replace แทนที่จะ update — มันจะถูกดึงเข้ามาแล้ว apply โดยไม่มีใครในทีมได้อ่าน changelog ของ module นั้นก่อนเลย
+
+```hcl
+module "vpc" {
+  source = "terraform-google-modules/network/google"
+  # no version constraint — always resolves to the latest release
+
+  project_id   = var.project_id
+  network_name = "app-network"
+}
+```
+
+การ pin `version` เปลี่ยนเรื่องนี้ให้เป็นการตัดสินใจที่จงใจและ review ได้ แทนที่จะเป็นสิ่งที่เกิดขึ้นเองโดยบังเอิญ
+
+```hcl
+module "vpc" {
+  source  = "terraform-google-modules/network/google"
+  version = "~> 9.0"
+
+  project_id   = var.project_id
+  network_name = "app-network"
+}
+```
+
+## pessimistic constraint operator: ~>
+
+`~>` เรียกว่า pessimistic constraint operator และความหมายของมันคืออนุญาตให้ upgrade ได้ แต่เฉพาะ upgrade ที่ไม่น่าจะทำให้อะไรพัง `version = "~> 9.0"` อนุญาตให้ Terraform resolve release ในสาย `9.x` ตัวไหนก็ได้ — `9.1.0`, `9.4.2`, `9.12.0` — เพราะตาม semantic versioning ตัวเหล่านี้ควร backward compatible กัน แต่มันบล็อก `10.0.0` เอาไว้เด็ดขาด เพราะ major version bump คือจุดที่คนเขียน module ได้รับอนุญาตให้ใส่ breaking change เข้ามา
+
+operator ตัวเดียวกันนี้ใช้ได้ละเอียดกว่านั้นอีกระดับ `version = "~> 9.2.0"` อนุญาต patch release อย่าง `9.2.1` กับ `9.2.7` แต่บล็อก `9.3.0` — มีประโยชน์ตอนที่คุณอยากกัน minor version bump ไว้ก่อนจนกว่าจะได้ review มัน `~> 9.0` ที่อนุญาตทั้งสาย `9.x` คือ default ทั่วไปของทีมส่วนใหญ่ ส่วนรูปแบบที่แคบกว่าอย่าง `~> 9.2.0` เหมาะกับ module ที่เคยโดน minor version เปลี่ยน behavior มาก่อน
+
+การ upgrade ข้ามขอบเขตที่ถูกบล็อกไว้ก็ยังทำได้ในคำสั่งเดียวเมื่อคุณพร้อม — แก้ `version` constraint ใน `.tf` file แล้วรัน `terraform init -upgrade` — constraint แค่ทำให้แน่ใจว่า upgrade นั้นเป็นสิ่งที่คนตัดสินใจทำเอง ไม่ใช่สิ่งที่เกิดขึ้นเงียบ ๆ ตอน `init` ครั้งถัดไป
+
+## private source และการ publish module ของตัวเอง
+
+ไม่ใช่ทุก module ที่ควรอยู่บน public Registry module ที่ encode security policy, naming convention หรือการเชื่อมต่อ service ภายในของบริษัทหนึ่งไม่มีเหตุผลที่ต้อง public และอาจไม่ควร public ด้วยซ้ำ Terraform รองรับ `source` mechanic แบบเดียวกันสำหรับกรณีนี้ — private Git repository (มักผ่าน SSH เพื่อให้ `init` authenticate ด้วย credential ที่มีอยู่แล้ว) หรือ private module registry เช่น private registry ของ Terraform Cloud หรือ registry ที่ host เองภายในองค์กร
+
+```hcl
+module "internal_service" {
+  source  = "git::ssh://git@github.com/acme-corp/terraform-modules.git//internal-service?ref=v1.4.0"
+
+  project_id = var.project_id
+}
+```
+
+ถ้าคุณอยาก publish module ของตัวเองขึ้น public Terraform Registry Registry ต้องการ pattern ชื่อ repository แบบเฉพาะ คือ `terraform-<PROVIDER>-<NAME>` เช่น `terraform-google-vpc` สำหรับ module ที่ target provider `google` Registry จะ parse ชื่อนี้ตรง ๆ เป็น address ของ module (`namespace/name/provider`) ดังนั้น repository ที่ตั้งชื่อแบบอื่นจะไม่ถูกดึงเข้ามาเลย
+
+<Mermaid title="Module source pinned to a version tag compared with an unpinned source" code={moduleVersioningDiagram} />
+
+export const moduleVersioningDiagram = `flowchart LR
+  subgraph pinned["Pinned: version = ~> 9.0"]
+    p1["terraform init today"] --> p2["Resolves 9.4.2 (latest 9.x)"]
+    p2 --> p3["terraform init -upgrade later"]
+    p3 --> p4["Still resolves within 9.x, blocks 10.0.0"]
+  end
+  subgraph unpinned["Unpinned: no version constraint"]
+    u1["terraform init today"] --> u2["Resolves 9.4.2 (latest overall)"]
+    u2 --> u3["terraform init tomorrow"]
+    u3 --> u4["Silently resolves 10.0.0 with breaking changes"]
+  end`;
+
+<Callout title="The one-line takeaway">
+module **`version`** constraint สำคัญด้วยเหตุผลเดียวกับที่ provider version constraint สำคัญ — ถ้าไม่มีมัน `terraform init` หรือ `init -upgrade` ธรรมดา ๆ ครั้งหนึ่งอาจ resolve Registry หรือ Git-tagged module release ใหม่ที่มี breaking change ที่ไม่มีใคร review มาก่อนโดยเงียบ ๆ **pessimistic constraint operator** อย่าง `~> 9.0` อนุญาตให้ resolve release ในสาย `9.x` ตัวไหนก็ได้ แต่บล็อก major bump `10.0.0` ทำให้การ upgrade เป็นการตัดสินใจที่จงใจแทนที่จะเป็นอุบัติเหตุ module ที่เฉพาะเจาะจงกับองค์กรหนึ่งควรอยู่หลัง **private Git source** หรือ **private registry** แทนที่จะเป็น public Registry และ module ที่คุณ publish สู่สาธารณะต้องอยู่ใน repository ที่ชื่อ `terraform-<PROVIDER>-<NAME>` เพื่อให้ Registry ดึงมันเข้ามาได้ถูกต้อง
+</Callout>
+
+export const quizModuleVersioning = [
+  {
+    q: 'ความเสี่ยงที่เกิดจาก module version constraint ที่ไม่ได้ pin ไว้คืออะไร',
+    options: [
+      'ไม่มีเลย Terraform resolve module version เดิมเสมอไม่ว่า init จะรันเมื่อไหร่',
+      'terraform init ครั้งใหม่อาจ resolve module release ใหม่ที่มี breaking change โดยไม่มีใคร review มาก่อนแบบเงียบ ๆ',
+      'มันทำให้ terraform init ใช้งานไม่ได้เลย',
+      'มันบังคับให้ทุกคนในทีมต้องใช้ Terraform CLI version เดียวกันเป๊ะ',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'constraint version = ~> 9.0 อนุญาตอะไรและบล็อกอะไร',
+    options: [
+      'อนุญาต release ในสาย 9.x ทั้งหมดและบล็อก 10.0.0',
+      'อนุญาตเฉพาะ version 9.0 เป๊ะ ๆ และบล็อก release อื่นทุกตัว',
+      'อนุญาต major version ในอนาคตทั้งหมดและบล็อกแค่ 9.0 เท่านั้น',
+      'ไม่มีผลต่อ version ที่ Terraform resolve เลย',
+    ],
+    answer: 0,
+  },
+  {
+    q: 'ทำไมองค์กรหนึ่งอาจเลือกใช้ private Git repository หรือ private registry สำหรับ module แทน public Terraform Registry',
+    options: [
+      'private source จำเป็นสำหรับทุก module ของ GCP ไม่ว่าเนื้อหาจะเป็นอะไร',
+      'module นั้น encode infrastructure เฉพาะของบริษัทที่ไม่มีเหตุผลต้อง public',
+      'Terraform resolve version constraint บน public Registry ไม่ได้',
+      'private source ไม่รองรับ argument version',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'public Terraform Registry ต้องการ pattern ชื่อ repository แบบไหนสำหรับ module ที่จะ publish',
+    options: [
+      'module-<NAME>-<PROVIDER>',
+      'terraform-<PROVIDER>-<NAME>',
+      'gcp-module-<NAME>',
+      'ชื่อ repository อะไรก็ได้ขอแค่มี main.tf',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="modules/module-versioning-and-registries" questions={quizModuleVersioning} />
+
+<ProgressTracker client:visible id="modules/module-versioning-and-registries" />

@@ -1,0 +1,105 @@
+---
+title: 'Remote Backends and Locking'
+description: 'Why a team cannot share a local state file, how to configure the GCS backend with built-in locking, and what locking actually prevents.'
+sidebar:
+  order: 2
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## The idea in one sentence
+
+A **remote backend** stores state in a shared location like Cloud Storage instead of on one person's laptop, and **locking** stops two people from writing to that shared state at the same time.
+
+## Why local state does not work for a team
+
+By default, `terraform.tfstate` lives on the machine where you ran `apply`. That is fine for a solo experiment, but it breaks down the moment a second person joins:
+
+- Teammate A runs `apply` and creates a VPC network. Their laptop's local state file now knows about it.
+- Teammate B, on a different laptop, has never seen that state file. They run `plan` against their own stale or empty local state and either try to recreate the VPC network or get a plan that makes no sense next to what actually exists.
+- CI/CD pipelines have the same problem in a sharper form — a pipeline runner is a fresh, disposable environment with no local state file at all. It needs a canonical copy of state to read from and write to on every run, not a copy that happens to be sitting on someone's laptop.
+
+The fix is to move state off any individual machine and into a shared backend that every team member and every CI run points at.
+
+## Configuring the GCS backend
+
+The standard way to store Terraform state on Google Cloud is a Cloud Storage bucket configured as the backend:
+
+```hcl
+terraform {
+  backend "gcs" {
+    bucket = "my-company-terraform-state"
+    prefix = "networking/state"
+  }
+}
+```
+
+The bucket must already exist before you point a backend at it — Terraform will not create it for you. `bucket` names the Cloud Storage bucket, and `prefix` is the path within that bucket under which this configuration's state object is stored, so different configurations (or different Terragrunt units) typically use different prefixes in the same bucket.
+
+Notice there is no locking argument to set. The GCS backend has **state locking built in** — it is an inherent part of how the backend works, not an opt-in feature. Cloud Storage's own object generation and versioning mechanism is what Terraform uses under the hood to make sure only one write to a given state object succeeds at a time, so two concurrent runs cannot corrupt it. There is no separate lock table to create, no extra argument to flip on, and no additional GCP resource to pay for and keep in sync with the state bucket. This is genuinely simpler than the locking story on some other clouds, where a separate locking resource has historically had to be provisioned alongside the state bucket.
+
+It is still worth turning on Object Versioning on the state bucket itself. Versioning is not what provides locking — locking is automatic and always on — but it gives you a recovery path if a bad `apply` overwrites state with something you did not want.
+
+## What locking actually prevents
+
+Imagine locking did not exist. Two people, or a person and a CI run, both execute `terraform apply` against the same GCS-backed state at nearly the same moment. Both read the current state, both compute a plan, and both start writing their results back to the same state object. Depending on timing, the second write can overwrite the first — silently dropping the first run's recorded changes even though the first run's infrastructure changes actually happened — or the state file can end up corrupted mid-write.
+
+A lock turns that race into a queue. The first `apply` to start acquires the lock; the second `apply` either waits for the lock to be released, or fails immediately with a clear "state is locked" error, depending on the flags used. Either way, the second run does not get to write over the first run's state while it is mid-flight.
+
+```bash
+# A run that finds the state already locked fails fast with a clear message,
+# rather than corrupting the state file
+terraform apply
+# Error: Error acquiring the state lock
+```
+
+<Mermaid title="Two applies race for the same GCS-backed state; the built-in lock lets one through and makes the other wait" code={lockingDiagram} />
+
+export const lockingDiagram = `flowchart LR
+  eng1["Engineer A: terraform apply"] -->|acquires lock| gcs["GCS state object"]
+  eng2["CI run: terraform apply"] -->|blocked, waits or fails| gcs
+  gcs -->|lock released after apply| eng2`;
+
+<Callout title="The one-line takeaway">
+A **remote backend** like GCS gives every teammate and every CI run the same canonical copy of state, instead of each machine holding its own diverging local file. **Locking** on the GCS backend is **built in** — Cloud Storage's own object generation and versioning mechanism prevents two concurrent `apply` runs from writing to the same state object at once, and there is no separate lock table or extra argument required to enable it. This prevents state corruption and silently dropped changes without any additional infrastructure to manage.
+</Callout>
+
+export const quizBackends = [
+  {
+    q: 'Why does a local terraform.tfstate file break down once a second team member starts running Terraform',
+    options: [
+      'Local state files expire after 24 hours',
+      'Each machine only knows about the changes applied from that same machine, so a second laptop plans against stale or missing state',
+      'Terraform refuses to run with more than one contributor',
+      'Local state files cannot store more than one resource',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What extra resource or argument does the GCS backend need configured to enable state locking',
+    options: [
+      'A separate lock table resource, similar to a DynamoDB table',
+      'Nothing extra. Locking is built into the GCS backend using Cloud Storage object generation and versioning, with no separate lock resource or argument required',
+      'The use_lockfile argument set to true',
+      'A Cloud KMS key dedicated to lock coordination',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does state locking actually prevent',
+    options: [
+      'It prevents anyone from ever running terraform plan',
+      'It prevents two concurrent apply runs from writing to the same state file at the same time, which could corrupt it or silently drop changes',
+      'It prevents Terraform from reading the state file at all',
+      'It prevents resources from being destroyed accidentally',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="state-management/remote-backends-and-locking" questions={quizBackends} />
+
+<ProgressTracker client:visible id="state-management/remote-backends-and-locking" />

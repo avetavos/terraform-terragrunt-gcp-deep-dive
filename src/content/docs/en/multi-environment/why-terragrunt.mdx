@@ -1,0 +1,114 @@
+---
+title: 'Why Terragrunt'
+description: 'The gap neither Terraform workspaces nor directory-per-environment fully close, and what Terragrunt actually is as a thin wrapper around real Terraform.'
+sidebar:
+  order: 4
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## The idea in one sentence
+
+Terraform workspaces solve DRY reuse but leave isolation weak, directory-per-environment solves isolation but reintroduces duplicated backend and provider boilerplate, and Terragrunt exists to close that remaining gap by wrapping the real `terraform` binary and generating the repeated configuration for you.
+
+## The exact tension, restated precisely
+
+The last two lessons each solved half of the problem from the very first lesson in this module:
+
+- **Workspaces** keep one copy of the `.tf` code, one backend, and one provider configuration — genuinely DRY — but every workspace shares that same backend and the same GCP `project`, so isolation between environments is weak enough that a wrong `terraform workspace select` can apply prod-sized changes against what someone assumed was a disposable environment.
+- **Directory-per-environment** gives every environment its own backend and its own GCP project — genuinely isolated — but the backend block, the provider block, and the module `source` and version wiring end up copy-pasted nearly verbatim into every environment directory, which is the exact same manual-repetition risk the first lesson in this module opened with.
+
+Plain Terraform, on its own, does not have a single primitive that gives you both strong isolation and zero configuration duplication across environments at the same time. You can pick one of the two tensions above, but not escape both with `.tf` code alone.
+
+## What Terragrunt actually is
+
+Terragrunt is a thin wrapper and orchestrator that sits on top of the real `terraform` (or `tofu`) binary. It does not introduce a new resource syntax, and it does not compile to some different infrastructure-as-code language — the `.tf` module code you already write, including everything in the `modules/app` directory from the previous lesson, stays completely unchanged and is still plain Terraform. Every single Terragrunt command ultimately shells out to a real `terraform` (or `tofu`) command underneath:
+
+```bash
+# What you type
+terragrunt apply
+
+# What actually eventually runs, per unit, with generated config already in place
+terraform apply
+```
+
+What Terragrunt adds is a layer that manages the repeated boilerplate you just saw pile up around calling Terraform once per environment:
+
+- **Generating backend configuration** from one central definition instead of copy-pasting the same `backend "gcs" { ... }` block into every environment directory.
+- **Generating provider configuration** the same way, from one place, instead of a near-identical `provider "google" { ... }` block per environment.
+- **Supplying each environment's input variables** to the shared module so `dev`, `staging`, and `prod` still call one `modules/app` source with different values, without hand-wiring a separate `module` block per environment.
+- **Understanding dependency ordering** when infrastructure is split across multiple independently-applied units — for example, a `network` unit that a `gke` unit depends on — so Terragrunt can figure out that `network` needs to apply before `gke` rather than you tracking that ordering by hand across separate `terraform apply` runs.
+
+That last point matters specifically because directory-per-environment splits infrastructure into genuinely separate state files per environment (and, as the next module covers, often per component too). A single Terraform configuration has its own internal dependency graph between resources in one state file, but it has no built-in concept of ordering across entirely separate configurations and separate `terraform apply` invocations — that cross-configuration ordering is exactly the kind of problem Terragrunt is built to solve, on top of Terraform's own graph, not instead of it.
+
+## What Terragrunt is not
+
+It is worth being precise about the boundary here, since it is easy to overstate what Terragrunt does:
+
+- Terragrunt is **not** a fork of Terraform, and it is **not** a replacement for it — the actual planning and applying of resources is still done entirely by `terraform` or `tofu`.
+- Terragrunt is **not** a new configuration language for describing GCP resources — a `google_compute_instance` resource is defined exactly the same way whether or not Terragrunt is involved.
+- Terragrunt cannot make an unsafe Terraform change safe on its own — it removes copy-pasted boilerplate and orchestrates ordering, but the actual infrastructure logic and its correctness are still entirely your `.tf` module code's responsibility.
+
+The next module picks up exactly here, with the concrete Terragrunt building blocks — `root.hcl`, `remote_state`, `generate`, and a unit's own `terragrunt.hcl` — that turn this positioning into a working setup.
+
+<Mermaid title="Workspaces (DRY, weak isolation) and directory-per-environment (isolated, duplicated) both leave a gap that Terragrunt closes by wrapping real Terraform" code={terragruntGapDiagram} />
+
+export const terragruntGapDiagram = `flowchart TD
+  workspaces["Terraform workspaces: DRY, weak isolation"] --> gap["The gap: isolation AND zero duplication together"]
+  directoryPerEnv["Directory-per-environment: isolated, duplicated boilerplate"] --> gap
+  gap --> terragrunt["Terragrunt: generates backend, provider, inputs, manages unit ordering"]
+  terragrunt -->|shells out to| terraformBinary["Real terraform / tofu binary"]`;
+
+<Callout title="The one-line takeaway">
+Terraform workspaces solve **DRY** reuse but leave **isolation** weak, since every workspace still shares one backend and one GCP project; directory-per-environment solves isolation with real, separate GCP projects but reintroduces duplicated backend, provider, and module-source boilerplate across every environment directory — plain Terraform has no single primitive that gives you both at once. **Terragrunt** closes that gap as a thin wrapper and orchestrator around the real `terraform`/`tofu` binary: it introduces no new resource syntax and your `.tf` module code is unchanged, but it generates backend and provider configuration from one central definition, supplies each environment's inputs to a shared module, and understands dependency ordering across independently-applied units — a layer Terraform's own single-configuration dependency graph does not cover on its own.
+</Callout>
+
+export const quizWhyTerragrunt = [
+  {
+    q: 'What gap does neither Terraform workspaces nor directory-per-environment fully close on their own',
+    options: [
+      'Neither approach can manage more than one GCP region',
+      'Neither approach gives strong isolation and zero configuration duplication across environments at the same time',
+      'Neither approach supports the google provider',
+      'Neither approach can be used with remote state',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is Terragrunt most accurately described as',
+    options: [
+      'A fork of Terraform with its own resource syntax',
+      'A thin wrapper and orchestrator around the real terraform or tofu binary that generates repeated configuration instead of introducing a new IaC language',
+      'A replacement for Terraform state files',
+      'A GCP-specific provider plugin',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What kind of problem does Terragrunt additionally solve that a single Terraform configuration own internal dependency graph does not cover',
+    options: [
+      'Ordering resources within one state file',
+      'Formatting HCL syntax automatically',
+      'Ordering apply across multiple independently-applied units, such as a network unit that another unit depends on, which sit in entirely separate configurations and state files',
+      'Choosing which GCP region a resource is created in',
+    ],
+    answer: 2,
+  },
+  {
+    q: 'Which of these is something Terragrunt explicitly does NOT do',
+    options: [
+      'Generate backend configuration from one central definition',
+      'Generate provider configuration from one central definition',
+      'Introduce a new syntax that replaces writing plain .tf resources',
+      'Supply per-environment input variables to a shared module',
+    ],
+    answer: 2,
+  },
+];
+
+<Quiz client:visible id="multi-environment/why-terragrunt" questions={quizWhyTerragrunt} />
+
+<ProgressTracker client:visible id="multi-environment/why-terragrunt" />

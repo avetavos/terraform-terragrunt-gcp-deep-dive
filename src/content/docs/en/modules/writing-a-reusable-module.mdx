@@ -1,0 +1,173 @@
+---
+title: 'Writing a Reusable Module'
+description: 'What a module actually is, why its file layout mirrors a root configuration, and how to design one with a single clear responsibility.'
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## The idea in one sentence
+
+A **module** is just any directory of `.tf` files — the one you run `terraform apply` in is the **root module**, and any directory you call into with a `module` block is a **child module**, so there is nothing structurally special about "being a module."
+
+## There is no module keyword — only usage
+
+This trips people up the first time they hear it: Terraform has no special file, no `module.tf`, no magic marker that turns a directory into a module. Every directory of `.tf` files you have ever written is already a module. The directory where you run `terraform init` and `terraform apply` directly is called the **root module**. The moment you reference some other directory of `.tf` files from inside a `module` block, that other directory becomes a **child module** — but its own `.tf` files look exactly the same as any root configuration's:
+
+```hcl
+# root main.tf — calling a child module
+module "bucket" {
+  source      = "./modules/gcs-bucket"
+  bucket_name = "acme-app-logs"
+}
+```
+
+That is the entire distinction: a child module is a directory of Terraform configuration that some other configuration references by address. Nothing inside the module's own `.tf` files has to change to make this true — the same directory could be applied directly as a root module if you `cd` into it and ran `terraform apply` there yourself.
+
+## Why a module's file layout mirrors a root config
+
+Because a module is a Terraform configuration, it follows the exact same three-file convention you already use for root configs, just with a different audience in mind:
+
+- **`variables.tf`** — the module's inputs. This is its public API surface: what a caller must or may provide.
+- **`main.tf`** — the resources the module actually manages.
+- **`outputs.tf`** — the values the module exposes back to whoever called it.
+
+This is worth internalizing: a module is not a special templating construct layered on top of Terraform. It is a normal Terraform configuration that happens to be parameterized by `variables.tf` on the way in and by `outputs.tf` on the way out.
+
+```hcl
+# modules/gcs-bucket/variables.tf
+variable "bucket_name" {
+  description = "Name of the GCS bucket to create"
+  type        = string
+}
+
+variable "project_id" {
+  description = "ID of the GCP project that owns the bucket"
+  type        = string
+}
+```
+
+```hcl
+# modules/gcs-bucket/main.tf
+resource "google_storage_bucket" "this" {
+  name     = var.bucket_name
+  project  = var.project_id
+  location = "US"
+}
+```
+
+```hcl
+# modules/gcs-bucket/outputs.tf
+output "url" {
+  description = "GS URI of the created bucket"
+  value       = google_storage_bucket.this.url
+}
+```
+
+A caller wires this up with a `module` block, treating `bucket_name` and `project_id` as the inputs and `module.<name>.url` as the output it can reference elsewhere:
+
+```hcl
+# root main.tf
+module "logs_bucket" {
+  source      = "./modules/gcs-bucket"
+  bucket_name = "acme-app-logs"
+  project_id  = "acme-app-prod"
+}
+
+output "logs_bucket_url" {
+  value = module.logs_bucket.url
+}
+```
+
+## Designing a module with one clear responsibility
+
+The single biggest design mistake with modules is scope creep: a module that starts as "a VPC network" and slowly grows an IAM binding here, a Compute Engine instance there, a Cloud Function somewhere else, until nobody can reuse it for anything but the one thing it was originally built for. Aim for a module that does one well-scoped job — "a VPC network with public and private subnets," not "all of our GCP networking, IAM, and compute."
+
+Two practical habits keep a module reusable instead of accidentally specific to one caller:
+
+- **Sensible defaults for optional inputs.** If most callers want the same value for an input, give that input a `default` in `variables.tf` so a simple caller does not have to specify it at all.
+- **Resist over-parameterizing on day one.** It is tempting to expose every field a resource supports as a variable "just in case." Every variable you add is a permanent piece of the module's public API that you now have to document and maintain. Add an input when a real caller actually needs that variation — not preemptively for a hypothetical one.
+
+```hcl
+# modules/gcs-bucket/variables.tf
+variable "bucket_name" {
+  description = "Name of the GCS bucket to create"
+  type        = string
+}
+
+variable "force_destroy" {
+  description = "Allow bucket to be destroyed even if it still contains objects"
+  type        = bool
+  default     = false
+}
+```
+
+Here `force_destroy` has a sensible default — most callers never touch it — while `bucket_name` has none, because every caller genuinely needs a different bucket name and there is no reasonable default to guess.
+
+<Mermaid title="A module directory called from a root configuration via a module block" code={gcsModuleAnatomyDiagram} />
+
+export const gcsModuleAnatomyDiagram = `flowchart LR
+  subgraph root["Root module"]
+    rmain["main.tf calls module.bucket"]
+  end
+  subgraph child["Child module: modules/gcs-bucket"]
+    vars["variables.tf (inputs)"] --> main["main.tf (resources)"]
+    main --> outs["outputs.tf (values exposed)"]
+  end
+  rmain -->|source = ./modules/gcs-bucket| vars
+  outs -->|module.bucket.url| rmain`;
+
+<Callout title="The one-line takeaway">
+A **module** is nothing more than a directory of `.tf` files; the directory you `apply` directly is the **root module**, and any directory referenced through a `module` block becomes a **child module** — there is no special syntax involved. Because a module is a full Terraform configuration, it follows the same **`variables.tf` / `main.tf` / `outputs.tf`** convention as a root config, just with `variables.tf` acting as its public inputs and `outputs.tf` as what it exposes back to the caller. Good module design means one clear responsibility, sensible **defaults** for optional inputs, and adding new variables only when a real caller needs the variation rather than over-parameterizing preemptively.
+</Callout>
+
+export const quizWritingReusableModule = [
+  {
+    q: 'What technically makes a directory of Terraform files a module rather than a root module',
+    options: [
+      'Adding a special module.tf marker file to the directory',
+      'Nothing about the directory itself changes; a root module is the directory you apply directly, and a child module is any directory referenced from a module block',
+      'Setting a module = true argument inside a terraform block',
+      'Naming the directory modules/ instead of anything else',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why does a reusable modules file layout typically mirror variables.tf, main.tf, and outputs.tf',
+    options: [
+      'Terraform requires those exact file names to detect a module',
+      'A module is itself a full Terraform configuration, so it uses the same convention, with variables.tf as its inputs and outputs.tf as what it exposes to the caller',
+      'Those file names are only a stylistic choice with no relationship to how root configurations are structured',
+      'outputs.tf is required for the module to be published to the Terraform Registry',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is the practical cost of over-parameterizing a module by exposing every possible resource field as a variable on day one',
+    options: [
+      'There is no cost, more variables always make a module strictly more useful',
+      'It slows down terraform plan noticeably',
+      'Every variable becomes a permanent piece of the modules public API that must be documented and maintained, often for variation no caller ever actually needs',
+      'Terraform silently ignores unused variables so it causes no issue',
+    ],
+    answer: 2,
+  },
+  {
+    q: 'In the gcs-bucket module example, why does bucket_name have no default while force_destroy does',
+    options: [
+      'Because string variables cannot have defaults in Terraform',
+      'Because every caller genuinely needs a different bucket name with no reasonable default, while most callers are fine with the same force_destroy behavior',
+      'Because outputs.tf requires at least one variable without a default',
+      'Because force_destroy is a required argument on google_storage_bucket',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="modules/writing-a-reusable-module" questions={quizWritingReusableModule} />
+
+<ProgressTracker client:visible id="modules/writing-a-reusable-module" />

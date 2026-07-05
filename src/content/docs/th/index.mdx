@@ -1,0 +1,60 @@
+---
+title: Terraform & Terragrunt for GCP — From Zero to Hero
+description: เชี่ยวชาญ Terraform และ Terragrunt บน Google Cloud ตั้งแต่พื้นฐาน — HCL, provider, resource และ dependency graph, remote state และ locking, variable และ module, multi-environment pattern, Terragrunt DRY configuration และ dependency และการรัน infrastructure as code บน production ด้วย CI/CD และ policy as code
+template: splash
+hero:
+  tagline: คอร์สแบบ standalone เน้น developer ว่าด้วย Terraform และ Terragrunt โดยใช้ Google Cloud เป็นเป้าหมาย ตั้งแต่ HCL และ Terraform workflow ไปจนถึง remote state, module, การออกแบบ multi-environment และ DRY configuration กับ dependency ordering ของ Terragrunt สอนผ่าน HCL จริง CLI และไดอะแกรม
+  actions:
+    - text: เริ่มที่นี่
+      link: /terraform-gcp/th/foundations/
+      icon: right-arrow
+      variant: primary
+    - text: ข้ามไปที่ State Management
+      link: /terraform-gcp/th/state-management/the-state-file/
+      icon: open-book
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+## สิ่งที่คุณจะได้เรียน
+
+<CardGrid>
+  <Card title="Foundations" icon="rocket">
+    Infrastructure as Code, HCL syntax, provider และ resource, dependency graph และ workflow init/plan/apply [เริ่ม →](/terraform-gcp/th/foundations/)
+  </Card>
+  <Card title="State Management" icon="seti:config">
+    state file, remote backend และ locking, drift detection กับ import และข้อมูล sensitive ใน state [จัดการ state →](/terraform-gcp/th/state-management/the-state-file/)
+  </Card>
+  <Card title="Variables & Data Flow" icon="seti:html">
+    input variable, output กับ local, expression และ function และ count เทียบกับ for_each [ต่อสาย →](/terraform-gcp/th/variables-and-data-flow/input-variables/)
+  </Card>
+  <Card title="Modules" icon="puzzle">
+    เขียน module ที่ reuse ได้, การ compose และ source, versioning และการ test ด้วย `terraform test` [compose →](/terraform-gcp/th/modules/writing-a-reusable-module/)
+  </Card>
+  <Card title="Multi-Environment" icon="random">
+    ปัญหา dev/staging/prod, Terraform workspace, pattern แบบ directory-per-environment และทำไมต้องมี Terragrunt [ขยายสเกล →](/terraform-gcp/th/multi-environment/the-multi-environment-problem/)
+  </Card>
+  <Card title="Terragrunt Fundamentals" icon="seti:plan">
+    `root.hcl`, DRY configuration ด้วย `include`, `dependency` block ระหว่าง unit และการรันหลาย unit พร้อมกัน [ทำให้ DRY →](/terraform-gcp/th/terragrunt-fundamentals/terragrunt-hcl-and-the-root-config/)
+  </Card>
+  <Card title="Production & Ecosystem" icon="approve-check">
+    CI/CD สำหรับ infrastructure, policy as code กับ static analysis, secret และ credential และ production checklist [ขึ้น production →](/terraform-gcp/th/production-and-ecosystem/ci-cd-for-infrastructure/)
+  </Card>
+</CardGrid>
+
+## คอร์สนี้ทำงานยังไง
+
+<CardGrid>
+  <Card title="เข้าใจ model ก่อน แล้วค่อยดู HCL" icon="rocket">
+    ทุกหัวข้อเริ่มจาก model — dependency graph, state file, ปัญหา DRY ที่ Terragrunt แก้ — พอเข้าใจแล้วพฤติกรรมของ Terraform จะกลายเป็นกลไกที่คุณเข้าใจ ไม่ใช่ HCL ที่ copy-paste ตามกัน
+  </Card>
+  <Card title="ตาม practice ปัจจุบัน ที่ verify แล้ว" icon="random">
+    เขียนตาม practice ปัจจุบันของ Terraform และ Terragrunt และตรวจสอบกับ official docs ผ่าน context7 — รวมถึงการปรับ CLI ของ Terragrunt เป็น `run --all` ซึ่ง tutorial เก่าหลายที่ยังสอนผิดอยู่
+  </Card>
+  <Card title="GCP จริง trade-off จริง" icon="approve-check">
+    ไม่ใช่แค่ "นี่คือ resource block" แต่เป็น "remote state ให้อะไรจริง ๆ และตรงไหนที่ isolation ของ workspace เดียวกันยังพังได้" คุณจะ reason เรื่องการเปลี่ยนแปลง infrastructure ได้อย่างมั่นใจ
+  </Card>
+  <Card title="ไดอะแกรมที่อธิบายได้" icon="puzzle">
+    dependency graph, Terraform workflow, state locking และลำดับ dependency ระหว่าง unit ของ Terragrunt เป็นไดอะแกรม Mermaid ที่รองรับธีม สองภาษา (English / ไทย) พร้อมบันทึกความคืบหน้า quiz
+  </Card>
+</CardGrid>

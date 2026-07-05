@@ -1,0 +1,145 @@
+---
+title: 'The Multi-Environment Problem'
+description: 'ทำไม setup จริงของ Terraform ต้องมีมากกว่าหนึ่ง environment และทำไมการ copy-paste directory ต่อ environment ถึงพังเงียบ ๆ เมื่อเวลาผ่านไป'
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## ไอเดียในหนึ่งประโยค
+
+setup จริงของ infrastructure ทุกอันต้องมีอย่างน้อย dev, staging, prod เป็น environment ที่แยกจากกันและ isolate กัน แล้วการเอา logic เดียวกันของ Terraform มาใช้ซ้ำในทุก environment โดยไม่ปล่อยให้ configuration แต่ละอัน drift ออกจากกันเงียบ ๆ คือปัญหาที่ Terraform ไม่ได้แก้ให้อัตโนมัติ
+
+## environment มีมากกว่าที่คิด
+
+ตัวอย่าง Terraform ง่าย ๆ ทั่วไปมักจัดการแค่ environment เดียว แต่ setup จริงไม่เคยเป็นแบบนั้น อย่างน้อยต้องมี
+
+- **dev** ราคาถูก ทิ้งได้ พังได้อย่างปลอดภัย
+- **staging** จำลอง prod ให้ใกล้เคียงที่สุด ใช้ดักปัญหาก่อนจะปล่อยจริง
+- **prod** ตัวที่รับ traffic จริงและลูกค้าจริง
+
+หลายทีมมี subdivision มากกว่านั้นอีก เช่น copy แยกต่อ GCP region, copy แยกต่อลูกค้าสำหรับ B2B deployment ขนาดใหญ่ หรือ preview environment อายุสั้นที่ spin up ต่อ feature branch แล้วถูกทำลายทิ้งเมื่อ pull request merge แต่ละอันมักต่างจากกันตรง ๆ อย่างเป็นรูปธรรม เช่น Compute Engine machine type เล็กกว่าใน dev, Cloud SQL read replica น้อยกว่าใน staging, ปิด autoscaling ใน dev เพื่อประหยัดเงิน และที่สำคัญ prod มักถูกวางไว้ใน **GCP project** ที่แยกออกไปต่างหากจากที่เหลือทั้งหมด เพื่อให้ความผิดพลาดใน dev ไปไม่ถึงอะไรที่สำคัญ GCP project คือ boundary แข็ง ๆ ของ billing, IAM, และ quota ซึ่งเล่นบทบาท isolation แบบเดียวกับที่ AWS account แยกต่างหากทำให้ทีมที่ใช้ AWS ได้ จุดหลังนี้เรียกว่า **blast-radius isolation** คือการจำกัดว่าความผิดพลาดจาก `apply` หรือ credential ที่หลุดออกไปจะไปได้ไกลแค่ไหน
+
+## ทางแก้แบบไร้เดียงสา: copy-paste directory ต่อ environment
+
+สัญชาตญาณแรกที่แทบทุกคนใช้คือสร้าง environment เดียวให้ทำงานได้ก่อน แล้ว copy ทั้ง directory ไปเป็น environment ที่เหลือ
+
+```bash
+# Three near-identical copies, created once by hand
+tree environments
+environments
+├── dev
+│   └── main.tf
+├── staging
+│   └── main.tf
+└── prod
+    └── main.tf
+```
+
+วันแรก ทั้งสามไฟล์เหมือนกันทุกตัวอักษร ยกเว้นค่า hardcode ไม่กี่จุด เช่น machine type ตรงนี้ ชื่อ bucket ตรงนั้น มันใช้งานได้ และรู้สึกเร็วดี ไม่ต้องออกแบบ shared module ไม่ต้องคิด abstraction ให้ถูกต้อง แค่สาม folder ของโค้ด `.tf` ธรรมดา
+
+```hcl
+# Day one: dev/main.tf, staging/main.tf, and prod/main.tf are all this rule, verbatim
+resource "google_compute_firewall" "allow_app_port" {
+  name    = "allow-app-port"
+  network = "default"
+
+  allow {
+    protocol = "tcp"
+    ports    = ["8080"]
+  }
+
+  source_ranges = ["10.0.0.0/16"]
+}
+```
+
+หกเดือนถัดมา security review flag ว่า rule นั้นใน prod หลวมเกินไป แล้วมีคนไปแก้ให้แน่นขึ้นตรงใน `prod/main.tf` โดยตรง
+
+```hcl
+# Six months later: prod/main.tf was patched during a security review.
+# staging/main.tf and dev/main.tf still say 10.0.0.0/16 — nobody remembered to port the fix.
+resource "google_compute_firewall" "allow_app_port" {
+  name    = "allow-app-port"
+  network = "default"
+
+  allow {
+    protocol = "tcp"
+    ports    = ["8080"]
+  }
+
+  source_ranges = ["10.0.5.0/24"]
+}
+```
+
+ไม่มีใครทำอะไรร้ายหรือแม้แต่สะเพร่าตรงนี้เลย การแก้ rule ตรงที่ security review กำลังมองอยู่คือเรื่องสมเหตุสมผลในตอนนั้น แต่ตอนนี้สาม directory กลายเป็นสาม configuration ที่ต่างกันแบบเล็ก ๆ และไม่มีเอกสารบันทึกไว้เลยว่าต่างกันตรงไหน สั่ง `diff` ระหว่าง `dev/` กับ `prod/` หกเดือนต่อมาจะเจอความต่างเล็ก ๆ เป็นสิบจุด และไม่มีใครจำได้จากความทรงจำว่าจุดไหนตั้งใจให้ต่าง จุดไหนแค่ลืม port fix ตาม
+
+## ความตึงที่ module นี้จะพาไปดู
+
+ปัญหาลึก ๆ คือการ copy-paste directory ทั้ง environment optimize เพื่อ isolation คือแต่ละ environment ไม่กระทบกันจริง ๆ เพราะเป็นไฟล์คนละชุดกันเลย แต่แลกมาด้วยการ reuse ที่หายไปทั้งหมด bug fix ทุกตัว, label ที่เพิ่มเข้าไปเพื่อ track cost ทุกอัน, module version ที่ bump ทุกครั้ง ต้องไปทำซ้ำมือใน copy ทุกชุด และการทำซ้ำมือคือขั้นตอนแบบที่มักจะเงียบ ๆ หยุดเกิดขึ้นไปเอง
+
+ที่เหลือของ module นี้คือการแก้ความตึงนั้น จะ reuse logic เดียวกันข้ามทุก environment ยังไง (ให้มีจุดเดียวสำหรับแก้ bug ไม่ใช่สามหรือห้าจุด) พร้อมกับยังคงเก็บ state, credential, และ blast radius ของแต่ละ environment ให้ isolate จากกันเต็มที่ Terraform เองมีคำตอบบางส่วนให้สองแบบ คือ **workspace** กับ **directory-per-environment pattern** และแต่ละแบบ ตามที่สองบทถัดไปจะแสดงให้เห็น แก้ปัญหาได้แค่ครึ่งเดียว แล้วเปิดช่องโหว่ให้อีกครึ่งที่เหลือ
+
+<Mermaid title="Three copy-pasted environment directories quietly diverge as ad hoc fixes land in only one of them" code={driftDiagram} />
+
+export const driftDiagram = `flowchart LR
+  origin["Working config, copied once"] -->|copy-paste| dev["dev/ (copy)"]
+  origin -->|copy-paste| staging["staging/ (copy)"]
+  origin -->|copy-paste| prod["prod/ (copy)"]
+  prod -->|"security rule tightened here only"| prodDrift["prod/ (drifted)"]
+  staging -->|"instance size bumped here only"| stagingDrift["staging/ (drifted)"]
+  dev -->|"never touched again"| devDrift["dev/ (stale)"]`;
+
+<Callout title="สรุปหนึ่งบรรทัด">
+setup จริงทุกอันต้องมีหลาย **environment** ที่ isolate กัน (อย่างน้อย dev, staging, prod มักมากกว่านั้น) แต่ทางแก้แบบไร้เดียงสาด้วยการ copy-paste directory ทั้งชุดต่อ environment optimize เพื่อ **isolation** โดยแลกกับ **DRY reuse** ทุก fix หรือ tweak ต้องเอาไปใส่มือใน copy ทุกชุด และเพราะการทำซ้ำนั้นเป็นมือ copy แต่ละชุดเลย **drift** ออกไปเป็น configuration ที่ต่างกันและไม่มีเอกสารบันทึกเมื่อเวลาผ่านไป ที่เหลือของ module นี้คือการหาสมดุลระหว่าง reuse กับ isolation แทนที่จะเสียสละอย่างใดอย่างหนึ่งไป
+</Callout>
+
+export const quizMultiEnvProblem = [
+  {
+    q: 'การ copy-paste directory ของ environment ทั้งชุดต่อหนึ่ง environment มีปัญหาอะไรเป็นการเฉพาะ',
+    options: [
+      'Terraform ไม่ยอม apply configuration ที่มีอยู่มากกว่าหนึ่ง directory',
+      'fix หรือ tweak ที่ทำใน copy หนึ่งไม่ถูก apply ไปยัง copy อื่นโดยอัตโนมัติ ทำให้ copy แต่ละชุด drift ออกไปเป็น configuration ที่ต่างกันและไม่มีเอกสารเมื่อเวลาผ่านไป',
+      'Google provider ไม่อนุญาตให้ copy-paste directory',
+      'มันทำให้ setup แรกเริ่มช้ากว่าการเขียน shared module',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'สอง goal ที่ขัดแย้งกันซึ่งทุกวิธี multi-environment ต้องหาสมดุลคืออะไร',
+    options: [
+      'cost กับ performance',
+      'การ reuse logic เดียวกันข้ามทุก environment (DRY) พร้อมกับเก็บ state, credential, และ blast radius ของแต่ละ environment ให้ isolate จากกันเต็มที่',
+      'การเลือกระหว่าง HCL กับภาษาโปรแกรมมิ่ง general-purpose',
+      'local state เทียบกับ remote state',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ทำไมปัญหา copy-paste-ต่อ-environment ถึงมีแนวโน้มแย่ลงเรื่อย ๆ ตามเวลา แทนที่จะคงที่',
+    options: [
+      'ไฟล์ state ของ Terraform โตขึ้นเองทุกวัน',
+      'Google Cloud เปลี่ยน default ของ resource เองเป็นระยะ',
+      'การแก้แบบ ad hoc แต่ละครั้งที่ทำกับ copy เดียวสะสมทับกันไปเรื่อย ๆ และไม่มีอะไรบังคับให้ copy กลับมา sync กัน ความต่างที่ไม่มีเอกสารจึงสะสมมากขึ้นตามอายุของ setup',
+      'Terraform เวอร์ชันใหม่ ๆ ใช้กับ configuration เวอร์ชันเก่าไม่ได้',
+    ],
+    answer: 2,
+  },
+  {
+    q: 'blast-radius isolation ใน multi-environment setup หมายถึงอะไร',
+    options: [
+      'terraform apply รันเร็วแค่ไหน',
+      'การจำกัดว่าความผิดพลาด, apply ที่พลาด, หรือ credential ที่หลุดออกไปใน environment หนึ่งจะไปถึงได้ไกลแค่ไหน มักทำโดยวาง environment ไว้คนละ GCP project หรือ region',
+      'ขนาดของไฟล์ state ของ Terraform',
+      'จำนวน resource ที่ module เดียวสร้างได้',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="multi-environment/the-multi-environment-problem" questions={quizMultiEnvProblem} />
+
+<ProgressTracker client:visible id="multi-environment/the-multi-environment-problem" />

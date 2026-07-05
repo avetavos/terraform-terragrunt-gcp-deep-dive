@@ -1,0 +1,188 @@
+---
+title: 'Directory-per-Environment Pattern'
+description: 'How a genuinely separate directory and GCP project per environment gives real isolation, and what it duplicates in exchange.'
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## The idea in one sentence
+
+The directory-per-environment pattern gives each environment its own directory, its own backend, and its own GCP project for real isolation, while every one of those directories calls the same shared module so the actual infrastructure logic stays in exactly one place.
+
+## A real directory per environment, pointed at a real project
+
+Workspaces share one backend, one provider `project`, and one copy of the `.tf` code across every environment — which is precisely the weak isolation the previous lesson called out. The directory-per-environment pattern fixes that by giving each environment a genuinely separate root configuration, each with its own backend block and its own `provider "google"` block pointed at that environment's own GCP project:
+
+```bash
+tree environments
+environments
+├── dev
+│   └── main.tf
+├── staging
+│   └── main.tf
+└── prod
+    └── main.tf
+```
+
+```hcl
+# environments/dev/main.tf
+terraform {
+  backend "gcs" {
+    bucket = "acme-terraform-state-dev"
+    prefix = "app"
+  }
+}
+
+provider "google" {
+  project = "acme-dev-123456"
+  region  = "us-central1"
+}
+
+module "app" {
+  source        = "../../modules/app"
+  environment   = "dev"
+  machine_type  = "e2-small"
+  instance_count = 1
+}
+```
+
+```hcl
+# environments/staging/main.tf
+terraform {
+  backend "gcs" {
+    bucket = "acme-terraform-state-staging"
+    prefix = "app"
+  }
+}
+
+provider "google" {
+  project = "acme-staging-234567"
+  region  = "us-central1"
+}
+
+module "app" {
+  source        = "../../modules/app"
+  environment   = "staging"
+  machine_type  = "e2-medium"
+  instance_count = 2
+}
+```
+
+```hcl
+# environments/prod/main.tf
+terraform {
+  backend "gcs" {
+    bucket = "acme-terraform-state-prod"
+    prefix = "app"
+  }
+}
+
+provider "google" {
+  project = "acme-prod-345678"
+  region  = "us-central1"
+}
+
+module "app" {
+  source        = "../../modules/app"
+  environment   = "prod"
+  machine_type  = "e2-standard-4"
+  instance_count = 5
+}
+```
+
+Each directory has its own state bucket and its own `project`, so a mistake made while `terraform apply` is running inside `environments/dev` is confined to `acme-dev-123456` — it has no path at all into `acme-staging-234567` or `acme-prod-345678`. That is a hard boundary enforced by GCP IAM and billing, not just a convention anyone has to remember, which is exactly what workspaces could not offer.
+
+## One shared module, three different callers
+
+Notice that all three directories call the same `source = "../../modules/app"` — the actual resources that make up "the app" live in exactly one place:
+
+```hcl
+# modules/app/main.tf
+resource "google_compute_instance" "app" {
+  count        = var.instance_count
+  name         = "app-${var.environment}-${count.index}"
+  machine_type = var.machine_type
+  zone         = "us-central1-a"
+
+  boot_disk {
+    initialize_params {
+      image = "debian-cloud/debian-12"
+    }
+  }
+}
+```
+
+A bug fix, a new label, or a security-group tightening made inside `modules/app/main.tf` applies to `dev`, `staging`, and `prod` the next time each environment runs `terraform apply` — there is exactly one copy of the resource logic to fix, which is the DRY property that plain copy-pasted environment directories from the first lesson never had.
+
+## What is still duplicated
+
+The module itself stayed DRY, but look again at the three `main.tf` files above: the `terraform { backend "gcs" { ... } }` block, the `provider "google" { ... }` block, and the `module "app" { source = "../../modules/app" ... }` wiring are nearly identical boilerplate, repeated verbatim in every environment directory. Only the bucket name, the `project` ID, and a handful of `module` input values actually differ. Add a fourth environment and that entire boilerplate block gets copy-pasted a fourth time; change how state is organized — say, adding a `location` argument to every backend block — and that change has to be hand-applied to every environment directory that exists, exactly the same manual-repetition risk the very first lesson in this module warned about, just relocated from the module logic to the backend and provider wiring around it.
+
+<Mermaid title="Three environment directories, three GCP projects, one shared module, and near-identical backend/provider boilerplate" code={directoryPerEnvDiagram} />
+
+export const directoryPerEnvDiagram = `flowchart TD
+  shared["modules/app (shared source)"]
+  devDir["environments/dev/main.tf"] -->|source| shared
+  stagingDir["environments/staging/main.tf"] -->|source| shared
+  prodDir["environments/prod/main.tf"] -->|source| shared
+  devDir --> devProject["acme-dev-123456"]
+  stagingDir --> stagingProject["acme-staging-234567"]
+  prodDir --> prodProject["acme-prod-345678"]
+  devDir -.->|nearly identical backend + provider block| stagingDir
+  stagingDir -.->|nearly identical backend + provider block| prodDir`;
+
+<Callout title="The one-line takeaway">
+The **directory-per-environment pattern** gives each environment its own root configuration, its own backend, and its own **GCP project**, which is real, IAM-enforced isolation that workspaces could not provide — and every one of those directories calls the same **shared module**, so the actual resource logic stays DRY in one place. The trade-off is that the **backend block**, the **provider block**, and the module's `source` wiring end up copy-pasted nearly verbatim across every environment directory, with only the bucket name, project ID, and a few input values actually differing, which reintroduces exactly the kind of manual-repetition risk this module opened with, just moved to a different layer of the configuration.
+</Callout>
+
+export const quizDirectoryPerEnv = [
+  {
+    q: 'What does the directory-per-environment pattern solve that Terraform workspaces do not',
+    options: [
+      'It removes the need for any backend configuration',
+      'It gives each environment a genuinely separate GCP project, so a mistake in one environment has no path into another',
+      'It eliminates the need for a shared module entirely',
+      'It makes terraform apply run faster',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What stays DRY, in exactly one place, in this pattern',
+    options: [
+      'The backend block for every environment',
+      'The provider block for every environment',
+      'The actual resource logic, since every environment directory calls the same shared module source',
+      'The GCP project ID for every environment',
+    ],
+    answer: 2,
+  },
+  {
+    q: 'What is still being duplicated across environment directories in this pattern despite solving isolation',
+    options: [
+      'The shared module source code itself',
+      'The backend block, provider block, and module source and version wiring, repeated nearly verbatim in every environment directory',
+      'The GCP project boundary',
+      'The instance count for each environment',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why does a hard boundary between environments in this pattern come from GCP itself rather than a convention',
+    options: [
+      'Because each environment directory targets its own separate GCP project, and GCP IAM and billing enforce that boundary regardless of what the Terraform code says',
+      'Because Terraform refuses to apply configuration outside the directory it was written in',
+      'Because each environment directory uses a different version of Terraform',
+      'Because the shared module blocks cross-environment access internally',
+    ],
+    answer: 0,
+  },
+];
+
+<Quiz client:visible id="multi-environment/directory-per-environment-pattern" questions={quizDirectoryPerEnv} />
+
+<ProgressTracker client:visible id="multi-environment/directory-per-environment-pattern" />

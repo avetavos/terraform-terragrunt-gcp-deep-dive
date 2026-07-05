@@ -1,0 +1,144 @@
+---
+title: 'The State File'
+description: 'What Terraform state actually is, why Terraform cannot work without it, and why terraform.tfstate must never be committed to git.'
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## The idea in one sentence
+
+Terraform **state** is a JSON file that maps every resource in your configuration to the real-world object it created, and it is the only thing that lets Terraform know what it manages.
+
+## Why Terraform needs state at all
+
+When you run `terraform apply`, Terraform creates resources through Google Cloud's API — a Compute Engine instance, a Cloud Storage bucket, an IAM binding. The GCP API has no concept of "Terraform." If a project has 500 Compute Engine instances, the Compute Engine API cannot tell you which of those instances Terraform created for a given `resource "google_compute_instance" "web"` block, which ones a teammate created by hand in the Console, and which ones belong to a completely different Terraform configuration.
+
+Terraform solves this by keeping its own record. Every time you `apply`, Terraform writes the mapping between your configuration's resource addresses and the real infrastructure IDs into a state file, by default named `terraform.tfstate`:
+
+```hcl
+resource "google_compute_instance" "web" {
+  name         = "web-vm"
+  machine_type = "e2-medium"
+  zone         = "us-central1-a"
+
+  boot_disk {
+    initialize_params {
+      image = "debian-cloud/debian-12"
+    }
+  }
+
+  network_interface {
+    network = "default"
+  }
+}
+```
+
+After `apply`, the state file records something like `google_compute_instance.web -> projects/my-project-id/zones/us-central1-a/instances/web-vm`, plus every attribute the Compute Engine API returned for that instance — its internal IP, its self link, its network interfaces, and so on. That cached data means Terraform does not have to call the GCP API and re-describe every resource just to compute a plan; it can compare your configuration against the last known state first, which is both how it detects what changed and a real performance win on large configurations. State is also where Terraform stores dependency metadata, so it knows the order in which resources must be created, updated, or destroyed.
+
+## The plaintext risk hiding in your state file
+
+State files are not sanitized. Any attribute value Terraform receives from a provider — or that you set directly in your configuration — is written into `terraform.tfstate` as **plaintext**, including values that are secrets. A common example:
+
+```hcl
+resource "google_sql_user" "app" {
+  name     = "app_admin"
+  instance = google_sql_database_instance.main.name
+  password = "S3cretPassword!"
+}
+```
+
+You never ran `terraform output` on that password and you never printed it in a log line. It still lands in `terraform.tfstate` in plaintext, because Terraform has to remember every attribute it set in order to detect drift on the next `plan`. Anyone who can read that file can read the password.
+
+This is why `terraform.tfstate` must never be committed to version control. Add it to `.gitignore` from the very first commit of a new project:
+
+```bash
+# .gitignore
+terraform.tfstate
+terraform.tfstate.backup
+*.tfstate
+*.tfstate.*
+```
+
+The next lesson covers moving state off your laptop entirely and into a properly access-controlled remote backend, which is the real fix for this risk — a `.gitignore` entry only stops the most obvious accident.
+
+## Inspecting state
+
+Terraform ships three commands for looking inside state without opening the JSON file by hand:
+
+```bash
+# Human-readable dump of the entire current state
+terraform show
+
+# List every resource address currently tracked in state
+terraform state list
+
+# Show full attribute detail for one specific resource
+terraform state show google_compute_instance.web
+```
+
+`terraform state list` is the fast way to answer "what does this configuration actually manage right now" — it prints addresses like `google_compute_instance.web` or `module.network.google_compute_network.main` with no other detail. `terraform state show <address>` drills into one of those addresses and prints every attribute Terraform has recorded for it, which is often faster than going to the Google Cloud Console when you need to check a specific value Terraform is tracking.
+
+<Mermaid title="Config and real GCP resources both feed the state file that the next plan reads" code={stateFlowDiagram} />
+
+export const stateFlowDiagram = `flowchart LR
+  cfg["Terraform config (.tf files)"] --> apply["terraform apply"]
+  apply --> gcp["Real GCP resources"]
+  gcp -->|attributes written back| state["terraform.tfstate"]
+  cfg -->|next run| plan["terraform plan"]
+  state -->|read for comparison| plan`;
+
+<Callout title="The one-line takeaway">
+Terraform **state** is the JSON record mapping your configuration's resource addresses to real GCP object IDs and their attributes — it exists because provider APIs cannot tell Terraform what it manages, and it doubles as a performance cache so `plan` does not have to re-describe every resource from scratch. Because state stores every attribute in **plaintext**, including secrets like database passwords, `terraform.tfstate` and `terraform.tfstate.backup` must be in `.gitignore` from day one. Use `terraform state list` to see what is tracked and `terraform state show <address>` to inspect one resource in detail.
+</Callout>
+
+export const quizStateFile = [
+  {
+    q: 'Why does Terraform need a state file instead of just querying the cloud provider API each time',
+    options: [
+      'State files make Terraform run faster for no other reason',
+      'Provider APIs cannot tell Terraform which existing resources it created versus resources made some other way, so Terraform keeps its own record',
+      'State files are required by Google Cloud for billing purposes',
+      'Terraform state replaces the need for a configuration file entirely',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'A database password was set as a resource attribute but was never printed with terraform output. Can it still end up readable in plain text',
+    options: [
+      'No, only values passed to output blocks are ever stored',
+      'Yes, every attribute Terraform records for a resource is written into the state file in plaintext, including sensitive ones',
+      'Only if the -sensitive flag is omitted from the resource block',
+      'No, Terraform automatically encrypts all attribute values in state',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is the difference between terraform state list and terraform state show',
+    options: [
+      'They are aliases for the same command',
+      'state list prints every tracked resource address; state show prints full attribute detail for one specific address',
+      'state list only works with remote backends',
+      'state show lists resources and state list shows their attributes',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What belongs in .gitignore for a new Terraform project from the first commit',
+    options: [
+      'Only the .tf configuration files',
+      'terraform.tfstate and terraform.tfstate.backup, since state can contain plaintext secrets',
+      'Nothing, state files are safe to commit as long as they are reviewed',
+      'Only the provider plugin binaries',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="state-management/the-state-file" questions={quizStateFile} />
+
+<ProgressTracker client:visible id="state-management/the-state-file" />

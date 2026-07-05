@@ -1,0 +1,145 @@
+---
+title: 'The Multi-Environment Problem'
+description: 'Why every real Terraform setup needs more than one environment, and why copy-pasting a directory per environment quietly falls apart over time.'
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## The idea in one sentence
+
+Every real infrastructure setup needs at least dev, staging, and prod as separate, isolated environments, and reusing the same Terraform logic across all of them without letting their configurations quietly drift apart is a problem Terraform does not solve for you automatically.
+
+## More environments than you think
+
+A toy Terraform example usually manages one environment. A real one never does. At minimum you need:
+
+- **dev** — cheap, disposable, safe to break.
+- **staging** — a realistic rehearsal of prod, used to catch problems before they ship.
+- **prod** — the one that serves real traffic and real customers.
+
+Most teams end up with more subdivisions than that: a separate copy per GCP region, a separate copy per customer for larger B2B deployments, or a short-lived preview environment spun up per feature branch and torn down when the pull request merges. Each of these usually differs from the others in concrete ways — a smaller Compute Engine machine type in dev, fewer Cloud SQL read replicas in staging, autoscaling turned off in dev to save money — and, critically, prod is often placed in an entirely separate **GCP project** from the rest, specifically so that a mistake in dev cannot reach anything that matters. A GCP project is a hard billing, IAM, and quota boundary, sitting under the same organization — the same isolation role a separate AWS account plays for teams on AWS. That last point is called **blast-radius isolation**: limiting how far a bad `apply` or a leaked credential can actually travel.
+
+## The naive fix: copy-paste a directory per environment
+
+The first instinct almost everyone reaches for is to build one environment, get it working, then copy the whole directory for each additional environment:
+
+```bash
+# Three near-identical copies, created once by hand
+tree environments
+environments
+├── dev
+│   └── main.tf
+├── staging
+│   └── main.tf
+└── prod
+    └── main.tf
+```
+
+On day one, all three files are identical except for a handful of hardcoded values — a machine type here, a bucket name there. It works, and it feels fast: no shared modules to design, no abstractions to get right, just three folders of ordinary `.tf` code.
+
+```hcl
+# Day one: dev/main.tf, staging/main.tf, and prod/main.tf are all this rule, verbatim
+resource "google_compute_firewall" "allow_app_port" {
+  name    = "allow-app-port"
+  network = "default"
+
+  allow {
+    protocol = "tcp"
+    ports    = ["8080"]
+  }
+
+  source_ranges = ["10.0.0.0/16"]
+}
+```
+
+Six months later, a security review flags that rule in prod as too permissive, and someone tightens it directly in `prod/main.tf`:
+
+```hcl
+# Six months later: prod/main.tf was patched during a security review.
+# staging/main.tf and dev/main.tf still say 10.0.0.0/16 — nobody remembered to port the fix.
+resource "google_compute_firewall" "allow_app_port" {
+  name    = "allow-app-port"
+  network = "default"
+
+  allow {
+    protocol = "tcp"
+    ports    = ["8080"]
+  }
+
+  source_ranges = ["10.0.5.0/24"]
+}
+```
+
+Nobody did anything malicious or even careless here — fixing the rule where the security review happened to be looking was the reasonable thing to do in the moment. But the three directories are now three subtly different, undocumented configurations, and nothing in the repository says so. A `diff` between `dev/` and `prod/` six months later turns up a dozen small discrepancies, and nobody can say from memory which ones are intentional and which are just forgotten copy-paste debt.
+
+## The tension this module explores
+
+The underlying problem is that copy-pasting an entire environment directory optimizes for isolation — each environment truly cannot affect another, since they are separate files entirely — at the total expense of reuse. Every bug fix, every label added for cost tracking, every module version bump has to be manually repeated in every copy, and manual repetition is exactly the kind of process step that silently stops happening.
+
+The rest of this module is about resolving that tension: how do you reuse the same underlying logic across every environment (so there is one place to fix a bug, not three or five) while still keeping each environment's state, credentials, and blast radius fully isolated from the others? Terraform on its own offers two partial answers — **workspaces** and the **directory-per-environment pattern** — and each one, as the next two lessons show, solves one half of the problem while leaving the other half exposed.
+
+<Mermaid title="Three copy-pasted environment directories quietly diverge as ad hoc fixes land in only one of them" code={driftDiagram} />
+
+export const driftDiagram = `flowchart LR
+  origin["Working config, copied once"] -->|copy-paste| dev["dev/ (copy)"]
+  origin -->|copy-paste| staging["staging/ (copy)"]
+  origin -->|copy-paste| prod["prod/ (copy)"]
+  prod -->|"security rule tightened here only"| prodDrift["prod/ (drifted)"]
+  staging -->|"instance size bumped here only"| stagingDrift["staging/ (drifted)"]
+  dev -->|"never touched again"| devDrift["dev/ (stale)"]`;
+
+<Callout title="The one-line takeaway">
+Every real setup needs multiple isolated **environments** (at minimum dev, staging, and prod, often more), but the naive fix of copy-pasting a whole directory per environment optimizes for **isolation** at the cost of **DRY reuse** — every fix or tweak must be manually re-applied to every copy, and because that repetition is manual, the copies silently **drift** into different, undocumented configurations over time. The rest of this module is about balancing reuse against isolation instead of sacrificing one for the other.
+</Callout>
+
+export const quizMultiEnvProblem = [
+  {
+    q: 'What specifically goes wrong with copy-pasting an entire environment directory for every environment',
+    options: [
+      'Terraform refuses to apply configuration that exists in more than one directory',
+      'A fix or tweak made in one copy is not automatically applied to the others, so the copies silently drift into different, undocumented configurations over time',
+      'Copy-pasting directories is not allowed by the Google provider',
+      'It makes the initial setup slower than writing a shared module',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What are the two competing goals that any multi-environment approach has to balance',
+    options: [
+      'Cost and performance',
+      'Reusing the same underlying logic across environments (DRY) while keeping each environment state, credentials, and blast radius fully isolated from the others',
+      'Choosing HCL versus a general-purpose programming language',
+      'Local state versus remote state',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why does the copy-paste-per-environment problem tend to get worse over time rather than staying static',
+    options: [
+      'Terraform state files grow in size automatically every day',
+      'Google Cloud periodically changes resource defaults on its own',
+      'Each ad hoc edit made to only one copy compounds on the last, and nothing forces the copies back into sync, so undocumented divergence accumulates the longer the setup lives',
+      'Newer Terraform versions are not backward compatible with older configurations',
+    ],
+    answer: 2,
+  },
+  {
+    q: 'What does blast-radius isolation refer to in a multi-environment setup',
+    options: [
+      'How fast terraform apply completes',
+      'Limiting how far a mistake, bad apply, or leaked credential in one environment can actually reach, often by placing environments in separate GCP projects or regions',
+      'The size of the Terraform state file',
+      'The number of resources a single module can create',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="multi-environment/the-multi-environment-problem" questions={quizMultiEnvProblem} />
+
+<ProgressTracker client:visible id="multi-environment/the-multi-environment-problem" />

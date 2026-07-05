@@ -1,0 +1,144 @@
+---
+title: 'Testing Modules'
+description: 'The difference between terraform validate, terraform plan, and terraform test, plus a minimal tftest.hcl example that asserts on a gcs-bucket-style module.'
+sidebar:
+  order: 4
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## The idea in one sentence
+
+`terraform validate`, `terraform plan`, and `terraform test` each check a genuinely different thing — syntax, a real-world diff, and actual asserted behavior — and passing one does not mean the next would also pass.
+
+## Three different levels of confidence
+
+It is tempting to treat `validate`, `plan`, and `test` as three ways of asking the same question, but they check three different things, and each one catches a class of mistake the others miss entirely.
+
+`terraform validate` checks that your HCL is syntactically well-formed and internally consistent — that every `variable` referenced actually exists, that types line up, that required arguments are present. Crucially, `validate` never talks to GCP at all. It has no credentials, makes no API calls, and cannot tell you whether a `project_id` is real or whether your account has permission to create a `google_storage_bucket`.
+
+```bash
+terraform validate
+# Success! The configuration is valid.
+```
+
+`terraform plan` goes further: it authenticates to the real GCP API, reads the current state of any existing resources, and computes a diff of what would change. This catches an entire category of error `validate` cannot — an invalid `location` value the API rejects, a `project_id` your credentials cannot access, a quota limit. But `plan` still does not assert anything about whether the result is correct by your own definition; it only shows you what would happen.
+
+```bash
+terraform plan
+# google_storage_bucket.this will be created
+#   + name     = "acme-app-logs"
+#   + location = "US"
+```
+
+`terraform test` is the only one of the three that actively asserts specific expected behavior — that the bucket name really is what you passed in, that a given output really has the value you expect. Passing `validate`, and even a clean `plan`, tells you the configuration is well-formed and GCP accepted it; neither tells you the module actually does what you designed it to do.
+
+## Terraform's native test framework
+
+Terraform's built-in test framework, introduced in Terraform 1.6, runs `.tftest.hcl` files through the `terraform test` command. A test file has a top-level `variables` block for test-specific input values, and one or more `run` blocks, each containing one or more `assert` blocks with a `condition` expression and an `error_message` shown if that condition is false:
+
+```hcl
+# tests/gcs_bucket.tftest.hcl
+variables {
+  bucket_name = "acme-app-logs-test"
+  project_id  = "acme-app-test"
+}
+
+run "bucket_name_matches_input" {
+  command = plan
+
+  assert {
+    condition     = google_storage_bucket.this.name == var.bucket_name
+    error_message = "Bucket name did not match the bucket_name input variable"
+  }
+}
+```
+
+This tests the `gcs-bucket` module from earlier in this module: it asserts that the bucket resource inside the module ends up with exactly the `name` the caller passed in as `bucket_name`, not just that the configuration is syntactically valid or that GCP would accept it.
+
+## command = plan versus command = apply
+
+Every `run` block has a `command` argument, and the choice between its two values is a real tradeoff, not a formality. `command = plan` computes a plan and asserts against the planned values, without creating a single real resource. It is fast, free, and safe to run on every commit, which is why it should cover the majority of your test cases:
+
+```hcl
+run "bucket_name_matches_input" {
+  command = plan
+
+  assert {
+    condition     = google_storage_bucket.this.name == var.bucket_name
+    error_message = "Bucket name did not match the bucket_name input variable"
+  }
+}
+```
+
+`command = apply` actually creates real resources in GCP, asserts against their real resulting attributes, and then tears everything down again at the end of the test file. This is genuine integration testing — it can catch things a plan-only test cannot, like a naming collision the GCP API only rejects at apply time — but it is slower and briefly costs real cloud resources, so reach for it deliberately rather than by default:
+
+```hcl
+run "bucket_actually_created" {
+  command = apply
+
+  assert {
+    condition     = google_storage_bucket.this.url != ""
+    error_message = "Bucket was not actually created in GCP"
+  }
+}
+```
+
+<Mermaid title="Three levels of confidence: terraform validate, terraform plan, and terraform test" code={testingLevelsDiagram} />
+
+export const testingLevelsDiagram = `flowchart LR
+  v["terraform validate: HCL syntax and internal consistency only"] --> p["terraform plan: talks to the real GCP API, shows the diff"] --> t["terraform test: asserts specific expected behavior via .tftest.hcl"]`;
+
+<Callout title="The one-line takeaway">
+`terraform validate`, `terraform plan`, and `terraform test` check three different things, and none of them substitutes for the others: `validate` only checks **HCL syntax and internal consistency** without ever contacting GCP, `plan` talks to the real **GCP API** and shows a diff but does not assert anything about correctness, and `terraform test` is the only one that actively **asserts** specific expected behavior through `.tftest.hcl` files with `variables`, `run` blocks, and `assert` conditions. Inside a `run` block, `command = plan` asserts against a computed plan quickly and without cost, while `command = apply` creates and destroys real resources for genuine integration testing. Passing `validate`, or even a clean `plan`, is not proof a module works — only a `test` that asserts on its actual behavior is.
+</Callout>
+
+export const quizTestingModules = [
+  {
+    q: 'What can terraform validate check, and what can it never check',
+    options: [
+      'It checks that GCP accepts every value; it cannot check HCL syntax',
+      'It checks HCL syntax and internal configuration consistency only, and never talks to GCP at all',
+      'It checks real resource attributes after creation, but not syntax',
+      'It checks both syntax and live GCP state identically to terraform plan',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'In a tftest.hcl run block, what is the difference between command = plan and command = apply',
+    options: [
+      'There is no difference, both create real resources',
+      'command = plan only works for GCP resources, command = apply only works for other providers',
+      'command = plan asserts against a computed plan without creating real resources, command = apply creates and destroys real resources for genuine integration testing',
+      'command = apply is faster because it skips the assert blocks',
+    ],
+    answer: 2,
+  },
+  {
+    q: 'Why does passing terraform validate not mean a module actually works against real GCP',
+    options: [
+      'validate is identical to test, so passing one always means the other passes too',
+      'validate never contacts the GCP API, so it cannot catch a rejected value, a quota limit, or a wrong result the API would only reveal at plan or apply time',
+      'validate only works for AWS resources, never for GCP',
+      'validate always fails unless real resources already exist',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does an assert block inside a run block require',
+    options: [
+      'A condition expression and an error_message shown when that condition is false',
+      'Only a command argument, nothing else',
+      'A separate tf file for every assertion',
+      'A provider block redefining the GCP provider',
+    ],
+    answer: 0,
+  },
+];
+
+<Quiz client:visible id="modules/testing-modules" questions={quizTestingModules} />
+
+<ProgressTracker client:visible id="modules/testing-modules" />

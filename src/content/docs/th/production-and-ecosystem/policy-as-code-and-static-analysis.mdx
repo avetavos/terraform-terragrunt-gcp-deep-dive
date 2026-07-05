@@ -1,0 +1,148 @@
+---
+title: 'Policy as Code and Static Analysis'
+description: 'tflint กับ checkov จับ pattern แย่ ๆ ใน HCL ก่อน plan จะรันด้วยซ้ำได้ยังไง และ Sentinel กับ OPA คู่กับ conftest บังคับใช้ policy กับ plan ที่คำนวณจริงได้ยังไง'
+sidebar:
+  order: 2
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## ไอเดียในหนึ่งประโยค
+
+static analysis tool จับ pattern ที่รู้อยู่แล้วว่าแย่ใน HCL ก่อนที่ plan จะรันด้วยซ้ำ ส่วน policy-as-code tool ประเมิน plan ที่คำนวณออกมาจริงเทียบกับกฎขององค์กร แล้วบล็อกไม่ให้ apply ได้แบบอัตโนมัติถ้าละเมิดกฎ
+
+## Static analysis ก่อน plan จะรันด้วยซ้ำ
+
+`terraform validate` เช็คแค่ว่า HCL ของคุณ syntax ถูกต้องและสอดคล้องกันภายใน — type ตรงกัน, required argument ครบ, reference resolve ได้ มันไม่รู้เลยว่า machine type แบบ `f1-micro` เป็นตัวเลือกที่สมเหตุสมผลไหม หรือ Cloud Storage bucket ควร public read ได้จริงเหรอ tool สองประเภทนี้มาเติมช่องว่างตรงนั้น และทั้งคู่รันเร็ว ก่อนที่จะมีการ plan หรือ apply อะไรเลย
+
+- **`tflint`** รู้จัก provider มันมี plugin rule set ให้ใช้ รวมถึง `tflint-ruleset-google` ที่จับ mistake ที่ `validate` มองไม่เห็น เพราะต้องรู้ว่า Google Cloud API จริง ๆ รับอะไรได้บ้าง เช่น machine type ที่ deprecated ไปแล้ว, ชื่อ region ที่ไม่ถูกต้อง, argument ที่ provider เลิกรองรับไปเงียบ ๆ
+- **security และ misconfiguration scanner** ในตระกูล `checkov`/ผู้สืบทอดของ `tfsec` จะ pattern-match ตัว HCL เทียบกับ configuration แย่ ๆ ที่รู้จักอยู่แล้ว เช่น Cloud Storage bucket ที่เปิด public read access, persistent disk ที่ไม่เข้ารหัส, firewall rule ที่เปิดให้ `0.0.0.0/0` เข้าถึง port ที่ sensitive `tfsec` เคยครอบคลุมเรื่องคล้าย ๆ กัน แล้ว check ของมันก็ถูกรวมเข้าไปใน Trivy ตั้งแต่นั้นมา ส่วน `checkov` ยังเป็นตัวเลือกที่ใช้กันแพร่หลายและ maintain อยู่ต่อเนื่องสำหรับ layer นี้
+
+```hcl
+# .tflint.hcl
+plugin "google" {
+  enabled = true
+  version = "0.29.0"
+  source  = "github.com/terraform-linters/tflint-ruleset-google"
+}
+```
+
+```bash
+tflint --init
+tflint
+
+# 1 issue(s) found:
+#
+# Warning: "us-central1-z" is an invalid value as zone (google_compute_instance_invalid_zone)
+#
+#   on main.tf line 12:
+#   12:   zone = "us-central1-z"
+
+checkov -d .
+
+# Check: CKV_GCP_28: "Ensure that Cloud Storage bucket is not anonymously or publicly accessible"
+#   FAILED for resource: google_storage_bucket.reports
+#   File: /main.tf:5-8
+```
+
+tool ทั้งสองตัวรันกับ raw configuration เท่านั้น ไม่ต้องมี GCP credential, ไม่ต้อง `plan`, ไม่ต้อง state นี่แหละคือเหตุผลที่มันควรอยู่เป็น gate แรกสุดใน pipeline มันถูก, เร็ว, และจับ mistake ทั้ง class ได้ก่อนที่ Terraform จะคุยกับ Google Cloud ด้วยซ้ำ
+
+## Policy-as-code ตอน plan time: Sentinel กับ OPA คู่กับ conftest
+
+static analysis หยุดอยู่แค่ที่ตัวโค้ด มันตอบคำถามแบบ "plan นี้สร้าง instance `n2-standard-4` เกินห้าตัวใน production project ไหม" ไม่ได้ เพราะตัวเลขนั้นยังไม่มีอยู่จนกว่า plan จะถูกคำนวณออกมาจริง ๆ **policy-as-code** tool ปิดช่องว่างตรงนี้ด้วยการประเมิน machine-readable output ของ plan แทนที่จะดูที่ HCL
+
+- **Sentinel** คือ policy engine ในตัวของ HCP Terraform มันผูกแน่นกับ HCP Terraform และ Terraform Enterprise run — policy ถูกผูกไว้กับ workspace หรือ organization แล้วถูกประเมินอัตโนมัติเป็นส่วนหนึ่งของทุก run ที่นั่น
+- **Open Policy Agent (OPA)** ที่ใช้ผ่าน `conftest` CLI คือทางเลือกโอเพนซอร์สที่ไม่ผูกกับ provider ไหนเป็นพิเศษ มันทำงานกับ CI system ไหนก็ได้ ไม่ว่าจะใช้ HCP Terraform อยู่หรือไม่ ด้วยการประเมิน JSON document ที่คุณส่งให้มัน
+
+ไอเดียร่วมของทั้งสองแบบคือเหมือนกัน มีคนเขียน policy ไว้ครั้งเดียว — "ห้าม Cloud Storage bucket ไหนอนุญาต public access", "ทุก resource ต้องมี label `cost-center`" — แล้วมันจะถูกประเมินอัตโนมัติกับทุก plan ตั้งแต่นั้นเป็นต้นไป บล็อก plan ที่ละเมิดไม่ให้ apply ได้เลย มันคือเวอร์ชันเชิงกลไกที่บังคับใช้เสมอของสิ่งที่ human reviewer ต้องคอยจำไปเช็คด้วยตาทุกครั้งไม่พลาดสักครั้ง
+
+```bash
+terraform plan -out=plan.tfplan
+terraform show -json plan.tfplan > plan.json
+conftest test plan.json
+```
+
+```rego
+package main
+
+deny[msg] {
+  resource := input.resource_changes[_]
+  resource.type == "google_storage_bucket_iam_binding"
+  resource.change.after.members[_] == "allUsers"
+  msg := sprintf("%s grants public access via allUsers", [resource.address])
+}
+```
+
+`conftest` อ่าน `plan.json` ตัวเดียวกับที่คนอ่านเองด้วยมือได้ แล้วปฏิเสธ run ทันทีที่ `deny` สร้าง message ออกมา ไม่มี plan ที่เข้าเงื่อนไขนั้นไปถึง `apply` เลยสักตัว
+
+## สองชั้นที่เสริมกัน ไม่ใช่ทำงานซ้ำกัน
+
+มันน่าจะดูเหมือน `tflint`/`checkov` กับ Sentinel/OPA ทำงานเดียวกันซ้ำสองรอบ แต่จริง ๆ แล้วมันเช็คคนละอย่างกันโดยพื้นฐาน
+
+- static analysis เช็ค **ตัวโค้ดเอง** ไม่ขึ้นกับว่าตอนนี้กำลังเปลี่ยนแปลงอะไรอยู่ มันจะ flag Cloud Storage bucket ที่ public เหมือนกันไม่ว่า run นี้จะสร้าง bucket เดียวหรือร้อยตัว
+- policy-as-code เช็ค **การเปลี่ยนแปลงที่ plan ไว้จริง ๆ** และ reference ค่าที่คำนวณจริงซึ่งมีอยู่แค่ตอนที่ plan มีแล้วเท่านั้น เช่น instance count จริง, label value จริง, member list จริงที่ resolve ได้หลังจาก variable interpolation กับ module composition รันไปแล้ว กฎแบบ "บล็อก plan ไหนที่จะสร้าง instance `n2-standard-4` เกินห้าตัวใน production project" ไม่มีทางเทียบเท่าได้ที่ระดับ raw-HCL เลย เพราะไม่มีทางรู้จำนวน instance ได้โดยไม่คำนวณ plan ก่อน
+
+ทั้งสอง stage นี้อยู่ใน pipeline เดียวกัน เรียงต่อกัน static check ที่ถูกและเร็วมาก่อน จับ mistake ทั้ง class ได้ทันที policy evaluation กับ plan ที่คำนวณแล้วมาทีหลัง จับ violation เฉพาะสถานการณ์ที่โผล่มาได้แค่ตอนที่ Terraform รู้แน่ชัดแล้วว่ากำลังจะทำอะไร
+
+<Mermaid title="HCL ผ่าน static analysis แล้ว plan ถูกคำนวณและเช็คกับ policy ก่อนจะ apply ได้" code={policyLayersDiagram} />
+
+export const policyLayersDiagram = `flowchart LR
+  hcl["HCL code"] --> lint["tflint / checkov: static checks"]
+  lint -->|passes| plan["terraform plan"]
+  plan --> policy["Sentinel / OPA + conftest: policy check"]
+  policy -->|passes| apply["apply"]
+  policy -->|violates a rule| blocked["Blocked, never applied"]`;
+
+<Callout title="สรุปหนึ่งบรรทัด">
+**`tflint`** (provider-aware rule set รวมถึง `tflint-ruleset-google` ที่จับ mistake ที่ `terraform validate` มองไม่เห็น) กับ scanner ตระกูล **`checkov`** (pattern-match HCL เทียบ misconfiguration ที่รู้จักแล้ว เช่น Cloud Storage bucket ที่ public) รันก่อน เร็วและถูก กับตัวโค้ดดิบก่อนจะมีการ plan อะไรเลย **Sentinel** (built-in ใน HCP Terraform) กับ **Open Policy Agent คู่กับ `conftest`** (โอเพนซอร์ส ไม่ผูก provider) รันทีหลัง ประเมิน machine-readable **plan** output จริงเทียบ policy ที่เขียนไว้ แล้วบล็อก plan ที่ละเมิดไม่ให้ apply ได้แบบอัตโนมัติ สองชั้นนี้เสริมกัน static analysis เช็คโค้ดไม่ว่าจะเปลี่ยนอะไร ส่วน policy-as-code เช็คการเปลี่ยนแปลงที่คำนวณจริง รวมถึงค่าอย่าง instance count จริงที่มีอยู่แค่หลังจาก plan รันแล้วเท่านั้น
+</Callout>
+
+export const quizPolicyAsCode = [
+  {
+    q: 'tflint กับ checkov จับอะไรได้ที่ terraform validate ธรรมดาจับไม่ได้',
+    options: [
+      'ไม่มีอะไรเลย terraform validate เช็คทุกอย่างที่ tflint กับ checkov เช็คอยู่แล้ว',
+      'ปัญหาที่ต้องรู้จัก provider หรือเน้น security เช่น machine type ที่ deprecated หรือ Cloud Storage bucket ที่ public read ได้ เพราะ validate เช็คแค่ syntax กับความสอดคล้องภายใน',
+      'ว่า resource จะถูก replace แทนที่จะ update in-place หรือเปล่า',
+      'ว่า apply จะสำเร็จกับ GCP project จริงหรือเปล่า',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ความต่างสำคัญระหว่างสิ่งที่ static analysis tool เช็คกับสิ่งที่ policy-as-code tool อย่าง Sentinel หรือ OPA เช็คคืออะไร',
+    options: [
+      'static analysis กับ policy-as-code เช็คสิ่งเดียวกันเป๊ะ แค่ syntax ต่างกัน',
+      'static analysis เช็ค HCL ดิบไม่ว่าจะเปลี่ยนอะไร ส่วน policy-as-code ประเมิน plan ที่คำนวณจริง รวมถึงค่าที่มีอยู่แค่หลังจาก plan ถูกสร้างแล้ว',
+      'policy-as-code tool รันแค่หลัง apply เป็น audit step เท่านั้น',
+      'static analysis tool ต้องใช้ GCP credential ส่วน policy-as-code tool ไม่ต้อง',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'policy แบบไหนที่บังคับใช้ได้เฉพาะกับ plan ที่คำนวณแล้วเท่านั้น ไม่ใช่กับ raw HCL อย่างเดียว',
+    options: [
+      'ทุก resource block ของ Cloud Storage bucket ต้องตั้ง location argument',
+      'ห้าม firewall rule resource ไหนถูกกำหนดด้วย CIDR range ที่เปิดกว้างใน HCL',
+      'plan ต้องไม่สร้าง instance n2-standard-4 เกินห้าตัวใน production project เพราะ instance count ที่ plan ไว้จริงมีอยู่แค่หลังจาก plan ถูกคำนวณแล้วเท่านั้น',
+      'ทุก resource type ต้องใช้ชื่อแบบ snake_case',
+    ],
+    answer: 2,
+  },
+  {
+    q: 'Sentinel ต่างจาก Open Policy Agent คู่กับ conftest ยังไง',
+    options: [
+      'เป็น tool เดียวกันแค่ชื่อต่างกัน',
+      'Sentinel คือ policy engine ในตัวของ HCP Terraform ผูกแน่นกับ HCP Terraform และ Enterprise run ส่วน OPA คู่กับ conftest คือทางเลือกโอเพนซอร์สที่ไม่ผูก provider ใช้ได้กับ CI system ไหนก็ได้',
+      'Sentinel ทำงานได้กับ checkov เท่านั้น ส่วน OPA ทำงานได้กับ tflint เท่านั้น',
+      'OPA ประเมินได้แค่ raw HCL เท่านั้น ประเมิน plan ที่คำนวณแล้วไม่ได้',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="production-and-ecosystem/policy-as-code-and-static-analysis" questions={quizPolicyAsCode} />
+
+<ProgressTracker client:visible id="production-and-ecosystem/policy-as-code-and-static-analysis" />

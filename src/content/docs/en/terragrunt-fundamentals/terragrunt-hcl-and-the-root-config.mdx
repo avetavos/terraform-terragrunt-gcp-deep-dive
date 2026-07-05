@@ -1,0 +1,155 @@
+---
+title: 'Terragrunt HCL and the Root Config'
+description: 'What a Terragrunt unit is, why the shared parent config is now named root.hcl, and how remote_state with generate produces a backend for every unit.'
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## The idea in one sentence
+
+A Terragrunt **unit** is one deployable piece of infrastructure with its own `terragrunt.hcl` and its own Terraform state, and a shared `root.hcl` file above it holds the configuration every unit needs without any of them repeating it.
+
+## What a Terragrunt unit actually is
+
+In the Modules module you saw that a Terraform **root module** is just the directory you run `terraform apply` in directly. Terragrunt reuses that exact idea and gives it its own name: a **unit**. A unit is a directory containing its own `terragrunt.hcl` file, wrapping one Terraform root module, tracked by its own separate state file. A `network` unit, a `gke` unit, and a `cloud-sql` unit are three independent units — three directories, three `terragrunt.hcl` files, three state files — even though in a single-Terraform-project world you might have been tempted to manage all three resources from one root module and one shared state file.
+
+Splitting infrastructure into units this way is a deliberate trade: smaller, independently applied pieces of state mean a mistake in one unit cannot corrupt or lock the state of another, and a `plan` for `gke` does not have to evaluate every resource inside `network` and `cloud-sql` just to show you what changed. The cost is that units now need a way to share the configuration they all still have in common — which is exactly what `root.hcl` is for.
+
+## root.hcl: the config every unit stands on
+
+Picture a directory layout with one config file at the very top of a project or environment tree, and a `terragrunt.hcl` file inside every unit directory beneath it. That top-level file used to be named `terragrunt.hcl` too, since Terragrunt never required any particular name for it. That naming still works today, and plenty of existing repositories and tutorials still use it, but it is ambiguous the moment someone says "check terragrunt.hcl" — do they mean the shared root file, or the specific unit you happen to be standing in.
+
+The current recommended convention names that shared parent file `root.hcl` instead, precisely to remove that ambiguity: `root.hcl` is unmistakably the one shared file at the top, and `terragrunt.hcl` is unambiguously a specific unit's own config. This course uses `root.hcl` throughout.
+
+## remote_state and generate: one backend, not copy-pasted per unit
+
+Every unit needs a Terraform backend — on GCP, almost always a Google Cloud Storage (GCS) bucket for the state file. Declaring that backend by hand inside every single unit is exactly the kind of repetition Terragrunt exists to remove. Instead, `root.hcl` declares it once with a `remote_state` block, and its `generate` sub-block tells Terragrunt to write out a `backend.tf` file into each unit right before Terraform runs there:
+
+```hcl
+# root.hcl
+remote_state {
+  backend = "gcs"
+
+  generate = {
+    path      = "backend.tf"
+    if_exists = "overwrite_terragrunt"
+  }
+
+  config = {
+    bucket   = "acme-terraform-state"
+    prefix   = "${path_relative_to_include()}/terraform.tfstate"
+    project  = "acme-prod-123456"
+    location = "US"
+  }
+}
+```
+
+`path_relative_to_include()` gives each unit its own unique `prefix` inside the shared bucket, based on where that unit sits relative to the file that includes this one, so the `network` unit and the `gke` unit automatically land at different state paths without either of them writing that path out literally. `if_exists = "overwrite_terragrunt"` tells Terragrunt it is safe to overwrite a `backend.tf` it generated on a previous run. Unlike some other clouds' backends, GCS needs no separate lock-table argument — GCS handles state locking on its own, so there is no `dynamodb_table`-style setting to configure here.
+
+A top-level `generate` block works the same way for provider configuration — commonly placed right alongside `remote_state` in `root.hcl`:
+
+```hcl
+generate "provider" {
+  path      = "provider.tf"
+  if_exists = "overwrite_terragrunt"
+  contents  = <<EOF
+provider "google" {
+  project = "acme-prod-123456"
+  region  = "us-central1"
+}
+EOF
+}
+```
+
+Both blocks produce ordinary `.tf` files — `backend.tf` and `provider.tf` — sitting next to the actual Terraform code Terragrunt runs. Terraform itself never knows those files were generated; from its perspective they are just configuration that happened to already be there.
+
+## The `terraform` block's `source`: pointing a unit at its module
+
+`remote_state` and the provider `generate` block live in `root.hcl` because every unit shares them. What differs per unit is which actual Terraform module it runs, and that lives in the unit's own `terragrunt.hcl`, inside a `terraform` block:
+
+```hcl
+# network/terragrunt.hcl
+include "root" {
+  path = find_in_parent_folders("root.hcl")
+}
+
+terraform {
+  source = "git::git@github.com:acme/infrastructure-modules.git//network?ref=v1.4.0"
+}
+
+inputs = {
+  cidr_block = "10.0.0.0/16"
+}
+```
+
+`source` can point at a local relative path during development or, as above, a Git URL pinned to a tag — the same module addressing you already know from a Terraform `module` block's `source` argument, just expressed at the unit level instead of inside `main.tf`. The `include` line is what pulls in everything `root.hcl` defined — the full mechanics of `include` are the subject of the next lesson; for now, just notice that this three-line unit config gets a working GCS backend and Google provider for free, without repeating a single line of either.
+
+<Mermaid title="One root.hcl feeding several units, each pointing at its own module" code={unitsDiagram} />
+
+export const unitsDiagram = `flowchart TD
+  root["root.hcl (remote_state + generate)"]
+  root --> network["network/terragrunt.hcl"]
+  root --> gke["gke/terragrunt.hcl"]
+  root --> sql["cloud-sql/terragrunt.hcl"]
+  network --> networkmod["terraform.source: modules//network"]
+  gke --> gkemod["terraform.source: modules//gke"]
+  sql --> sqlmod["terraform.source: modules//cloud-sql"]
+  network -.->|inherits generated backend.tf + provider.tf| root
+  gke -.->|inherits generated backend.tf + provider.tf| root
+  sql -.->|inherits generated backend.tf + provider.tf| root`;
+
+<Callout title="The one-line takeaway">
+A Terragrunt **unit** is one directory with its own `terragrunt.hcl` and its own state, wrapping one Terraform module; the shared parent config sits one level up and is now conventionally named **`root.hcl`** (not `terragrunt.hcl`) specifically to avoid confusing "the shared root file" with "this unit's own file" — older repos that still call it `terragrunt.hcl` continue to work. `root.hcl` declares a `remote_state` block with a `generate` sub-block so every unit gets an identical, centrally defined GCS **backend.tf** (with no separate lock-table setting needed) and, via a top-level `generate "provider"` block, a **provider.tf** — instead of that boilerplate being hand-copied into every unit. Each unit's own `terragrunt.hcl` then only needs a `terraform { source = ... }` block pointing at the actual module it should run.
+</Callout>
+
+export const quizRootConfig = [
+  {
+    q: 'What is a Terragrunt unit?',
+    options: [
+      'A single GCP resource such as one Compute Engine instance',
+      'A directory with its own terragrunt.hcl file, wrapping one Terraform module and tracked by its own separate state',
+      'A synonym for a Terraform provider',
+      'A folder that only contains variables.tf',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why is the shared parent config file now conventionally named root.hcl instead of terragrunt.hcl?',
+    options: [
+      'Terragrunt refuses to run if the root file is named terragrunt.hcl',
+      'root.hcl is required syntax and terragrunt.hcl no longer works for a root file',
+      'The distinct name avoids ambiguity between the one shared root file and any individual unit own terragrunt.hcl, though naming it terragrunt.hcl still works',
+      'root.hcl enables a feature that terragrunt.hcl cannot use',
+    ],
+    answer: 2,
+  },
+  {
+    q: 'What does a remote_state block with a generate sub-block actually produce?',
+    options: [
+      'It only validates that a GCS bucket exists without writing any file',
+      'It writes out a backend.tf file for the unit from one centrally defined configuration, instead of that block being hand-copied into every unit',
+      'It deletes the existing Terraform state for the unit',
+      'It replaces the need for a terraform.source attribute',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Where does the terraform source attribute pointing at the actual module code belong?',
+    options: [
+      'In root.hcl, shared by every unit',
+      'In each unit own terragrunt.hcl, since different units typically run different modules',
+      'It cannot be set in Terragrunt at all',
+      'Inside the generated backend.tf file',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="terragrunt-fundamentals/terragrunt-hcl-and-the-root-config" questions={quizRootConfig} />
+
+<ProgressTracker client:visible id="terragrunt-fundamentals/terragrunt-hcl-and-the-root-config" />

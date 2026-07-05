@@ -1,0 +1,146 @@
+---
+title: 'The Terraform Workflow'
+description: 'The init, plan, apply, and destroy commands, saving a plan to a file before applying it, and what the provider dependency lock file is for.'
+sidebar:
+  order: 4
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## The idea in one sentence
+
+Four commands cover almost everything you do day to day: `terraform init` sets up the working directory, `terraform plan` shows you a dry-run diff, `terraform apply` executes it, and `terraform destroy` tears down what the configuration manages.
+
+## init, plan, apply
+
+`terraform init` is the command you run first, in any directory, and after adding a new provider or module. It reads the `required_providers` block, downloads the matching provider plugins, and initializes the backend that stores state.
+
+```bash
+terraform init
+```
+
+`terraform plan` is a **dry run**. It reads real GCP state, compares it against your configuration, and prints the diff — resources to create, update in place, or destroy — without changing anything.
+
+```bash
+terraform plan
+```
+
+```
+# example output
+Terraform will perform the following actions:
+
+  # google_storage_bucket.reports will be created
+  + resource "google_storage_bucket" "reports" {
+      + name     = "acme-monthly-reports"
+      + location = "US"
+      + id       = (known after apply)
+    }
+
+Plan: 1 to add, 0 to change, 0 to destroy.
+```
+
+`terraform apply` executes a plan: it recomputes the diff (unless you hand it a saved plan file, covered below), shows it to you, asks for confirmation, and then actually calls the GCP API to create, update, or destroy resources.
+
+```bash
+terraform apply
+```
+
+`terraform destroy` is the inverse of apply: it computes a plan to remove every resource this configuration manages, and — after confirmation — deletes them.
+
+```bash
+terraform destroy
+```
+
+<Mermaid title="The core Terraform workflow, with destroy as a separate path" code={workflowDiagram} />
+
+export const workflowDiagram = `flowchart LR
+  init["terraform init"] --> plan["terraform plan"]
+  plan --> review{"Review the diff"}
+  review --> apply["terraform apply"]
+  apply --> real["Real infrastructure updated"]
+  init -.-> destroy["terraform destroy"]
+  destroy -.-> gone["Managed resources removed"]`;
+
+## Saving a plan before applying it
+
+Plain `terraform apply` recomputes its own plan right before running it. Between the moment you reviewed a `plan` output and the moment someone runs `apply`, the real world can change — someone else applies a conflicting change, a GCP quota shifts, anything. The plan `apply` recomputes at that point might not be the one you reviewed.
+
+Saving the plan to a file closes that gap: `apply` is then told to execute **exactly** that file, with no recomputation.
+
+```bash
+terraform plan -out=tfplan
+terraform apply tfplan
+```
+
+This pattern matters most in CI/CD: a pipeline can run `plan -out=tfplan`, post the diff for human review, and only run `apply tfplan` after approval — guaranteeing the applied changes are precisely the ones a human signed off on.
+
+## The provider dependency lock file
+
+When `terraform init` resolves your `required_providers` version constraints, it writes the exact versions and cryptographic checksums it selected into `.terraform.lock.hcl`, in the same directory as your configuration.
+
+```hcl
+# .terraform.lock.hcl (excerpt — Terraform manages this file's contents)
+provider "registry.terraform.io/hashicorp/google" {
+  version     = "6.12.0"
+  constraints = "~> 6.0"
+  hashes = [
+    "h1:examplehashvaluegeneratedbyterraforminit=",
+  ]
+}
+```
+
+This file should be **committed to version control**. It is the provider-level analogue of a `package-lock.json` or `Gemfile.lock`: without it, two different runs of `terraform init` — your laptop today, a teammate's laptop tomorrow, a CI runner next week — could each resolve `~> 6.0` to a different patch release, and a subtle behavior difference in the provider could produce a different plan on someone else's machine for no visible reason. With the lock file committed, every `init` installs the identical versions until someone deliberately runs `terraform init -upgrade` to move the constraints forward.
+
+<Callout title="The one-line takeaway">
+The everyday loop is **init** (install providers, set up the backend), **plan** (a dry-run diff, changes nothing), **apply** (execute the plan against real GCP), and **destroy** (tear down everything managed); saving a plan with `plan -out=tfplan` then running `apply tfplan` guarantees the exact reviewed plan is what runs, and the committed **`.terraform.lock.hcl`** pins exact provider versions and checksums so every teammate and CI run gets identical providers.
+</Callout>
+
+export const quizWorkflow = [
+  {
+    q: 'What does terraform plan actually do',
+    options: [
+      'It applies changes immediately without confirmation',
+      'It computes and displays the diff between configuration and real state as a dry run, without changing any infrastructure',
+      'It downloads provider plugins',
+      'It deletes all resources managed by the configuration',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why would you save a plan to a file with plan -out=tfplan before running apply',
+    options: [
+      'It makes the plan run faster',
+      'It is required before terraform init can run',
+      'It guarantees the exact reviewed plan is what gets applied, with no risk of apply recomputing a different plan if real infrastructure changed in the meantime',
+      'It automatically approves the plan without confirmation',
+    ],
+    answer: 2,
+  },
+  {
+    q: 'What is .terraform.lock.hcl for, and should it be committed to git',
+    options: [
+      'It stores sensitive credentials and must never be committed',
+      'It records the exact provider versions and checksums selected by init, and should be committed so every teammate and CI run gets identical providers',
+      'It is a temporary cache file that Terraform deletes automatically',
+      'It stores the Terraform state and should be committed alongside it',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does terraform destroy do',
+    options: [
+      'It deletes the .terraform.lock.hcl file only',
+      'It computes a plan to remove every resource the configuration manages and, after confirmation, deletes them',
+      'It reverts the configuration files to their last committed version',
+      'It uninstalls the Terraform CLI',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="foundations/the-terraform-workflow" questions={quizWorkflow} />
+
+<ProgressTracker client:visible id="foundations/the-terraform-workflow" />

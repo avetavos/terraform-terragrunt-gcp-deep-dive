@@ -1,0 +1,141 @@
+---
+title: 'DRY Configuration with include'
+description: 'include block, find_in_parent_folders และ read_terragrunt_config ทำให้ unit inherit root.hcl กับ config ระดับกลางได้โดยไม่ต้องเขียนซ้ำ'
+sidebar:
+  order: 2
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## ไอเดียในหนึ่งประโยค
+
+`terragrunt.hcl` ของ unit ใช้ `include` block คู่กับ `find_in_parent_folders()` เพื่อดึงทุกอย่างที่ `root.hcl` ประกาศไว้เข้ามา และยังใช้วิธีเดียวกันนี้ซ้อน config ระดับกลางที่เล็กกว่าเข้ามาได้อีก ทำให้ config ที่ share กันไม่ต้องเขียนซ้ำแม้แต่ครั้งเดียว
+
+## include block: inherit root.hcl โดยไม่ต้องเขียนซ้ำ
+
+บทก่อนหน้าโชว์ `terragrunt.hcl` ของ unit ที่อ้างถึง `root.hcl` ด้วยสามบรรทัด แต่ยังไม่ได้อธิบายว่ามันทำงานยังไง กลไกนั้นคือ `include` block
+
+```hcl
+# network/terragrunt.hcl
+include "root" {
+  path = find_in_parent_folders("root.hcl")
+}
+```
+
+`include "root"` บอก Terragrunt ให้อ่านไฟล์ที่ `path` แล้ว merge `remote_state`, `generate`, และ top-level block อื่น ๆ ของมันเข้ากับ config ของ unit นี้ เหมือนกับว่า unit เขียนสิ่งเหล่านั้นเองทั้งหมด label `"root"` เป็นแค่ชื่อของ `include` block ตัวนี้ unit หนึ่งตัวมี `include` มากกว่าหนึ่งอันได้ในทางทฤษฎี แต่ละอันดึงคนละไฟล์ label นี่แหละคือตัวแยกความแตกต่างระหว่างพวกมัน ถ้าไม่มี block นี้ ทุก unit จะต้องมี `remote_state` กับ `generate` เป็นสำเนาของตัวเองจากบทก่อนหน้า ซึ่งเป็นความซ้ำซ้อนที่ Terragrunt เกิดมาเพื่อกำจัดพอดี
+
+## find_in_parent_folders: เดินขึ้นต้นไม้ directory เพื่อหาไฟล์
+
+`find_in_parent_folders("root.hcl")` ไม่ได้สมมติระยะห่างคงที่ระหว่าง unit กับ shared config ชั้นบน มันเริ่มที่ directory ของ unit เอง แล้วเดินขึ้นไปทีละ parent directory จนเจอไฟล์ชื่อ `root.hcl` แล้วคืนค่า path ของไฟล์นั้นกลับมา แปลว่า unit ที่ลึกสองชั้นกับ unit ที่ลึกห้าชั้นเขียน `include` block เหมือนกันเป๊ะ ๆ ได้ และยังหาไฟล์ที่ถูกต้องเจออยู่ดี
+
+```text
+acme-infra/
+├── root.hcl
+└── prod/
+    ├── project.hcl
+    └── network/
+        └── terragrunt.hcl
+```
+
+จาก `prod/network/terragrunt.hcl` `find_in_parent_folders("root.hcl")` ไต่ผ่าน `prod/` ขึ้นไปเจอ `acme-infra/root.hcl` ถ้าไม่มีไฟล์ชื่อนั้นอยู่ที่ไหนเลยเหนือ unit ขึ้นไป Terragrunt จะ throw error ออกมาแทนที่จะรันต่อไปเงียบ ๆ โดยไม่มีมัน `root.hcl` ที่หายไปถือเป็นความผิดพลาดของ config ไม่ใช่สิ่งที่ข้ามผ่านไปได้
+
+## locals กับ read_terragrunt_config: share config ข้ามระดับ
+
+`include` ถูกออกแบบมาให้ทำงานเฉพาะทางเดียวคือ inherit `root.hcl` ที่ share กันตัวเดียวนั้น แต่ config จำนวนไม่น้อยไม่ได้ global ขนาดนั้น บางอย่างใช้แค่กับ unit ของ GCP project เดียว ซึ่งอยู่ต่ำกว่า root ลงมาหนึ่งชั้น สำหรับกรณีนี้ `locals` block คู่กับ `read_terragrunt_config()` ทำให้ unit ไหนก็ตามอ่านไฟล์ที่เล็กกว่าและเจาะจงกว่าได้ แล้วดึงค่าเฉพาะที่ต้องการออกมา ต่อจาก layout ด้านบน `prod/project.hcl` เก็บค่าที่เจาะจงสำหรับ GCP project นั้นตัวเดียว
+
+```hcl
+# prod/project.hcl
+locals {
+  project_id = "acme-prod-123456"
+  region     = "us-central1"
+}
+```
+
+ทุก unit ใต้ `prod/` อ่านมันด้วยวิธีเดียวกัน
+
+```hcl
+# prod/network/terragrunt.hcl
+include "root" {
+  path = find_in_parent_folders("root.hcl")
+}
+
+locals {
+  project_vars = read_terragrunt_config(find_in_parent_folders("project.hcl"))
+}
+
+inputs = {
+  project_id = local.project_vars.locals.project_id
+  region     = local.project_vars.locals.region
+  cidr_block = "10.0.0.0/16"
+}
+```
+
+`read_terragrunt_config()` parse ไฟล์ปลายทางแล้วส่งค่าข้างในกลับมาเป็น value เดียว ทำให้ `local.project_vars.locals.project_id` เอื้อมเข้าไปหยิบ `project_id` จาก `locals` block ของไฟล์นั้นได้ ไม่มีอะไรห้าม directory tree จากการมีไฟล์แบบนี้หลายไฟล์คนละระดับ เช่น `project.hcl` ต่อหนึ่ง GCP project และ `env.hcl` ต่อหนึ่ง environment แต่ละไฟล์อ่านด้วยวิธีเดียวกัน แต่ละไฟล์ตัดปัญหา config ที่ copy-paste ซ้ำไปอีกหนึ่งจุด
+
+## inputs: เทียบเท่า .tfvars ของ Terragrunt
+
+`inputs` block ที่เห็นในสองตัวอย่างข้างบนคือวิธีที่ `terragrunt.hcl` ของ unit ส่งค่า variable ให้ Terraform module ข้างใต้ ทำหน้าที่เดียวกับที่ไฟล์ `.tfvars` ปกติทำ ทุก key ข้างใน `inputs` ถูกส่งต่อให้ Terraform เป็นค่า variable ของ module ที่ `terraform` block ของ unit นั้นชี้ไปหา โดยไม่ต้องมีไฟล์ `.tfvars` แยกอยู่ใน module เลย นี่คือสิ่งที่ทำให้การรวมค่าที่ inherit มากับค่าเฉพาะของ unit ทำได้ตรง ๆ `project_id` กับ `region` ข้างบนมาจาก `project.hcl` ผ่าน `local.project_vars` ส่วน `cidr_block` เขียนตรงในตัว unit เอง ทั้งสองแบบไปอยู่ใน `inputs` map เดียวกันโดยไม่ต้องมี syntax พิเศษมาผสมมันเข้าด้วยกัน
+
+<Mermaid title="root.hcl, project.hcl ระดับกลาง, และ leaf unit ที่รวมทั้งสองเข้าด้วยกัน" code={dryConfigDiagram} />
+
+export const dryConfigDiagram = `flowchart TD
+  root["root.hcl (remote_state + generate)"]
+  project["prod/project.hcl (locals: project_id, region)"]
+  unit["prod/network/terragrunt.hcl"]
+  root -->|include + find_in_parent_folders| unit
+  project -->|read_terragrunt_config + find_in_parent_folders| unit
+  unit --> inputsBlock["inputs: project_id, region, cidr_block"]`;
+
+<Callout title="สรุปหนึ่งบรรทัด">
+`include "root" { path = find_in_parent_folders("root.hcl") } ` block คือวิธีที่ unit inherit ทุกอย่างที่ `root.hcl` ประกาศไว้ โดย `find_in_parent_folders()` เดินขึ้น directory tree ทำให้ `include` block เดียวกันใช้ได้ไม่ว่า unit จะอยู่ลึกแค่ไหน config ที่แคบกว่าทั้ง repository แต่ยัง share กันมากกว่าหนึ่ง unit เช่น setting ของ GCP project เดียว ควรอยู่ในไฟล์ระดับกลางที่เล็กกว่าอย่าง `project.hcl` อ่านด้วย `locals` block คู่กับ `read_terragrunt_config(find_in_parent_folders("project.hcl"))` แทนที่จะใช้ `include` ไม่ว่า unit จะจบลงด้วยค่าจากไหน จาก `root.hcl` จากไฟล์ระดับกลาง หรือเขียนตรง ๆ เอง ทุกค่าไหลไปรวมกันใน `inputs = { ... }` map เดียวกัน ซึ่งเทียบเท่ากับไฟล์ `.tfvars` ของ module ที่ unit นั้นรัน
+</Callout>
+
+export const quizDryConfig = [
+  {
+    q: 'include block คู่กับ find_in_parent_folders ทำอะไรจริง ๆ',
+    options: [
+      'copy เนื้อหาของ root.hcl ไปสร้างไฟล์ใหม่บน disk',
+      'อ่านไฟล์ที่ path ที่กำหนด โดยเดินขึ้น parent directory เพื่อหามัน แล้ว merge config นั้นเข้ากับ unit ปัจจุบัน',
+      'ลบ root.hcl ทิ้งหลังจากอ่านครั้งเดียว',
+      'ทำงานได้เฉพาะตอน unit อยู่ต่ำกว่า root.hcl แค่หนึ่งชั้นเท่านั้น',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'read_terragrunt_config คู่กับ locals block ปกติใช้ทำอะไร',
+    options: [
+      'แทนที่ include block ไปเลยสำหรับทุก unit',
+      'ดึงค่าเฉพาะออกจาก config ไฟล์ที่เล็กกว่าและเจาะจงกว่า เช่น ไฟล์ setting ของ GCP project เดียวที่หลาย unit share กัน',
+      'generate ไฟล์ backend.tf เหมือนที่ remote_state ทำ',
+      'รัน terraform apply บน unit อื่น',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'inputs block ใน terragrunt.hcl ของ unit เทียบเท่ากับอะไร',
+    options: [
+      'ไฟล์ .tfvars ที่ส่งค่า variable ให้ Terraform module ข้างใต้',
+      'provider block',
+      'remote_state block',
+      'ค่า output ของ Terraform',
+    ],
+    answer: 0,
+  },
+  {
+    q: 'ถ้า find_in_parent_folders หาไฟล์ชื่อนั้นไม่เจอเลยเหนือ unit ขึ้นไป จะเกิดอะไรขึ้น',
+    options: [
+      'Terragrunt รันต่อไปเงียบ ๆ โดยไม่มี shared config',
+      'Terragrunt throw error ออกมาแทนที่จะรันต่อ',
+      'Terragrunt สร้างไฟล์เปล่าชื่อนั้นให้เองอัตโนมัติ',
+      'Terragrunt ใช้ terragrunt.hcl ของ unit เองเป็น root config แทน',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="terragrunt-fundamentals/dry-configuration-with-include" questions={quizDryConfig} />
+
+<ProgressTracker client:visible id="terragrunt-fundamentals/dry-configuration-with-include" />

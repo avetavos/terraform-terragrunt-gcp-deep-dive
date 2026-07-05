@@ -1,0 +1,32 @@
+---
+title: 'Terraform & Terragrunt for GCP — From Zero to Hero'
+description: 'คอร์ส Terraform และ Terragrunt แบบ zero-to-hero เน้น developer โดยใช้ Google Cloud เป็นเป้าหมาย — HCL, state, variable และ module, การออกแบบ multi-environment, Terragrunt และการรัน infrastructure as code บน production'
+sidebar:
+  order: 1
+---
+
+import Callout from '../../../../components/Callout.astro';
+
+**Terraform** คือเครื่องมือ infrastructure as code แบบ declarative คุณอธิบาย resource บน cloud ที่ต้องการเป็น HCL แล้ว Terraform จะหาวิธีทำให้ของจริงตรงกับที่อธิบายไว้ — สร้าง แก้ไข หรือลบ resource ตามที่จำเป็น คอร์สนี้เขียนขึ้น**สำหรับ developer** — คนที่เขียนและ review การเปลี่ยนแปลง Terraform, จัดการ state ร่วมกับทีม และต้องทำให้การเปลี่ยนแปลง infrastructure ปลอดภัยบน production
+
+ทุกตัวอย่างในคอร์สนี้ใช้ **Google Cloud (GCP)** เป็นเป้าหมาย ด้วย resource type จริง (`google_compute_instance`, `google_storage_bucket`, `google_service_account` และอื่น ๆ) และ remote backend แบบ GCS จริง — HCL syntax, state model และแนวคิดของ Terragrunt ที่คุณเรียนไปใช้ได้ตรงกับ provider อื่นเช่นกัน เปลี่ยนแค่ชื่อ resource type กับ backend configuration เท่านั้น ส่วนที่ tutorial เก่ามักสอนผิด — เช่นคำสั่ง `run --all` ของ Terragrunt ที่มาแทน `run-all`/`plan-all` ที่เลิกใช้แล้ว — คอร์สนี้สอนรูปแบบที่ถูกต้องและเป็นปัจจุบัน พร้อมบอกตรง ๆ ว่าอันไหนเปลี่ยนไป
+
+## สิ่งที่คอร์สนี้ครอบคลุม
+
+| Module | คุณจะได้เรียน |
+| --- | --- |
+| **Foundations** | Infrastructure as Code, HCL syntax, provider และ resource, dependency graph, Terraform workflow |
+| **State Management** | state file, remote backend และ locking, drift detection กับ import, ข้อมูล sensitive ใน state |
+| **Variables & Data Flow** | input variable, output กับ local, expression และ function, count เทียบกับ for_each |
+| **Modules** | เขียน module ที่ reuse ได้, การ compose และ source, versioning, การ test ด้วย `terraform test` |
+| **Multi-Environment** | ปัญหา dev/staging/prod, Terraform workspace, directory-per-environment, ทำไมต้องมี Terragrunt |
+| **Terragrunt Fundamentals** | `root.hcl`, DRY configuration ด้วย `include`, `dependency` block ระหว่าง unit, การรันหลาย unit พร้อมกัน |
+| **Production & Ecosystem** | CI/CD สำหรับ infrastructure, policy as code กับ static analysis, secret และ credential, production checklist |
+
+## วิธีอ่าน
+
+แต่ละบทเริ่มด้วยไอเดียหลักในหนึ่งประโยค แสดง HCL และ CLI command จริง มีไดอะแกรมของกลไกที่เกี่ยวข้อง และปิดท้ายด้วย takeaway หนึ่งบรรทัดพร้อม quiz สั้น ๆ อ่านเรียงจากบนลงล่าง — module หลัง ๆ จะอ้างอิงคำศัพท์เรื่อง resource, state และ dependency graph จากบทแรก ๆ เหล่านี้
+
+<Callout title="The one-line takeaway">
+Terraform คือ **infrastructure as code แบบ declarative** คุณอธิบาย GCP resource ที่ต้องการเป็น HCL แล้ว Terraform วางแผนและ apply การเปลี่ยนแปลงที่จำเป็นเพื่อไปถึงจุดนั้น พร้อม track ทุกอย่างไว้ใน **state** คอร์สนี้สอน Terraform และ Terragrunt จากมุมมอง developer — workflow, guarantee และพฤติกรรมบน production — เริ่มจาก HCL เอง
+</Callout>

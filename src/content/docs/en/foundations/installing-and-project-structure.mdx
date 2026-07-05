@@ -1,0 +1,204 @@
+---
+title: 'Installing Terraform and Project Structure'
+description: 'Installing Terraform with a version manager like tenv, a minimal real GCP project, the conventional file layout, and the terraform fmt and validate commands.'
+sidebar:
+  order: 5
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## The idea in one sentence
+
+Install Terraform through a version manager rather than a single pinned binary, write your first real GCP resource, and split it across a few conventionally named files — none of which Terraform actually requires.
+
+## Installing Terraform (and why a version manager beats a single binary)
+
+You can download a single Terraform binary from HashiCorp and put it on your `PATH`, and that works fine for a solo experiment. The moment you work on more than one project, though, that approach breaks down: one repository was written against Terraform 1.5, another needs a 1.9 feature, and a third has already migrated to OpenTofu. Keeping one global binary in sync with whichever project you happen to be in is a constant, error-prone chore.
+
+A **version manager** solves this by installing multiple versions side by side and switching between them per project, usually driven by a version file committed to the repository. **tenv** is a good choice specifically because it is not tied to a single tool: it manages Terraform, OpenTofu, Terragrunt, and Atmos versions all from one CLI, which matters once your team is running Terragrunt alongside Terraform (covered later in this course).
+
+```bash
+# install tenv (macOS, via Homebrew)
+brew install tenv
+
+# install and pin a specific Terraform version for the current directory
+tenv tf install 1.9.0
+tenv tf use 1.9.0
+
+# tenv reads a .terraform-version file (or the terraform block's
+# required_version constraint) to pick the right version automatically
+terraform version
+```
+
+Whichever installation method you use, the day-to-day commands you run against the `terraform` binary itself are identical — a version manager only changes how that binary gets onto your machine.
+
+## A minimal real GCP project
+
+A Terraform project is just a directory containing one or more `.tf` files. The smallest useful one declares a provider and a single resource:
+
+```hcl
+terraform {
+  required_version = ">= 1.7.0"
+
+  required_providers {
+    google = {
+      source  = "hashicorp/google"
+      version = "~> 6.0"
+    }
+  }
+}
+
+provider "google" {
+  project = "acme-app"
+  region  = "us-central1"
+}
+
+resource "google_storage_bucket" "reports" {
+  name     = "acme-monthly-reports"
+  location = "US"
+}
+```
+
+That is a complete, applyable configuration: no VPC, no networking, no prerequisites beyond GCP credentials in your environment (Application Default Credentials, set up with `gcloud auth application-default login`). `google_storage_bucket` is a good first resource for exactly that reason — it does not depend on anything else existing first.
+
+## Conventional file layout
+
+Real projects split that single file into several, by convention:
+
+```hcl
+# providers.tf
+terraform {
+  required_version = ">= 1.7.0"
+
+  required_providers {
+    google = {
+      source  = "hashicorp/google"
+      version = "~> 6.0"
+    }
+  }
+}
+
+provider "google" {
+  project = "acme-app"
+  region  = "us-central1"
+}
+```
+
+```hcl
+# variables.tf
+variable "bucket_name" {
+  description = "Name of the storage bucket to create"
+  type        = string
+  default     = "acme-monthly-reports"
+}
+```
+
+```hcl
+# main.tf
+resource "google_storage_bucket" "reports" {
+  name     = var.bucket_name
+  location = "US"
+}
+```
+
+```hcl
+# outputs.tf
+output "bucket_self_link" {
+  description = "Self link of the created storage bucket"
+  value       = google_storage_bucket.reports.self_link
+}
+```
+
+The names `main.tf`, `variables.tf`, `outputs.tf`, `providers.tf`, and `versions.tf` are a **convention, not a Terraform requirement**. Terraform does not parse filenames at all: it loads every `.tf` file in a directory, concatenates them into one combined configuration, and does not care whether you called the file `main.tf`, `zzz.tf`, or `whatever.tf`. A resource in `outputs.tf` and a variable it references in `main.tf` work exactly the same as if everything lived in one file — Terraform builds the same dependency graph either way. Splitting by concern (providers, variables, resources, outputs) exists purely so a human opening the directory knows where to look, not because Terraform needs the boundary.
+
+<Mermaid title="Terraform loads every .tf file in a directory into one combined configuration" code={installDiagram} />
+
+export const installDiagram = `flowchart TB
+  subgraph dir["Project directory"]
+    main["main.tf"]
+    vars["variables.tf"]
+    outs["outputs.tf"]
+    prov["providers.tf"]
+    ver["versions.tf"]
+  end
+  main --> combined["One combined Terraform configuration"]
+  vars --> combined
+  outs --> combined
+  prov --> combined
+  ver --> combined`;
+
+## Day-1 hygiene: fmt and validate
+
+Two commands are worth running before every commit, and cost nothing to run constantly.
+
+`terraform fmt` rewrites files in place to Terraform's canonical formatting — consistent indentation, aligned `=` signs, consistent spacing. It fixes style, not logic.
+
+```bash
+terraform fmt
+```
+
+`terraform validate` checks that the configuration is internally consistent: valid HCL syntax, correctly typed arguments, referenced variables that actually exist. It catches typos and structural mistakes before you even talk to GCP.
+
+```bash
+terraform validate
+```
+
+```
+Success! The configuration is valid.
+```
+
+What `validate` does **not** do is check anything against the real GCP API. It has no idea whether your project has hit a service quota, whether the bucket name you chose is already taken globally, or whether your service account actually has permission to create it — all of that only surfaces when you run `terraform plan`, which is the first command that talks to GCP at all. A configuration can pass `validate` cleanly and still fail at `plan` or `apply` time.
+
+<Callout title="The one-line takeaway">
+Install Terraform through a **version manager** like `tenv` (which also handles OpenTofu and Terragrunt) instead of a single pinned binary; a minimal real project is just a `provider` block plus one resource like `google_storage_bucket`; the `main.tf` / `variables.tf` / `outputs.tf` / `providers.tf` / `versions.tf` split is a **human convention** — Terraform loads every `.tf` file in a directory as one combined configuration regardless of filename; and `terraform fmt` (canonical formatting) plus `terraform validate` (internal syntax and consistency checks) are cheap, worthwhile Day-1 habits — but `validate` never talks to the real GCP API, so it cannot catch a quota limit, a taken bucket name, or a missing permission, which is what `plan` is for.
+</Callout>
+
+export const quizInstall = [
+  {
+    q: 'Does Terraform care whether a resource is defined in main.tf versus some other filename',
+    options: [
+      'Yes, resources must be defined in main.tf specifically',
+      'No, Terraform loads every .tf file in a directory and combines them into one configuration regardless of filename; the main.tf/variables.tf/outputs.tf split is purely a human convention',
+      'Yes, but only outputs must be in outputs.tf',
+      'No, but only if the files are listed in a manifest',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does terraform fmt do',
+    options: [
+      'It checks the configuration against the real GCP API',
+      'It rewrites files in place to Terraform canonical formatting (indentation, spacing, alignment) without changing logic',
+      'It formats the state file',
+      'It deletes unused variables',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does terraform validate check',
+    options: [
+      'Whether the GCP project has hit a service quota',
+      'Internal syntax and consistency of the configuration, such as valid HCL and correctly typed arguments, without contacting GCP',
+      'Whether the bucket name you chose is already taken globally',
+      'Whether your service account has permission to create the resources',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why is passing terraform validate not enough to guarantee a real GCP-side problem will not occur',
+    options: [
+      'validate is only a linter for HCL keywords and skips resource blocks entirely',
+      'validate never contacts the real GCP API, so it cannot catch things like quota limits, globally taken names, or missing permissions — only plan or apply can surface those',
+      'validate only works for the google_storage_bucket resource type',
+      'validate always fails on the first run regardless of configuration',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="foundations/installing-and-project-structure" questions={quizInstall} />
+
+<ProgressTracker client:visible id="foundations/installing-and-project-structure" />

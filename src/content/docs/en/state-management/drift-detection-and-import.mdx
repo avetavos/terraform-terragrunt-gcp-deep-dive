@@ -1,0 +1,131 @@
+---
+title: 'Drift Detection and Import'
+description: 'How Terraform surfaces configuration drift, the difference between the terraform import command and the declarative import block, and what state rm does to real infrastructure.'
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## The idea in one sentence
+
+**Configuration drift** is what happens when reality diverges from your Terraform config without Terraform's knowledge, and `terraform import` (or the declarative `import` block) is how you bring an already-existing resource under Terraform's management in the first place.
+
+## Configuration drift
+
+Drift happens whenever someone or something changes a resource outside of Terraform. A common case on Google Cloud: an engineer opens the Console under time pressure and edits a Compute Engine instance's labels directly, or resizes its machine type, without touching the Terraform configuration that supposedly manages that instance. Terraform's recorded state now disagrees with the real object.
+
+Nothing alerts you to this automatically. The next time someone runs:
+
+```bash
+terraform plan
+```
+
+Terraform refreshes its view of the real resource, compares it against both the configuration and the last recorded state, and surfaces the difference as a plan — typically an "in-place update" that would revert the manual change back to what the configuration says, since Terraform assumes the configuration is the source of truth.
+
+Sometimes you want the opposite: acknowledge the manual change and just bring Terraform's state back in sync with reality, without touching any actual infrastructure. That is what `-refresh-only` mode is for:
+
+```bash
+terraform apply -refresh-only
+```
+
+This updates only the state file's recorded attributes to match what is really running in GCP right now. It does not create, update, or destroy any real resource — it is purely a reconciliation of Terraform's memory with the world.
+
+## Bringing existing resources under management with terraform import
+
+Plenty of GCP resources get created before Terraform ever exists for a project — a Compute Engine instance someone clicked through in the Console, a Cloud Storage bucket created by an early script. The CLI `terraform import` command associates one of those existing, real resources with a resource address already written in your configuration:
+
+```bash
+terraform import google_compute_instance.web projects/my-project-id/zones/us-central1-a/instances/web-vm
+```
+
+This is easy to get wrong in one important way: `terraform import` only populates the state entry. It does not write any HCL for you. You still have to hand-write a `resource "google_compute_instance" "web" { ... }` block yourself, with attributes close enough to the real object that the next `plan` does not show a huge diff. Get the config wrong and your very next `apply` might try to "fix" the resource to match a config that never actually described it.
+
+## The declarative import block
+
+Terraform 1.5 introduced a second way to import that most teams now prefer for anything worth reviewing: the `import` block, written directly in a `.tf` file alongside your other configuration:
+
+```hcl
+import {
+  to = google_compute_instance.web
+  id = "projects/my-project-id/zones/us-central1-a/instances/web-vm"
+}
+```
+
+The advantage over the CLI command is entirely about review. A CLI `terraform import` run is an immediate side effect — it writes to state the moment you run it, with no preview step. An `import` block, by contrast, is just more configuration: it shows up in the output of `terraform plan` as a planned import, exactly like a planned create or update, so a teammate can review it in a pull request before anyone runs `apply`. Terraform can even generate a starting `resource` block for you from the real object's attributes using `terraform plan -generate-config-out=generated.tf`, which you then review and clean up rather than writing from scratch.
+
+## Reorganizing state without touching infrastructure
+
+Two more `terraform state` subcommands round out this lesson, and both are the mirror image of each other:
+
+```bash
+# Rename or move a resource's address in state, e.g. after refactoring into a module
+terraform state mv google_compute_instance.web module.app.google_compute_instance.web
+
+# Stop tracking a resource in state, without destroying the real object
+terraform state rm google_compute_instance.web
+```
+
+`terraform state mv` changes only the address Terraform uses to refer to a resource in state — useful when you restructure a configuration into modules and do not want Terraform to think it needs to destroy the old address and create a new one. `terraform state rm` is the direct opposite of `import`: it deletes a resource's entry from state so Terraform no longer manages it, but it has zero effect on the real GCP object, which keeps running exactly as it was, now simply unmanaged.
+
+<Mermaid title="A manually changed resource surfaces as drift on plan, while an existing untracked resource is brought in with import" code={driftImportDiagram} />
+
+export const driftImportDiagram = `flowchart LR
+  manual["Instance label edited in Console"] --> plan["terraform plan"]
+  plan -->|"diff shown"| drift["Drift detected"]
+  existing["Existing untracked GCP resource"] --> importBlock["import block or terraform import"]
+  importBlock -->|"state entry created"| state["terraform.tfstate"]`;
+
+<Callout title="The one-line takeaway">
+**Configuration drift** is any gap between your Terraform config and real infrastructure caused by changes made outside Terraform, and `terraform plan` is what surfaces it, while `terraform apply -refresh-only` reconciles state with reality without changing any real resource. Both the CLI `terraform import` command and the declarative `import` block bring an existing resource under management by writing a state entry, but only the `import` block is **plannable and reviewable** before it takes effect, which is why it is usually preferred. `terraform state rm` stops Terraform from tracking a resource **without destroying it** — the real object is untouched.
+</Callout>
+
+export const quizDrift = [
+  {
+    q: 'A teammate manually edits a Compute Engine instance in the GCP Console. How does Terraform surface this configuration drift',
+    options: [
+      'Terraform emails an alert automatically as soon as the change happens',
+      'The next terraform plan compares the refreshed real resource against config and state and shows the difference as a diff',
+      'Terraform blocks all future applies until the drift is manually resolved in a special mode',
+      'Drift is invisible to Terraform unless you delete and recreate the resource',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is the key difference between the CLI terraform import command and a declarative import block',
+    options: [
+      'They do exactly the same thing and neither one is preferred over the other',
+      'The import block is plannable and reviewable in terraform plan before it takes effect, while the CLI command writes to state immediately with no preview',
+      'The CLI command works only with Compute Engine resources, while the import block works with all resource types',
+      'The import block automatically writes the matching resource block for you, while the CLI command does not',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does terraform state rm do to the real GCP resource it is pointed at',
+    options: [
+      'It deletes the real resource immediately',
+      'It schedules the real resource for destruction on the next apply',
+      'Nothing. It only removes the entry from Terraform state; the real resource keeps running, now unmanaged',
+      'It moves the real resource into a different GCP project',
+    ],
+    answer: 2,
+  },
+  {
+    q: 'What does terraform apply -refresh-only do',
+    options: [
+      'It destroys and recreates every resource to match the configuration exactly',
+      'It updates only the state file to match the real infrastructure, without creating, updating, or destroying any real resource',
+      'It is identical to a normal terraform apply but skips confirmation',
+      'It deletes the local state file and forces a fresh import of everything',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="state-management/drift-detection-and-import" questions={quizDrift} />
+
+<ProgressTracker client:visible id="state-management/drift-detection-and-import" />

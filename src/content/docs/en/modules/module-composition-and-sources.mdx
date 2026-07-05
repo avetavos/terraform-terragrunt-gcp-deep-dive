@@ -1,0 +1,184 @@
+---
+title: 'Module Composition and Sources'
+description: 'Where module code comes from through the source argument, how output from one module can feed the input of another, and when reaching for the public Terraform Registry beats writing a module from scratch.'
+sidebar:
+  order: 2
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## The idea in one sentence
+
+The **`source`** argument on a `module` block says where that module's code lives — local path, public Registry, or Git URL — and real infrastructure is built by wiring one module's `output` into the next module's `variable`, not by writing one giant flat configuration.
+
+## The source argument: where module code comes from
+
+Every `module` block needs a `source` argument, and Terraform supports three common forms for it. The simplest is a local relative path, pointing at a directory of `.tf` files that lives inside the same repository as the caller:
+
+```hcl
+module "vpc" {
+  source = "./modules/vpc"
+
+  project_id   = var.project_id
+  network_name = "app-network"
+}
+```
+
+A local path is the right choice while a module is still specific to one repository, or while you are actively developing it alongside the code that calls it. Once a module is genuinely reusable across many configurations, though, you usually want to publish it somewhere every caller can reach independently of any one repository — and that is where the public Terraform Registry and Git sources come in.
+
+The public Terraform Registry hosts community and vendor modules under a `namespace/name/provider` address, resolved automatically by `terraform init` without any URL:
+
+```hcl
+module "vpc" {
+  source  = "terraform-google-modules/network/google"
+  version = "~> 9.0"
+
+  project_id   = var.project_id
+  network_name = "app-network"
+}
+```
+
+A Git URL is the third form, useful for private or in-house modules that are not published to any registry. Appending `?ref=` pins the source to a specific tag, branch, or commit, the same way `version` pins a Registry module:
+
+```hcl
+module "vpc" {
+  source = "git::https://github.com/acme-corp/terraform-modules.git//vpc?ref=v2.3.0"
+
+  project_id   = var.project_id
+  network_name = "app-network"
+}
+```
+
+Note the double slash before `vpc` in the Git URL — everything before it is the repository to clone, and everything after it is a subdirectory inside that repository where the module actually lives. This matters because a single Git repository commonly hosts many modules side by side, not just one.
+
+## Composing modules: wiring outputs into inputs
+
+Non-trivial infrastructure is essentially never one giant flat configuration. It is a handful of small, focused modules wired together, where one module's `output` becomes the very next module's input `variable`. Consider a `vpc` module that creates a network and its subnets, and a `compute-instance` module that needs to know which network and subnetwork to attach an instance to:
+
+```hcl
+# modules/vpc/outputs.tf
+output "network_id" {
+  description = "Self link of the VPC network created by this module"
+  value       = google_compute_network.this.id
+}
+
+output "subnet_ids" {
+  description = "Map of region to subnetwork ID"
+  value       = { for s in google_compute_subnetwork.this : s.region => s.id }
+}
+```
+
+```hcl
+# modules/compute-instance/variables.tf
+variable "network_id" {
+  description = "ID of the VPC network to attach the instance to"
+  type        = string
+}
+
+variable "subnet_id" {
+  description = "ID of the subnetwork to attach the instance to"
+  type        = string
+}
+```
+
+The root configuration instantiates both modules and threads the first module's outputs straight into the second module's inputs, with no manual copying of IDs in between:
+
+```hcl
+# root main.tf
+module "vpc" {
+  source       = "./modules/vpc"
+  project_id   = var.project_id
+  network_name = "app-network"
+}
+
+module "compute_instance" {
+  source     = "./modules/compute-instance"
+  project_id = var.project_id
+  network_id = module.vpc.network_id
+  subnet_id  = module.vpc.subnet_ids["us-central1"]
+}
+```
+
+Terraform resolves this dependency automatically: because `module.compute_instance` references `module.vpc.network_id`, Terraform knows to create the network before the instance, without you writing an explicit `depends_on` anywhere.
+
+## Reaching for the public Terraform Registry
+
+Writing a `vpc` module completely from scratch is a reasonable learning exercise, but for production use it is often not the best use of your time. The `terraform-google-modules` organization on the public Registry maintains modules like `terraform-google-modules/network/google` that already handle the fiddly details of GCP networking — custom subnet ranges, secondary ranges for GKE, Shared VPC, Cloud NAT — vetted by a large community of users hitting the same edge cases you would eventually hit yourself.
+
+That said, a Registry module is still someone else's code running in your project with your credentials. Before depending on one in production, read through what it actually creates — its `main.tf`, its default values, the IAM roles or APIs it enables on your behalf. A well-maintained Registry module is a real productivity lever, not a replacement for understanding what gets deployed into your GCP project.
+
+<Mermaid title="Root configuration wiring vpc module outputs into compute-instance module inputs" code={moduleCompositionDiagram} />
+
+export const moduleCompositionDiagram = `flowchart LR
+  subgraph root["Root module"]
+    rvpc["module.vpc"]
+    rci["module.compute_instance"]
+  end
+  subgraph vpcmod["Child module: modules/vpc"]
+    vout1["output: network_id"]
+    vout2["output: subnet_ids"]
+  end
+  subgraph cimod["Child module: modules/compute-instance"]
+    cin1["variable: network_id"]
+    cin2["variable: subnet_id"]
+  end
+  rvpc --> vout1
+  rvpc --> vout2
+  vout1 -->|module.vpc.network_id| rci
+  vout2 -->|module.vpc.subnet_ids| rci
+  rci --> cin1
+  rci --> cin2`;
+
+<Callout title="The one-line takeaway">
+The **`source`** argument on a `module` block points at where its code lives — a local path for modules still tied to one repository, the public **Terraform Registry** for well-maintained community modules resolved by `namespace/name/provider`, or a **Git URL** (optionally pinned with `?ref=`) for private or in-house modules. Real infrastructure is composed from several small, focused modules wired together by passing one module's `output` as the next module's input `variable`, and Terraform resolves the dependency between them automatically. Reaching for a widely-used Registry module like `terraform-google-modules/network/google` is usually a better starting point than writing common infrastructure from scratch, as long as you still read what it creates before trusting it in production.
+</Callout>
+
+export const quizModuleComposition = [
+  {
+    q: 'What are the three common forms a module source argument can take',
+    options: [
+      'A local relative path, the public Terraform Registry, or a Git URL',
+      'Only local relative paths are supported by Terraform',
+      'A JSON manifest, a YAML manifest, or an HCL manifest',
+      'An S3 bucket, a GCS bucket, or an Azure Blob container',
+    ],
+    answer: 0,
+  },
+  {
+    q: 'In the vpc and compute-instance composition example, how does the compute-instance module learn which network to attach to',
+    options: [
+      'It hardcodes the network name inside its own main.tf',
+      'The root configuration passes module.vpc.network_id as the value of the compute-instance modules network_id variable',
+      'Terraform automatically shares all outputs between every module without any wiring',
+      'It reads the network ID from a local state file written by the vpc module',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does the ref query parameter do on a Git module source',
+    options: [
+      'It sets the Terraform CLI version required to use the module',
+      'It pins the source to a specific tag, branch, or commit, similar to how version pins a Registry module',
+      'It renames the module inside the root configuration',
+      'It has no effect and is only used for documentation',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'When does reaching for a public Terraform Registry module like terraform-google-modules/network/google make the most sense',
+    options: [
+      'Never, production infrastructure should always be written entirely from scratch',
+      'Only when no local path or Git source is available',
+      'When the module solves a common, well-understood pattern and you still read what it actually creates before trusting it in production',
+      'Only for modules with zero configuration options',
+    ],
+    answer: 2,
+  },
+];
+
+<Quiz client:visible id="modules/module-composition-and-sources" questions={quizModuleComposition} />
+
+<ProgressTracker client:visible id="modules/module-composition-and-sources" />

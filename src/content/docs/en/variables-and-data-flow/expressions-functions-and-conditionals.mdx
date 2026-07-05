@@ -1,0 +1,184 @@
+---
+title: 'Expressions, Functions, and Conditionals'
+description: 'Using built-in string, collection, and networking functions, experimenting safely with terraform console, writing conditional expressions, and generating repeated nested blocks with dynamic.'
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## The idea in one sentence
+
+Terraform configuration is not just static values — built-in functions transform data, conditional expressions choose between two values, and `dynamic` blocks generate a variable number of nested blocks, all evaluated at `plan` time before any GCP API call happens.
+
+## Built-in functions, by category
+
+Terraform ships a fixed set of built-in functions — there is no way to define your own — grouped loosely by the kind of data they operate on. A few that come up constantly in GCP configurations:
+
+```hcl
+locals {
+  # String functions
+  bucket_suffix = join("-", ["assets", "prod", "us"])
+  path_parts    = split("/", "projects/my-project/zones/us-central1-a")
+  log_message   = format("instance %s in zone %s", "web-1", "us-central1-a")
+
+  # Collection functions
+  tier_lookup = lookup({ dev = "db-f1-micro", prod = "db-custom-2-7680" }, "dev", "db-f1-micro")
+  merged_labels = merge(
+    { managed_by = "terraform" },
+    { environment = "prod" },
+  )
+  has_ssh = contains([22, 443, 8080], 22)
+
+  # Networking function: carve a /24 out of a /16 VPC range
+  subnet_a = cidrsubnet("10.0.0.0/16", 8, 0)
+  subnet_b = cidrsubnet("10.0.0.0/16", 8, 1)
+}
+```
+
+`join` and `split` are inverses of each other — one turns a list into a delimited string, the other turns a delimited string back into a list. `lookup` reads a map by key with an explicit fallback as its third argument, so a missing key never causes an error. `merge` combines multiple maps into one, with later arguments overriding keys from earlier ones. `contains` checks list membership and returns a plain boolean. `cidrsubnet(prefix, newbits, netnum)` is the one worth knowing cold for GCP networking: it takes a base CIDR block, extends its prefix length by `newbits`, and returns the `netnum`-th subnet of that new size — exactly the tool for carving a VPC network's `10.0.0.0/16` range into a series of `/24` subnets without hand-calculating addresses.
+
+## terraform console — a REPL for expressions
+
+Before putting an unfamiliar function or expression into a real resource argument, `terraform console` opens an interactive REPL that evaluates expressions against the current configuration and state, without planning or applying anything.
+
+```bash
+terraform console
+```
+
+```
+> cidrsubnet("10.0.0.0/16", 8, 1)
+"10.0.1.0/24"
+> join("-", ["assets", "prod", "us"])
+"assets-prod-us"
+> var.environment
+"dev"
+```
+
+This is the fastest way to answer "what does this expression actually evaluate to" — type it in, read the result, and only then paste the working expression into a `.tf` file. It is read-only against real infrastructure: `terraform console` can read variables, locals, and existing state, but it cannot create, change, or destroy anything.
+
+## Conditional expressions
+
+A conditional expression has the shape `condition ? true_val : false_val`, and it evaluates to exactly one of the two branches based on whether `condition` is `true` or `false`.
+
+```hcl
+variable "environment" {
+  type        = string
+  description = "Deployment environment name"
+  default     = "dev"
+}
+
+locals {
+  machine_type = var.environment == "prod" ? "e2-standard-4" : "e2-medium"
+}
+
+resource "google_compute_instance" "web" {
+  name         = "web-server"
+  machine_type = local.machine_type
+  zone         = "us-central1-a"
+
+  boot_disk {
+    initialize_params {
+      image = "debian-cloud/debian-12"
+    }
+  }
+
+  network_interface {
+    network = "default"
+    access_config {}
+  }
+}
+```
+
+The three parts are `condition` (an expression that must evaluate to a boolean), `true_val` (used when `condition` is `true`), and `false_val` (used when `condition` is `false`). Here, `local.machine_type` resolves to `"e2-standard-4"` only when `var.environment` is exactly `"prod"`, and falls back to `"e2-medium"` for every other value, including `"dev"` and `"staging"`.
+
+## dynamic blocks — a variable number of nested blocks
+
+A `count` or `for_each` on a resource generates a variable number of whole resources, covered in the next lesson. A `dynamic` block solves a related but distinct problem: generating a variable number of repeated nested blocks inside a single resource.
+
+```hcl
+variable "allowed_ports" {
+  type        = list(number)
+  description = "TCP ports allowed inbound on the firewall rule"
+  default     = [22, 80, 443]
+}
+
+resource "google_compute_firewall" "allow_multiple" {
+  name    = "allow-multiple-ports"
+  network = "default"
+
+  dynamic "allow" {
+    for_each = var.allowed_ports
+    content {
+      protocol = "tcp"
+      ports    = [allow.value]
+    }
+  }
+}
+```
+
+The `dynamic "allow"` block iterates over `var.allowed_ports`, and for each element generates one `allow { ... }` nested block inside the single `google_compute_firewall.allow_multiple` resource. Inside `content`, `allow.value` refers to the current element — the iterator variable defaults to the dynamic block's own label, `allow`. Reach for `dynamic` when the thing that repeats is a nested block inside one resource; reach for `count` or `for_each` on the resource itself when the thing that repeats is the whole resource.
+
+<Mermaid title="A conditional expression and a function call resolve to one final value used in a resource argument" code={conditionalExpressionDiagram} />
+
+export const conditionalExpressionDiagram = `flowchart LR
+  a["var.environment"] --> c{"environment == prod ?"}
+  c -->|true| t["e2-standard-4"]
+  c -->|false| f["e2-medium"]
+  t --> m["local.machine_type"]
+  f --> m
+  m --> r["google_compute_instance.web.machine_type"]`;
+
+<Callout title="The one-line takeaway">
+Terraform's built-in **functions** cover strings (`join`, `split`, `format`), collections (`lookup`, `merge`, `contains`), and networking (`cidrsubnet` for carving VPC ranges into subnets) — `terraform console` is the fastest way to check what any expression actually evaluates to, before it goes into a resource argument. A **conditional expression** (`condition ? true_val : false_val`) picks between exactly two values based on a boolean condition. A **`dynamic`** block generates a variable number of repeated nested blocks inside one resource, driven by `for_each` over a collection — a distinct concept from the `count`/`for_each` resource meta-arguments covered next, which generate a variable number of whole resources instead.
+</Callout>
+
+export const quizExpressionsFunctions = [
+  {
+    q: 'What is terraform console used for',
+    options: [
+      'Applying infrastructure changes faster than terraform apply',
+      'An interactive REPL for evaluating expressions and functions against the current config and state, without changing any infrastructure',
+      'Encrypting sensitive values before they reach the state file',
+      'Generating a variable number of resources from a for_each meta-argument',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What are the three parts of a conditional expression',
+    options: [
+      'A function name, an argument list, and a return type',
+      'A condition that evaluates to a boolean, a true_val, and a false_val',
+      'A for_each map, a key, and a value',
+      'A variable, a type constraint, and a default',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'When would you reach for a dynamic block instead of count or for_each on a resource',
+    options: [
+      'When you need a variable number of whole separate resources',
+      'When you need a variable number of repeated nested blocks inside a single resource, such as several allow blocks in one firewall resource',
+      'When you need to mask a value from CLI output',
+      'When you need to validate a variable value at plan time',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does cidrsubnet(prefix, newbits, netnum) do',
+    options: [
+      'It merges two separate CIDR ranges into one supernet',
+      'It extends a CIDR prefix by newbits additional bits and returns the netnum-th subnet of that new size',
+      'It checks whether an IP address is a member of a CIDR range',
+      'It converts a CIDR range into a list of individual IP addresses',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="variables-and-data-flow/expressions-functions-and-conditionals" questions={quizExpressionsFunctions} />
+
+<ProgressTracker client:visible id="variables-and-data-flow/expressions-functions-and-conditionals" />

@@ -1,0 +1,188 @@
+---
+title: 'Directory-per-Environment Pattern'
+description: 'directory และ GCP project ที่แยกกันจริงต่อ environment ให้ isolation จริงยังไง และมันแลกมาด้วยการซ้ำซ้อนอะไรบ้าง'
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## ไอเดียในหนึ่งประโยค
+
+directory-per-environment pattern ให้แต่ละ environment มี directory ของตัวเอง, backend ของตัวเอง, และ GCP project ของตัวเองเพื่อ isolation จริง ในขณะที่ทุก directory เรียก shared module ตัวเดียวกัน ทำให้ logic ของ infrastructure จริง ๆ อยู่ที่เดียวเป๊ะ
+
+## directory จริงต่อ environment ชี้ไปที่ project จริง
+
+workspace ใช้ backend เดียวกัน, provider `project` เดียวกัน, และโค้ด `.tf` ชุดเดียวกันข้ามทุก environment ซึ่งคือ isolation ที่อ่อนแอตามที่บทก่อนหน้าชี้ไว้ pattern แบบ directory-per-environment แก้ตรงนี้ด้วยการให้แต่ละ environment มี root configuration ที่แยกกันจริง แต่ละอันมี backend block ของตัวเองและ `provider "google"` block ของตัวเองที่ชี้ไปที่ GCP project ของ environment นั้น
+
+```bash
+tree environments
+environments
+├── dev
+│   └── main.tf
+├── staging
+│   └── main.tf
+└── prod
+    └── main.tf
+```
+
+```hcl
+# environments/dev/main.tf
+terraform {
+  backend "gcs" {
+    bucket = "acme-terraform-state-dev"
+    prefix = "app"
+  }
+}
+
+provider "google" {
+  project = "acme-dev-123456"
+  region  = "us-central1"
+}
+
+module "app" {
+  source        = "../../modules/app"
+  environment   = "dev"
+  machine_type  = "e2-small"
+  instance_count = 1
+}
+```
+
+```hcl
+# environments/staging/main.tf
+terraform {
+  backend "gcs" {
+    bucket = "acme-terraform-state-staging"
+    prefix = "app"
+  }
+}
+
+provider "google" {
+  project = "acme-staging-234567"
+  region  = "us-central1"
+}
+
+module "app" {
+  source        = "../../modules/app"
+  environment   = "staging"
+  machine_type  = "e2-medium"
+  instance_count = 2
+}
+```
+
+```hcl
+# environments/prod/main.tf
+terraform {
+  backend "gcs" {
+    bucket = "acme-terraform-state-prod"
+    prefix = "app"
+  }
+}
+
+provider "google" {
+  project = "acme-prod-345678"
+  region  = "us-central1"
+}
+
+module "app" {
+  source        = "../../modules/app"
+  environment   = "prod"
+  machine_type  = "e2-standard-4"
+  instance_count = 5
+}
+```
+
+แต่ละ directory มี state bucket ของตัวเองและ `project` ของตัวเอง ทำให้ความผิดพลาดที่เกิดขึ้นตอน `terraform apply` รันอยู่ใน `environments/dev` ถูกจำกัดอยู่แค่ `acme-dev-123456` เท่านั้น มันไม่มีทางไปถึง `acme-staging-234567` หรือ `acme-prod-345678` เลย นี่คือ boundary แข็ง ๆ ที่ GCP IAM กับ billing บังคับไว้ ไม่ใช่แค่ข้อตกลงที่ต้องมีใครจำไว้เอง ซึ่งคือสิ่งที่ workspace ให้ไม่ได้พอดี
+
+## shared module ตัวเดียว caller สามตัวที่ต่างกัน
+
+สังเกตว่าทั้งสาม directory เรียก `source = "../../modules/app"` เดียวกัน resource จริง ๆ ที่ประกอบเป็น "app" อยู่ที่เดียวเป๊ะ
+
+```hcl
+# modules/app/main.tf
+resource "google_compute_instance" "app" {
+  count        = var.instance_count
+  name         = "app-${var.environment}-${count.index}"
+  machine_type = var.machine_type
+  zone         = "us-central1-a"
+
+  boot_disk {
+    initialize_params {
+      image = "debian-cloud/debian-12"
+    }
+  }
+}
+```
+
+bug fix, label ใหม่, หรือการทำ security-group ให้แน่นขึ้นที่ทำใน `modules/app/main.tf` จะมีผลกับ `dev`, `staging`, และ `prod` ในครั้งถัดไปที่แต่ละ environment รัน `terraform apply` มี resource logic แค่ชุดเดียวที่ต้องแก้ ซึ่งคือคุณสมบัติ DRY ที่การ copy-paste directory ตรง ๆ จากบทแรกไม่เคยมี
+
+## สิ่งที่ยังซ้ำซ้อนอยู่
+
+module เองยัง DRY อยู่ แต่ลองดูสามไฟล์ `main.tf` ข้างบนอีกครั้ง block `terraform { backend "gcs" { ... } }`, block `provider "google" { ... }`, และการต่อสาย `module "app" { source = "../../modules/app" ... }` คือ boilerplate ที่แทบเหมือนกันเป๊ะ ซ้ำทุกตัวอักษรในทุก environment directory มีแค่ชื่อ bucket, `project` ID, และ input value ของ `module` ไม่กี่ตัวที่ต่างกันจริง ๆ เพิ่ม environment ที่สี่เข้ามาแล้ว boilerplate ทั้งก้อนนั้นก็ถูก copy-paste เป็นครั้งที่สี่ เปลี่ยนวิธีจัดระเบียบ state เช่นเพิ่ม argument `location` เข้าไปใน backend block ทุกตัว การเปลี่ยนนั้นต้องเอาไปใส่มือใน environment directory ทุกอันที่มีอยู่ เป็นความเสี่ยงจากการทำซ้ำมือแบบเดียวกับที่บทแรกของ module นี้เตือนไว้เป๊ะ แค่ย้ายจาก module logic ไปอยู่ที่ backend กับ provider wiring รอบ ๆ มันแทน
+
+<Mermaid title="Three environment directories, three GCP projects, one shared module, and near-identical backend/provider boilerplate" code={directoryPerEnvDiagram} />
+
+export const directoryPerEnvDiagram = `flowchart TD
+  shared["modules/app (shared source)"]
+  devDir["environments/dev/main.tf"] -->|source| shared
+  stagingDir["environments/staging/main.tf"] -->|source| shared
+  prodDir["environments/prod/main.tf"] -->|source| shared
+  devDir --> devProject["acme-dev-123456"]
+  stagingDir --> stagingProject["acme-staging-234567"]
+  prodDir --> prodProject["acme-prod-345678"]
+  devDir -.->|nearly identical backend + provider block| stagingDir
+  stagingDir -.->|nearly identical backend + provider block| prodDir`;
+
+<Callout title="สรุปหนึ่งบรรทัด">
+**directory-per-environment pattern** ให้แต่ละ environment มี root configuration ของตัวเอง, backend ของตัวเอง, และ **GCP project** ของตัวเอง ซึ่งคือ isolation จริงที่ IAM บังคับได้ ที่ workspace ให้ไม่ได้ และทุก directory เรียก **shared module** เดียวกัน ทำให้ resource logic จริง ๆ ยัง DRY อยู่ที่เดียว ข้อแลกเปลี่ยนคือ **backend block**, **provider block**, และการต่อสาย `source` ของ module จบลงด้วยการถูก copy-paste แทบทุกตัวอักษรข้ามทุก environment directory มีแค่ชื่อ bucket, project ID, และ input value ไม่กี่ตัวที่ต่างกันจริง ซึ่งดึงความเสี่ยงจากการทำซ้ำมือแบบเดียวกับที่ module นี้เปิดเรื่องไว้กลับมาอีกครั้ง แค่ย้ายไปอยู่คนละ layer ของ configuration
+</Callout>
+
+export const quizDirectoryPerEnv = [
+  {
+    q: 'directory-per-environment pattern แก้ปัญหาอะไรที่ Terraform workspace แก้ไม่ได้',
+    options: [
+      'มันทำให้ไม่ต้องมี backend configuration เลย',
+      'มันให้แต่ละ environment มี GCP project ที่แยกกันจริง ทำให้ความผิดพลาดใน environment หนึ่งไม่มีทางไปถึงอีกอันได้',
+      'มันทำให้ไม่ต้องมี shared module เลย',
+      'มันทำให้ terraform apply รันเร็วขึ้น',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'อะไรที่ยัง DRY อยู่ที่เดียวเป๊ะใน pattern นี้',
+    options: [
+      'backend block ของทุก environment',
+      'provider block ของทุก environment',
+      'resource logic จริง ๆ เพราะทุก environment directory เรียก shared module source เดียวกัน',
+      'GCP project ID ของทุก environment',
+    ],
+    answer: 2,
+  },
+  {
+    q: 'อะไรที่ยังซ้ำซ้อนข้าม environment directory ใน pattern นี้ ทั้งที่แก้ปัญหา isolation ได้แล้ว',
+    options: [
+      'source code ของ shared module เอง',
+      'backend block, provider block, และการต่อสาย source กับ version ของ module ที่ซ้ำแทบทุกตัวอักษรในทุก environment directory',
+      'ขอบเขตของ GCP project',
+      'instance count ของแต่ละ environment',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ทำไม boundary แข็ง ๆ ระหว่าง environment ใน pattern นี้มาจาก GCP เองแทนที่จะเป็นแค่ข้อตกลง',
+    options: [
+      'เพราะแต่ละ environment directory ชี้ไปที่ GCP project ที่แยกกันของตัวเอง และ GCP IAM กับ billing บังคับ boundary นั้นไม่ว่าโค้ด Terraform จะเขียนว่าอะไร',
+      'เพราะ Terraform ไม่ยอม apply configuration นอก directory ที่มันถูกเขียนไว้',
+      'เพราะแต่ละ environment directory ใช้ Terraform เวอร์ชันต่างกัน',
+      'เพราะ shared module block การเข้าถึงข้าม environment ไว้ข้างในตัวมันเอง',
+    ],
+    answer: 0,
+  },
+];
+
+<Quiz client:visible id="multi-environment/directory-per-environment-pattern" questions={quizDirectoryPerEnv} />
+
+<ProgressTracker client:visible id="multi-environment/directory-per-environment-pattern" />

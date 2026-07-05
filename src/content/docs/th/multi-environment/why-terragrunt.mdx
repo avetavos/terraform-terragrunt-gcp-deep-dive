@@ -1,0 +1,114 @@
+---
+title: 'Why Terragrunt'
+description: 'ช่องว่างที่ทั้ง Terraform workspace และ directory-per-environment ปิดไม่สนิท และ Terragrunt คืออะไรจริง ๆ ในฐานะ thin wrapper รอบ terraform ตัวจริง'
+sidebar:
+  order: 4
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## ไอเดียในหนึ่งประโยค
+
+Terraform workspace แก้ปัญหา DRY reuse ได้ดีแต่ isolation ยังอ่อน directory-per-environment แก้ isolation ได้ดีแต่ดึง boilerplate ของ backend กับ provider ที่ซ้ำซ้อนกลับมา และ Terragrunt เกิดมาเพื่อปิดช่องว่างที่เหลือนั้นด้วยการห่อ binary `terraform` ตัวจริงแล้ว generate configuration ที่ซ้ำซ้อนให้แทนคุณ
+
+## ความตึงที่แม่นยำ พูดใหม่อีกครั้ง
+
+สองบทที่แล้วแต่ละบทแก้ครึ่งหนึ่งของปัญหาจากบทแรกสุดของ module นี้
+
+- **workspace** เก็บโค้ด `.tf` ชุดเดียว backend เดียว และ provider configuration เดียว — DRY จริง ๆ — แต่ทุก workspace ใช้ backend เดียวกันและ GCP `project` เดียวกัน ทำให้ isolation ระหว่าง environment อ่อนพอที่การเลือก `terraform workspace select` ผิดจะทำให้ apply การเปลี่ยนแปลงขนาด prod เข้าไปในสิ่งที่ใครบางคนคิดว่าเป็น environment ที่ทิ้งได้
+- **directory-per-environment** ให้แต่ละ environment มี backend ของตัวเองและ GCP project ของตัวเอง — isolate จริง ๆ — แต่ block backend, block provider, และการต่อสาย `source` กับ version ของ module จบลงด้วยการถูก copy-paste แทบทุกตัวอักษรเข้าไปในทุก environment directory ซึ่งคือความเสี่ยงจากการทำซ้ำมือแบบเดียวกับที่บทแรกของ module นี้เปิดเรื่องไว้เป๊ะ
+
+Terraform เปล่า ๆ เองไม่มี primitive ตัวเดียวที่ให้ทั้ง isolation ที่แข็งแรงและ configuration ที่ไม่ซ้ำซ้อนข้าม environment พร้อมกัน คุณเลือกได้แค่ฝั่งใดฝั่งหนึ่งของความตึงสองอันข้างบน แต่หนีทั้งคู่พร้อมกันด้วยโค้ด `.tf` อย่างเดียวไม่ได้
+
+## Terragrunt คืออะไรจริง ๆ
+
+Terragrunt คือ thin wrapper และ orchestrator ที่นั่งอยู่บน binary `terraform` (หรือ `tofu`) ตัวจริง มันไม่ได้เพิ่ม resource syntax ใหม่ และไม่ได้ compile ไปเป็นภาษา infrastructure-as-code แบบอื่น โค้ด `.tf` ของ module ที่คุณเขียนอยู่แล้ว รวมถึงทุกอย่างใน directory `modules/app` จากบทที่แล้ว ยังคงเหมือนเดิมทุกประการและยังเป็น Terraform ธรรมดา ทุกคำสั่งของ Terragrunt สุดท้ายแล้ว shell out ไปเรียกคำสั่ง `terraform` (หรือ `tofu`) ตัวจริงข้างใต้
+
+```bash
+# What you type
+terragrunt apply
+
+# What actually eventually runs, per unit, with generated config already in place
+terraform apply
+```
+
+สิ่งที่ Terragrunt เพิ่มเข้ามาคือ layer ที่จัดการ boilerplate ที่ซ้ำซ้อนซึ่งคุณเพิ่งเห็นมันกองสูงขึ้นรอบ ๆ การเรียก Terraform หนึ่งครั้งต่อ environment
+
+- **generate backend configuration** จากคำนิยามศูนย์กลางเดียว แทนที่จะ copy-paste block `backend "gcs" { ... }` เดียวกันเข้าไปในทุก environment directory
+- **generate provider configuration** แบบเดียวกัน จากที่เดียว แทนที่จะมี block `provider "google" { ... }` ที่แทบเหมือนกันต่อ environment
+- **ส่ง input variable ของแต่ละ environment** เข้าไปใน shared module ทำให้ `dev`, `staging`, `prod` ยังเรียก source `modules/app` เดียวกันด้วยค่าที่ต่างกัน โดยไม่ต้องต่อสาย `module` block แยกมือต่อ environment
+- **เข้าใจลำดับ dependency** เมื่อ infrastructure ถูกแบ่งเป็นหลาย unit ที่ apply แยกกันเป็นอิสระ เช่น unit `network` ที่ unit `gke` ต้องพึ่งพา ทำให้ Terragrunt คิดออกว่า `network` ต้อง apply ก่อน `gke` แทนที่คุณต้อง track ลำดับนั้นเองด้วยมือข้าม `terraform apply` ที่รันแยกกัน
+
+จุดสุดท้ายนี้สำคัญเป็นพิเศษ เพราะ directory-per-environment แบ่ง infrastructure เป็น state file ที่แยกกันจริงต่อ environment (และตามที่ module ถัดไปจะพูดถึง มักแยกต่อ component ด้วย) Terraform configuration เดียวมี dependency graph ภายในของตัวเองระหว่าง resource ใน state file เดียว แต่มันไม่มี concept ของการเรียงลำดับข้าม configuration ที่แยกกันทั้งหมดและการเรียก `terraform apply` แยกกันในตัวมันเอง การเรียงลำดับข้าม configuration แบบนี้แหละคือปัญหาที่ Terragrunt ถูกสร้างมาเพื่อแก้ ซ้อนอยู่บน graph ของ Terraform เอง ไม่ใช่แทนที่มัน
+
+## Terragrunt ไม่ใช่อะไร
+
+คุ้มค่าที่จะพูดให้แม่นยำตรง boundary นี้ เพราะมันพูดเกินจริงเกี่ยวกับสิ่งที่ Terragrunt ทำได้ง่ายมาก
+
+- Terragrunt **ไม่ใช่** fork ของ Terraform และ **ไม่ใช่** ตัวแทนที่มัน การ plan และ apply resource จริง ๆ ยังทำโดย `terraform` หรือ `tofu` ทั้งหมด
+- Terragrunt **ไม่ใช่** ภาษา configuration ใหม่สำหรับอธิบาย GCP resource resource `google_compute_instance` ถูก define แบบเดียวกันเป๊ะไม่ว่าจะมี Terragrunt เกี่ยวข้องหรือไม่
+- Terragrunt ทำให้การเปลี่ยนแปลง Terraform ที่ไม่ปลอดภัยกลายเป็นปลอดภัยเองไม่ได้ มันเอา boilerplate ที่ copy-paste ออกไปและจัดลำดับให้ แต่ logic ของ infrastructure จริง ๆ และความถูกต้องของมันยังเป็นความรับผิดชอบของโค้ด module `.tf` ของคุณทั้งหมด
+
+module ถัดไปเริ่มต่อจากตรงนี้เป๊ะ ด้วย building block จริงของ Terragrunt คือ `root.hcl`, `remote_state`, `generate`, และ `terragrunt.hcl` ของแต่ละ unit ที่เปลี่ยนตำแหน่งนี้ให้กลายเป็น setup ที่ใช้งานได้จริง
+
+<Mermaid title="Workspaces (DRY, weak isolation) and directory-per-environment (isolated, duplicated) both leave a gap that Terragrunt closes by wrapping real Terraform" code={terragruntGapDiagram} />
+
+export const terragruntGapDiagram = `flowchart TD
+  workspaces["Terraform workspaces: DRY, weak isolation"] --> gap["The gap: isolation AND zero duplication together"]
+  directoryPerEnv["Directory-per-environment: isolated, duplicated boilerplate"] --> gap
+  gap --> terragrunt["Terragrunt: generates backend, provider, inputs, manages unit ordering"]
+  terragrunt -->|shells out to| terraformBinary["Real terraform / tofu binary"]`;
+
+<Callout title="สรุปหนึ่งบรรทัด">
+Terraform workspace แก้ **DRY** reuse ได้ดีแต่ **isolation** ยังอ่อน เพราะทุก workspace ยังใช้ backend เดียวและ GCP project เดียวร่วมกัน directory-per-environment แก้ isolation ได้ด้วย GCP project ที่แยกกันจริง แต่ดึง boilerplate ของ backend, provider, และ module-source ที่ซ้ำซ้อนกลับมาในทุก environment directory Terraform เปล่า ๆ ไม่มี primitive ตัวเดียวที่ให้ทั้งสองอย่างพร้อมกัน **Terragrunt** ปิดช่องว่างนั้นในฐานะ thin wrapper และ orchestrator รอบ binary `terraform`/`tofu` ตัวจริง มันไม่เพิ่ม resource syntax ใหม่และโค้ด module `.tf` ของคุณไม่เปลี่ยน แต่มัน generate backend กับ provider configuration จากคำนิยามศูนย์กลางเดียว ส่ง input ของแต่ละ environment เข้า shared module และเข้าใจลำดับ dependency ข้าม unit ที่ apply แยกกันเป็นอิสระ ซึ่งเป็น layer ที่ dependency graph ของ Terraform configuration เดียวเองไม่ครอบคลุม
+</Callout>
+
+export const quizWhyTerragrunt = [
+  {
+    q: 'ช่องว่างที่ทั้ง Terraform workspace และ directory-per-environment ปิดไม่สนิทด้วยตัวเองคืออะไร',
+    options: [
+      'ทั้งสองวิธีจัดการ GCP region ได้แค่ region เดียว',
+      'ทั้งสองวิธีไม่ได้ให้ isolation ที่แข็งแรงและ configuration ที่ไม่ซ้ำซ้อนข้าม environment พร้อมกัน',
+      'ทั้งสองวิธีใช้ google provider ไม่ได้',
+      'ทั้งสองวิธีใช้กับ remote state ไม่ได้',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'คำอธิบาย Terragrunt ที่แม่นยำที่สุดคือข้อไหน',
+    options: [
+      'fork ของ Terraform ที่มี resource syntax ของตัวเอง',
+      'thin wrapper และ orchestrator รอบ binary terraform หรือ tofu ตัวจริง ที่ generate configuration ที่ซ้ำซ้อนแทนที่จะเพิ่มภาษา IaC ใหม่',
+      'ตัวแทนที่ state file ของ Terraform',
+      'provider plugin เฉพาะ GCP',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Terragrunt แก้ปัญหาแบบไหนเพิ่มเติมที่ dependency graph ภายในของ Terraform configuration เดียวไม่ครอบคลุม',
+    options: [
+      'การเรียงลำดับ resource ภายใน state file เดียว',
+      'การจัด format syntax HCL อัตโนมัติ',
+      'การเรียงลำดับ apply ข้ามหลาย unit ที่ apply แยกกันเป็นอิสระ เช่น unit network ที่ unit อื่นต้องพึ่งพา ซึ่งอยู่ใน configuration และ state file คนละชุดกันทั้งหมด',
+      'การเลือกว่า resource ถูกสร้างใน GCP region ไหน',
+    ],
+    answer: 2,
+  },
+  {
+    q: 'ข้อไหนคือสิ่งที่ Terragrunt ไม่ทำอย่างชัดเจน',
+    options: [
+      'generate backend configuration จากคำนิยามศูนย์กลางเดียว',
+      'generate provider configuration จากคำนิยามศูนย์กลางเดียว',
+      'เพิ่ม syntax ใหม่ที่มาแทนการเขียน resource .tf ธรรมดา',
+      'ส่ง input variable ต่อ environment เข้าไปใน shared module',
+    ],
+    answer: 2,
+  },
+];
+
+<Quiz client:visible id="multi-environment/why-terragrunt" questions={quizWhyTerragrunt} />
+
+<ProgressTracker client:visible id="multi-environment/why-terragrunt" />

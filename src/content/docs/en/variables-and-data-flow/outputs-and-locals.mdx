@@ -1,0 +1,186 @@
+---
+title: 'Outputs and Locals'
+description: 'Exposing values after apply with output blocks, computing reusable named expressions with locals blocks, and why outputs are the mechanism that makes module and Terragrunt composition possible.'
+sidebar:
+  order: 2
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## The idea in one sentence
+
+An `output` exposes a value out of a Terraform configuration after `apply`, while a `local` computes a named expression once for reuse inside the same configuration — neither one is a `variable`, and each solves a different problem.
+
+## Declaring an output block
+
+An `output` block takes a name, a `value` expression, and optionally a `description` and `sensitive` flag. After `terraform apply` finishes, every declared output is printed, and you can query it again later without re-running `apply`.
+
+```hcl
+resource "google_compute_instance" "web" {
+  name         = "web-server"
+  machine_type = "e2-medium"
+  zone         = "us-central1-a"
+
+  boot_disk {
+    initialize_params {
+      image = "debian-cloud/debian-12"
+    }
+  }
+
+  network_interface {
+    network = "default"
+    access_config {}
+  }
+}
+
+output "instance_id" {
+  description = "The unique identifier Google Cloud assigned to the instance"
+  value       = google_compute_instance.web.instance_id
+}
+
+output "instance_external_ip" {
+  description = "Public IP address of the web server"
+  value       = google_compute_instance.web.network_interface[0].access_config[0].nat_ip
+}
+
+output "db_password" {
+  description = "Generated password for the application database user"
+  value       = random_password.db.result
+  sensitive   = true
+}
+```
+
+```bash
+# Print every output declared in the configuration
+terraform output
+
+# Print a single output by name, unquoted for use in scripts
+terraform output instance_external_ip
+
+# Print all outputs as JSON, for piping into another tool
+terraform output -json
+```
+
+`terraform output -json` matters more than it looks: it turns your outputs into structured data that another script, a CI pipeline, or a wrapper tool can parse reliably, instead of scraping human-formatted terminal text. The `sensitive = true` flag on `db_password` works exactly like it does on a `variable` — Terraform masks the value in `terraform output` and in `apply` output, but the value is still written to the state file in plain text. It is a display protection, not an access control.
+
+## locals — the third kind of named value
+
+Terraform has three distinct kinds of named values, and it is worth being precise about the difference. A `variable` is set by the caller from outside. An `output` is exposed to the outside after `apply`. A `local` is neither: it is a named expression computed once, inside the configuration, purely so you do not have to repeat that same expression in five different resource blocks.
+
+```hcl
+variable "environment" {
+  type        = string
+  description = "Deployment environment name"
+  default     = "dev"
+}
+
+variable "project_id" {
+  type        = string
+  description = "GCP project ID"
+}
+
+locals {
+  name_prefix = "${var.project_id}-${var.environment}"
+
+  common_labels = {
+    environment = var.environment
+    managed_by  = "terraform"
+  }
+}
+
+resource "google_compute_instance" "web" {
+  name         = "${local.name_prefix}-web"
+  machine_type = "e2-medium"
+  zone         = "us-central1-a"
+  labels       = local.common_labels
+
+  boot_disk {
+    initialize_params {
+      image = "debian-cloud/debian-12"
+    }
+  }
+
+  network_interface {
+    network = "default"
+    access_config {}
+  }
+}
+
+resource "google_storage_bucket" "assets" {
+  name     = "${local.name_prefix}-assets"
+  location = "US"
+  labels   = local.common_labels
+}
+```
+
+Without `local.name_prefix` and `local.common_labels`, that same `"${var.project_id}-${var.environment}"` string interpolation and that same labels map would have to be typed out again on every resource that needs them, and a later change to the naming scheme would mean hunting down every copy. A `locals` block is not user-settable the way a `variable` is, and it is not visible outside the configuration the way an `output` is — it exists purely to keep a computed expression in exactly one place.
+
+## Outputs as the mechanism for composition
+
+Inside a single root configuration, an output is mostly informational — a convenient way to print a value at the end of `apply`, or to feed a script via `terraform output -json`. Its real importance shows up once you start splitting infrastructure into smaller, separately-managed pieces.
+
+When one Terraform module calls another, the calling module reads the child module's outputs to wire values between them — a networking module's `output "subnet_self_link"` becomes the input to a compute module's `variable "subnet"`. The Modules module later in this course covers that composition in depth. The same idea shows up again, at a larger scale, in Terragrunt: an independently-applied Terragrunt unit reads another unit's outputs through a `dependency` block, so a VPC deployed in one directory can hand its network name to a database deployed in a completely separate directory, with no shared Terraform state. Outputs are what make both of these forms of composition possible — without a defined, stable output, there is nothing for the consuming module or unit to read.
+
+<Mermaid title="A local computes a shared value once; an output exposes the final result after apply" code={outputsLocalsDiagram} />
+
+export const outputsLocalsDiagram = `flowchart LR
+  v1["var.project_id"] --> l["local.name_prefix"]
+  v2["var.environment"] --> l
+  l --> r1["google_compute_instance.web"]
+  l --> r2["google_storage_bucket.assets"]
+  r1 --> o["output ip_address"]
+  o --> ext["Consumed by another module or a Terragrunt dependency block"]`;
+
+<Callout title="The one-line takeaway">
+An **`output`** block exposes a value after `apply` — inspectable with `terraform output`, `terraform output <name>`, or machine-readable via `terraform output -json`, and maskable from CLI display with `sensitive = true` (the value still lands in state). A **`locals`** block is the third kind of named value in Terraform: unlike a `variable`, it is not set by a caller, and unlike an `output`, it is not exposed externally — it just computes an expression once so you do not repeat it across resources. Outputs matter beyond a single root configuration because they are the mechanism that lets one module or one independently-applied Terragrunt unit pass values into another.
+</Callout>
+
+export const quizOutputsLocals = [
+  {
+    q: 'What is the main purpose of a locals block, compared to variable and output?',
+    options: [
+      'It lets an external caller set a value, just like a variable',
+      'It computes a named expression once for internal reuse, and is neither user-settable like a variable nor exposed externally like an output',
+      'It is the only way to mask a value from CLI output',
+      'It replaces output blocks entirely in modern Terraform configurations',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why do outputs matter even in a single root configuration with no modules yet',
+    options: [
+      'They have no real purpose until modules are introduced',
+      'They are required for every resource block to be valid',
+      'They still let you inspect a final value with terraform output or terraform output -json without re-running apply',
+      'They automatically encrypt sensitive values in state',
+    ],
+    answer: 2,
+  },
+  {
+    q: 'What is terraform output -json most useful for',
+    options: [
+      'Encrypting output values before printing them',
+      'Producing machine-readable structured output that scripts or CI pipelines can parse reliably',
+      'Forcing Terraform to recompute every output from scratch',
+      'Hiding sensitive outputs permanently from the state file',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'How does an output later feed a Terragrunt dependency block, at a high level',
+    options: [
+      'Terragrunt reads the raw HCL source of the other unit directly',
+      'An independently-applied unit exposes an output, and a dependency block in another unit reads that output value across separate state files',
+      'Outputs are only readable from within the same state file, so Terragrunt cannot use them across units',
+      'Terragrunt ignores Terraform outputs entirely and requires separate YAML values',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="variables-and-data-flow/outputs-and-locals" questions={quizOutputsLocals} />
+
+<ProgressTracker client:visible id="variables-and-data-flow/outputs-and-locals" />

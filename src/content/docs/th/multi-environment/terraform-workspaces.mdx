@@ -1,0 +1,146 @@
+---
+title: 'Terraform Workspaces'
+description: 'Terraform workspace ทำให้ configuration เดียวจัดการหลาย state ที่มีชื่อได้ยังไง และทำไมมันยังใช้ backend กับ provider configuration ร่วมกันอยู่'
+sidebar:
+  order: 2
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## ไอเดียในหนึ่งประโยค
+
+Terraform **workspace** ทำให้ configuration เดียวสร้าง state file แยกกันได้หลายอันโดยสลับด้วยชื่อ แต่ทุก workspace ยังรันผ่าน backend เดียวกัน provider configuration เดียวกัน และโค้ด `.tf` เดียวกันเป๊ะ
+
+## configuration เดียว state file หลายอัน
+
+แทนที่จะ copy-paste ทั้ง directory ต่อ environment workspace ให้คุณเก็บชุดไฟล์ `.tf` ไว้ชุดเดียว แล้วแค่สลับว่า Terraform จะอ่านและเขียน state file ชื่อไหน
+
+```bash
+terraform workspace new dev
+terraform workspace new staging
+terraform workspace new prod
+
+terraform workspace list
+#   default
+# * dev
+#   staging
+#   prod
+
+terraform workspace select staging
+terraform apply
+```
+
+`terraform workspace new <name>` สร้าง workspace แล้วสลับไปใช้ทันที `terraform workspace select <name>` สลับ workspace ที่ active อยู่โดยไม่สร้างใหม่ `terraform workspace list` แสดง workspace ทั้งหมดที่มีอยู่ พร้อมเครื่องหมาย asterisk บอกว่าตัวไหน active อยู่ workspace ที่ active ถูก track ไว้ในเครื่องของคุณเองที่ directory `.terraform` และทุก `plan` หรือ `apply` ที่คุณรันจะแตะแค่ state ของ workspace นั้นเท่านั้น state ของ `dev` กับ state ของ `prod` คือคนละไฟล์กันเลย ถึงแม้ทั้งคู่จะมาจาก `main.tf` เดียวกัน
+
+## เปลี่ยน behavior ด้วย terraform.workspace
+
+Terraform expose ชื่อ workspace ที่ active อยู่เป็นค่า built-in ชื่อ `terraform.workspace` ซึ่งคุณ interpolate เข้าไปในชื่อ resource, label, หรือ lookup map ได้โดยตรง เพื่อเปลี่ยน behavior ต่อ workspace โดยไม่ต้องเขียนโค้ดแยกกันสำหรับแต่ละอัน
+
+```hcl
+locals {
+  machine_types = {
+    dev     = "e2-small"
+    staging = "e2-medium"
+    prod    = "e2-standard-4"
+  }
+}
+
+resource "google_compute_instance" "app" {
+  name         = "app-${terraform.workspace}"
+  machine_type = lookup(local.machine_types, terraform.workspace, "e2-small")
+  zone         = "us-central1-a"
+
+  boot_disk {
+    initialize_params {
+      image = "debian-cloud/debian-12"
+    }
+  }
+}
+```
+
+สลับไปที่ workspace `prod` แล้ว resource block เดียวกันนี้จะตั้งชื่อ instance เป็น `app-prod` และเลือกขนาดเป็น `e2-standard-4` สลับไปที่ `dev` แล้วโค้ดเดียวกันเป๊ะจะได้ `app-dev` ขนาด `e2-small` ไม่มีอะไรในไฟล์ `.tf` เองเปลี่ยนระหว่าง environment เลย มีแค่ workspace ที่ active เท่านั้นที่เปลี่ยน
+
+## สิ่งที่ workspace ไม่ isolate ให้
+
+ตรงนี้คือจุดที่พลาดง่าย block `backend`, block `provider "google"`, และโค้ด `.tf` ทุกบรรทัดที่เหลือ ถูกใช้ร่วมกันโดยไม่เปลี่ยนเลยข้ามทุก workspace
+
+```hcl
+terraform {
+  backend "gcs" {
+    bucket = "acme-terraform-state"
+    prefix = "app"
+  }
+}
+
+provider "google" {
+  project = "acme-shared-project"
+  region  = "us-central1"
+}
+```
+
+Terraform จัดการแยก state object ของแต่ละ workspace ไว้ในเครื่องเดียวกันโดยอัตโนมัติ ทำให้ `dev`, `staging`, `prod` ไม่ทับ state file กันเอง แต่ bucket เอง, `project` ใน block `provider "google"`, และ credential ที่ Terraform ใช้ authenticate เหมือนกันเป๊ะไม่ว่า workspace ไหนจะ active อยู่ ตรงนี้ไม่มี boundary แข็ง ๆ เลยสักนิด ไม่มีอะไรกันไม่ให้คนที่อยู่ใน workspace `dev` คิดว่ากำลังจะแก้ instance ทดสอบที่ทิ้งได้ ทั้งที่จริง ๆ ทุก workspace ใช้ GCP project `acme-shared-project` เดียวกันและ resource ที่ใกล้เคียง prod จริงที่อยู่ในนั้นร่วมกัน การเลือก `terraform workspace select` ผิดตามด้วย `apply` คือความผิดพลาดที่เกิดขึ้นได้ง่ายมาก และ workspace เองไม่มีทางป้องกันมันให้คุณเลย
+
+<Mermaid title="One Terraform configuration and backend, three workspaces, three state files, one shared GCP project" code={workspacesDiagram} />
+
+export const workspacesDiagram = `flowchart TD
+  config["Single main.tf + backend + provider google.project = acme-shared-project"]
+  config -->|terraform workspace select dev| devState["dev state file"]
+  config -->|terraform workspace select staging| stagingState["staging state file"]
+  config -->|terraform workspace select prod| prodState["prod state file"]
+  devState -.->|same backend, same project| shared["acme-shared-project"]
+  stagingState -.->|same backend, same project| shared
+  prodState -.->|same backend, same project| shared`;
+
+<Callout title="สรุปหนึ่งบรรทัด">
+Terraform **workspace** ให้ configuration เดียวมี **state file** แยกกันหลายอันที่มีชื่อ สลับด้วย `terraform workspace new` / `select` / `list` และ `terraform.workspace` ทำให้โค้ดเดิมเปลี่ยนชื่อ resource, label, หรือขนาดต่อ workspace ได้ผ่าน interpolation หรือ lookup map สิ่งที่ workspace ไม่ isolate ให้คือ **backend configuration**, **provider configuration** (รวมถึง GCP `project`), และโค้ด `.tf` ที่อยู่ข้างใต้ ทุก workspace ใช้สิ่งเหล่านี้ร่วมกันทั้งหมด ทำให้ workspace เหมาะกับความต่างเล็ก ๆ แบบเบา ๆ แต่ไม่เหมาะกับ environment ที่ต้องการ GCP project, region, หรือ credential ที่แยกจากกันจริง ๆ เพราะไม่มีอะไรกัน apply ไม่ให้ไปลงผิด workspace ใน project ที่ใช้ร่วมกันโดยไม่ตั้งใจ
+</Callout>
+
+export const quizTerraformWorkspaces = [
+  {
+    q: 'Terraform workspace ให้สิ่งที่แยกกันจริงคืออะไร',
+    options: [
+      'GCP project ที่แยกกันในแต่ละ workspace',
+      'state file ที่แยกกันในแต่ละ workspace ในขณะที่ backend, provider configuration, และโค้ด .tf ยังใช้ร่วมกัน',
+      'provider block ที่แยกกันในแต่ละ workspace',
+      'credential ชุดที่แยกกันในแต่ละ workspace',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'terraform.workspace มักถูกใช้ทำอะไร',
+    options: [
+      'สลับว่า Terraform authenticate เข้า GCP project ไหน',
+      'interpolate ชื่อ workspace ที่ active เข้าไปในชื่อ resource, label, หรือ lookup map เพื่อให้โค้ดเดิมเปลี่ยน behavior ต่อ workspace',
+      'เลือกว่า Terraform ใช้ backend type ไหน',
+      'lock state ไม่ให้สอง workspace ถูก apply พร้อมกัน',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ความเสี่ยงจริงในโลกจริงที่ Terraform workspace สร้างขึ้นมาโดยเฉพาะคืออะไร',
+    options: [
+      'workspace ลบไม่ได้เมื่อสร้างไปแล้ว',
+      'terraform workspace list ใช้กับ GCS backend ไม่ได้',
+      'เพราะทุก workspace ใช้ provider project เดียวกันและโค้ด .tf เดียวกัน การอยู่ผิด workspace แล้วรัน apply อาจไปเปลี่ยน resource จริงใน environment ที่คุณคิดว่า isolate อยู่',
+      'workspace ต้องใช้ Terraform binary แยกต่อ environment',
+    ],
+    answer: 2,
+  },
+  {
+    q: 'สิ่งไหนที่เหมือนกันเป๊ะข้ามทุก workspace ใน configuration เดียว',
+    options: [
+      'เนื้อหาของ state file',
+      'ชื่อ workspace ที่ active อยู่',
+      'block backend และ block provider รวมถึง GCP project ที่มันชี้ไป',
+      'ผลลัพธ์ของ terraform workspace list',
+    ],
+    answer: 2,
+  },
+];
+
+<Quiz client:visible id="multi-environment/terraform-workspaces" questions={quizTerraformWorkspaces} />
+
+<ProgressTracker client:visible id="multi-environment/terraform-workspaces" />

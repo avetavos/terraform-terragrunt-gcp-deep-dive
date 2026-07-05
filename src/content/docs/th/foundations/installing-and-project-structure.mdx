@@ -1,0 +1,204 @@
+---
+title: 'การติดตั้ง Terraform และโครงสร้างโปรเจกต์'
+description: 'การติดตั้ง Terraform ด้วย version manager อย่าง tenv โปรเจกต์ GCP จริงขนาดเล็ก การจัดไฟล์ตามธรรมเนียม และคำสั่ง terraform fmt กับ validate'
+sidebar:
+  order: 5
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## ไอเดียในหนึ่งประโยค
+
+ติดตั้ง Terraform ผ่าน version manager แทนที่จะ pin binary เดียวไว้ตายตัว เขียน GCP resource จริงตัวแรก แล้วแยกมันออกเป็นไฟล์หลายไฟล์ตามชื่อที่เป็นธรรมเนียม — ซึ่งจริง ๆ แล้ว Terraform ไม่ได้บังคับสักไฟล์เดียว
+
+## ติดตั้ง Terraform (และทำไม version manager ดีกว่า binary เดียว)
+
+คุณดาวน์โหลด Terraform binary เดียวจาก HashiCorp มาวางไว้ใน `PATH` ได้ และมันก็ใช้งานได้ดีถ้าทดลองอยู่คนเดียวโปรเจกต์เดียว แต่พอต้องทำงานมากกว่าหนึ่งโปรเจกต์ วิธีนี้จะเริ่มมีปัญหา repository หนึ่งเขียนไว้กับ Terraform 1.5 อีกอันต้องการ feature ของ 1.9 ส่วนอีกอันย้ายไป OpenTofu แล้ว การคอยสลับ binary กลาง (global) ตัวเดียวให้ตรงกับโปรเจกต์ที่กำลังทำอยู่ตลอดเวลาเป็นงานที่น่าเบื่อและพลาดง่าย
+
+**version manager** แก้ปัญหานี้ด้วยการติดตั้งหลายเวอร์ชันเก็บไว้คู่กัน แล้วสลับใช้ทีละโปรเจกต์ โดยมักอิงจาก version file ที่ commit ไว้ใน repository **tenv** เป็นตัวเลือกที่ดีเพราะมันไม่ได้ผูกกับเครื่องมือตัวเดียว มันจัดการ Terraform, OpenTofu, Terragrunt และ Atmos ได้จาก CLI ตัวเดียว ซึ่งสำคัญมากเมื่อทีมของคุณใช้ Terragrunt คู่กับ Terraform (จะพูดถึงในคอร์สนี้ตอนหลัง)
+
+```bash
+# install tenv (macOS, via Homebrew)
+brew install tenv
+
+# install and pin a specific Terraform version for the current directory
+tenv tf install 1.9.0
+tenv tf use 1.9.0
+
+# tenv reads a .terraform-version file (or the terraform block's
+# required_version constraint) to pick the right version automatically
+terraform version
+```
+
+ไม่ว่าจะติดตั้งด้วยวิธีไหน คำสั่งที่ใช้งานกับ `terraform` binary ในแต่ละวันก็เหมือนกันทุกประการ — version manager เปลี่ยนแค่วิธีที่ binary นั้นมาอยู่บนเครื่องคุณเท่านั้น
+
+## โปรเจกต์ GCP จริงขนาดเล็กที่สุด
+
+โปรเจกต์ Terraform ก็แค่ directory ที่มีไฟล์ `.tf` หนึ่งไฟล์หรือมากกว่า ตัวที่เล็กที่สุดแต่ใช้งานได้จริงประกาศ provider กับ resource เดียว
+
+```hcl
+terraform {
+  required_version = ">= 1.7.0"
+
+  required_providers {
+    google = {
+      source  = "hashicorp/google"
+      version = "~> 6.0"
+    }
+  }
+}
+
+provider "google" {
+  project = "acme-app"
+  region  = "us-central1"
+}
+
+resource "google_storage_bucket" "reports" {
+  name     = "acme-monthly-reports"
+  location = "US"
+}
+```
+
+นี่คือ configuration ที่สมบูรณ์และ apply ได้ทันที ไม่ต้องมี VPC ไม่ต้องมี networking ไม่มีข้อกำหนดล่วงหน้าอะไรเลยนอกจาก GCP credentials ในเครื่อง (Application Default Credentials ตั้งค่าด้วย `gcloud auth application-default login`) `google_storage_bucket` เป็น resource แรกที่ดีด้วยเหตุผลนี้เป๊ะ ๆ เพราะมันไม่ต้องพึ่งอะไรที่ต้องมีอยู่ก่อนเลย
+
+## การจัดไฟล์ตามธรรมเนียม
+
+โปรเจกต์จริงจะแยกไฟล์เดียวนั้นออกเป็นหลายไฟล์ ตามธรรมเนียมที่ใช้กัน
+
+```hcl
+# providers.tf
+terraform {
+  required_version = ">= 1.7.0"
+
+  required_providers {
+    google = {
+      source  = "hashicorp/google"
+      version = "~> 6.0"
+    }
+  }
+}
+
+provider "google" {
+  project = "acme-app"
+  region  = "us-central1"
+}
+```
+
+```hcl
+# variables.tf
+variable "bucket_name" {
+  description = "Name of the storage bucket to create"
+  type        = string
+  default     = "acme-monthly-reports"
+}
+```
+
+```hcl
+# main.tf
+resource "google_storage_bucket" "reports" {
+  name     = var.bucket_name
+  location = "US"
+}
+```
+
+```hcl
+# outputs.tf
+output "bucket_self_link" {
+  description = "Self link of the created storage bucket"
+  value       = google_storage_bucket.reports.self_link
+}
+```
+
+ชื่อ `main.tf`, `variables.tf`, `outputs.tf`, `providers.tf` และ `versions.tf` เป็น **ธรรมเนียม ไม่ใช่ข้อบังคับของ Terraform** Terraform ไม่ได้สนใจชื่อไฟล์เลยแม้แต่น้อย มันโหลดทุกไฟล์ `.tf` ใน directory มารวมกันเป็น configuration เดียว และไม่สนว่าคุณจะตั้งชื่อไฟล์ว่า `main.tf`, `zzz.tf` หรือ `whatever.tf` resource ที่อยู่ใน `outputs.tf` กับ variable ที่มันอ้างอิงถึงใน `main.tf` ทำงานเหมือนกันเป๊ะกับตอนที่ทุกอย่างอยู่ในไฟล์เดียว Terraform สร้าง dependency graph แบบเดียวกันเสมอไม่ว่าจะแยกไฟล์แบบไหน การแยกตามหน้าที่ (providers, variables, resources, outputs) มีไว้เพื่อให้คนที่เปิด directory ขึ้นมารู้ว่าต้องไปดูตรงไหนเท่านั้น ไม่ใช่เพราะ Terraform ต้องการเส้นแบ่งนั้น
+
+<Mermaid title="Terraform โหลดทุกไฟล์ .tf ใน directory มารวมเป็น configuration เดียว" code={installDiagram} />
+
+export const installDiagram = `flowchart TB
+  subgraph dir["Project directory"]
+    main["main.tf"]
+    vars["variables.tf"]
+    outs["outputs.tf"]
+    prov["providers.tf"]
+    ver["versions.tf"]
+  end
+  main --> combined["One combined Terraform configuration"]
+  vars --> combined
+  outs --> combined
+  prov --> combined
+  ver --> combined`;
+
+## สุขอนามัยวันแรก ๆ ได้แก่ fmt กับ validate
+
+มีสองคำสั่งที่ควรรันก่อน commit ทุกครั้ง และรันบ่อยแค่ไหนก็ไม่มีต้นทุนอะไรเลย
+
+`terraform fmt` เขียนไฟล์ทับในที่เดิมให้เป็น formatting มาตรฐานของ Terraform เช่น indentation ที่สม่ำเสมอ เครื่องหมาย `=` ที่จัดตำแหน่งตรงกัน spacing ที่สม่ำเสมอ มันแก้แค่ style ไม่ได้แก้ logic
+
+```bash
+terraform fmt
+```
+
+`terraform validate` ตรวจว่า configuration สอดคล้องกันเองภายใน เช่น HCL syntax ที่ถูกต้อง argument ที่ type ตรง และ variable ที่ถูกอ้างอิงถึงมีอยู่จริง มันจับ typo และความผิดพลาดเชิงโครงสร้างได้ตั้งแต่ก่อนที่จะติดต่อ GCP ด้วยซ้ำ
+
+```bash
+terraform validate
+```
+
+```
+Success! The configuration is valid.
+```
+
+สิ่งที่ `validate` **ไม่ได้ทำ** คือตรวจสอบอะไรกับ GCP API จริง มันไม่รู้เลยว่าโปรเจกต์ของคุณชน service quota หรือยัง ชื่อ bucket ที่คุณเลือกถูกใช้ไปแล้วทั่วโลกหรือเปล่า หรือ service account ของคุณมีสิทธิ์สร้าง resource นั้นจริงไหม ทั้งหมดนี้จะโผล่มาให้เห็นตอนรัน `terraform plan` เท่านั้น ซึ่งเป็นคำสั่งแรกที่ติดต่อกับ GCP จริง ๆ configuration ที่ผ่าน `validate` ได้อย่างสมบูรณ์ก็ยังพังตอน `plan` หรือ `apply` ได้อยู่ดี
+
+<Callout title="สรุปหนึ่งบรรทัด">
+ติดตั้ง Terraform ผ่าน **version manager** อย่าง `tenv` (ซึ่งจัดการ OpenTofu กับ Terragrunt ได้ด้วย) แทนที่จะ pin binary เดียวไว้ตายตัว โปรเจกต์จริงขนาดเล็กที่สุดคือแค่ `provider` block บวก resource หนึ่งตัวอย่าง `google_storage_bucket`; การแยกไฟล์ `main.tf` / `variables.tf` / `outputs.tf` / `providers.tf` / `versions.tf` เป็น **ธรรมเนียมของมนุษย์** — Terraform โหลดทุกไฟล์ `.tf` ใน directory มารวมเป็น configuration เดียวไม่ว่าชื่อไฟล์จะเป็นอะไรก็ตาม; และ `terraform fmt` (จัด formatting มาตรฐาน) กับ `terraform validate` (ตรวจ syntax และความสอดคล้องภายใน) เป็นนิสัยวันแรก ๆ ที่ทำง่ายและคุ้มค่า แต่ `validate` ไม่เคยติดต่อกับ GCP API จริง ดังนั้นมันจับ quota ที่เต็ม ชื่อ bucket ที่ถูกใช้ไปแล้ว หรือสิทธิ์ที่ขาดหายไปไม่ได้ นั่นคือหน้าที่ของ `plan`
+</Callout>
+
+export const quizInstall = [
+  {
+    q: 'Terraform สนใจไหมว่า resource ถูกประกาศไว้ใน main.tf หรือไฟล์ชื่ออื่น',
+    options: [
+      'สนใจ resource ต้องประกาศไว้ใน main.tf เท่านั้น',
+      'ไม่สนใจ Terraform โหลดทุกไฟล์ .tf ใน directory มารวมเป็น configuration เดียวไม่ว่าชื่อไฟล์จะเป็นอะไร การแยก main.tf/variables.tf/outputs.tf เป็นแค่ธรรมเนียมของมนุษย์',
+      'สนใจ แต่ output เท่านั้นที่ต้องอยู่ใน outputs.tf',
+      'ไม่สนใจ แต่ต้องมี manifest ที่ list ไฟล์ไว้ก่อน',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'terraform fmt ทำอะไร',
+    options: [
+      'ตรวจ configuration กับ GCP API จริง',
+      'เขียนไฟล์ทับในที่เดิมให้เป็น formatting มาตรฐานของ Terraform (indentation, spacing, การจัดตำแหน่ง) โดยไม่เปลี่ยน logic',
+      'จัด format state file',
+      'ลบ variable ที่ไม่ได้ใช้งาน',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'terraform validate ตรวจสอบอะไร',
+    options: [
+      'GCP project ชน service quota หรือยัง',
+      'syntax และความสอดคล้องภายในของ configuration เช่น HCL ที่ถูกต้องและ argument ที่ type ตรง โดยไม่ติดต่อ GCP',
+      'ชื่อ bucket ที่คุณเลือกถูกใช้ไปแล้วทั่วโลกหรือเปล่า',
+      'service account ของคุณมีสิทธิ์สร้าง resource นั้นจริงไหม',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ทำไมการผ่าน terraform validate ถึงไม่การันตีว่าจะไม่มีปัญหาฝั่ง GCP จริงเกิดขึ้น',
+    options: [
+      'validate เป็นแค่ linter ตรวจ keyword ของ HCL และข้าม resource block ไปทั้งหมด',
+      'validate ไม่เคยติดต่อกับ GCP API จริง จึงจับปัญหาอย่าง quota ที่เต็ม ชื่อที่ถูกใช้ไปแล้วทั่วโลก หรือสิทธิ์ที่ขาดหายไปไม่ได้ — มีแค่ plan หรือ apply เท่านั้นที่จะเผยปัญหานี้ออกมา',
+      'validate ใช้ได้กับ resource type google_storage_bucket เท่านั้น',
+      'validate พังตั้งแต่รันครั้งแรกเสมอไม่ว่า configuration จะเป็นแบบไหน',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="foundations/installing-and-project-structure" questions={quizInstall} />
+
+<ProgressTracker client:visible id="foundations/installing-and-project-structure" />

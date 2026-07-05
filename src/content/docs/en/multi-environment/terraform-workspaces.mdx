@@ -1,0 +1,146 @@
+---
+title: 'Terraform Workspaces'
+description: 'How Terraform workspaces let one configuration manage multiple named states, and why they still share the same backend and provider configuration.'
+sidebar:
+  order: 2
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## The idea in one sentence
+
+A Terraform **workspace** lets one configuration produce several separate state files switched by name, but every workspace still runs through the exact same backend, the exact same provider configuration, and the exact same `.tf` code.
+
+## One configuration, many state files
+
+Instead of copy-pasting a whole directory per environment, workspaces let you keep a single set of `.tf` files and simply switch which named state file Terraform reads from and writes to:
+
+```bash
+terraform workspace new dev
+terraform workspace new staging
+terraform workspace new prod
+
+terraform workspace list
+#   default
+# * dev
+#   staging
+#   prod
+
+terraform workspace select staging
+terraform apply
+```
+
+`terraform workspace new <name>` creates a workspace and switches to it immediately. `terraform workspace select <name>` switches the active workspace without creating a new one. `terraform workspace list` shows every workspace that exists, with an asterisk marking the one currently active. The active workspace is tracked locally in the `.terraform` directory, and every `plan` or `apply` you run only ever touches that workspace's own state — the `dev` state and the `prod` state are two entirely separate files, even though both come from the same `main.tf`.
+
+## Varying behavior with terraform.workspace
+
+Terraform exposes the active workspace name as a built-in value, `terraform.workspace`, which you can interpolate directly into resource names, labels, or a lookup map to change behavior per workspace without writing separate code for each one:
+
+```hcl
+locals {
+  machine_types = {
+    dev     = "e2-small"
+    staging = "e2-medium"
+    prod    = "e2-standard-4"
+  }
+}
+
+resource "google_compute_instance" "app" {
+  name         = "app-${terraform.workspace}"
+  machine_type = lookup(local.machine_types, terraform.workspace, "e2-small")
+  zone         = "us-central1-a"
+
+  boot_disk {
+    initialize_params {
+      image = "debian-cloud/debian-12"
+    }
+  }
+}
+```
+
+Switch to the `prod` workspace and this same resource block names the instance `app-prod` and sizes it as `e2-standard-4`. Switch to `dev` and the identical code produces `app-dev` sized as `e2-small`. Nothing about the `.tf` file itself changes between environments — only the active workspace does.
+
+## What workspaces do not isolate
+
+Here is the part that is easy to miss: the `backend` block, the `provider "google"` block, and every other line of `.tf` code are shared, unchanged, across all workspaces.
+
+```hcl
+terraform {
+  backend "gcs" {
+    bucket = "acme-terraform-state"
+    prefix = "app"
+  }
+}
+
+provider "google" {
+  project = "acme-shared-project"
+  region  = "us-central1"
+}
+```
+
+Terraform automatically namespaces each workspace's state object inside that same bucket so `dev`, `staging`, and `prod` do not overwrite one another's state file, but the bucket itself, the `project` in the `provider "google"` block, and the credentials Terraform authenticates with are identical no matter which workspace is active. There is no hard boundary here at all — nothing stops someone from being in the `dev` workspace, believing they are about to change a disposable test instance, when in fact every workspace shares the same `acme-shared-project` GCP project and the same real prod-adjacent resources it contains. A wrong `terraform workspace select` followed by an `apply` is a genuinely easy mistake to make, and workspaces alone give you no way to prevent it.
+
+<Mermaid title="One Terraform configuration and backend, three workspaces, three state files, one shared GCP project" code={workspacesDiagram} />
+
+export const workspacesDiagram = `flowchart TD
+  config["Single main.tf + backend + provider google.project = acme-shared-project"]
+  config -->|terraform workspace select dev| devState["dev state file"]
+  config -->|terraform workspace select staging| stagingState["staging state file"]
+  config -->|terraform workspace select prod| prodState["prod state file"]
+  devState -.->|same backend, same project| shared["acme-shared-project"]
+  stagingState -.->|same backend, same project| shared
+  prodState -.->|same backend, same project| shared`;
+
+<Callout title="The one-line takeaway">
+A Terraform **workspace** gives one configuration multiple named, separate **state files** switched with `terraform workspace new` / `select` / `list`, and `terraform.workspace` lets that same code vary resource names, labels, or sizes per workspace through interpolation or a lookup map. What workspaces do NOT isolate is the **backend configuration**, the **provider configuration** (including the GCP `project`), or the underlying `.tf` code itself — all workspaces share those completely, which makes workspaces a good fit for lightweight variation but a poor fit for environments that need genuinely separate GCP projects, regions, or credentials, since nothing prevents an `apply` from landing in the wrong workspace's shared project by mistake.
+</Callout>
+
+export const quizTerraformWorkspaces = [
+  {
+    q: 'What does a Terraform workspace actually give you a separate copy of',
+    options: [
+      'A separate GCP project for each workspace',
+      'A separate state file for each workspace, while the backend, provider configuration, and .tf code stay shared',
+      'A separate provider block for each workspace',
+      'A separate set of credentials for each workspace',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is terraform.workspace typically used for',
+    options: [
+      'Switching which GCP project Terraform authenticates against',
+      'Interpolating the active workspace name into resource names, labels, or a lookup map so the same code varies its behavior per workspace',
+      'Selecting which backend type Terraform uses',
+      'Locking state so two workspaces cannot be applied at the same time',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is the specific real-world risk that Terraform workspaces introduce',
+    options: [
+      'Workspaces cannot be deleted once created',
+      'terraform workspace list is not available on the GCS backend',
+      'Because every workspace shares the same provider project and the same .tf code, being in the wrong workspace and running apply can change real resources in what you assumed was an isolated environment',
+      'Workspaces require a separate Terraform binary per environment',
+    ],
+    answer: 2,
+  },
+  {
+    q: 'Which of these stays identical across every workspace in a single configuration',
+    options: [
+      'The state file contents',
+      'The active workspace name',
+      'The backend block and the provider block, including the GCP project it points at',
+      'The output of terraform workspace list',
+    ],
+    answer: 2,
+  },
+];
+
+<Quiz client:visible id="multi-environment/terraform-workspaces" questions={quizTerraformWorkspaces} />
+
+<ProgressTracker client:visible id="multi-environment/terraform-workspaces" />

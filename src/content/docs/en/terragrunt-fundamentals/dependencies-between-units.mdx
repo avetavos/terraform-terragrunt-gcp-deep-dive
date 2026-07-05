@@ -1,0 +1,118 @@
+---
+title: 'Dependencies Between Units'
+description: 'How a dependency block reads another unit outputs across a separate state boundary, what mock_outputs is for, and how Terragrunt orders a multi-unit apply.'
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## The idea in one sentence
+
+A `dependency` block lets one unit read another unit's outputs even though the two units have entirely separate Terraform state, and `mock_outputs` lets that dependent unit still `plan` before the unit it depends on has actually been applied.
+
+## Crossing the state boundary: why module composition is not enough
+
+The Modules module showed one Terraform module's output feeding straight into another module's input — a `network_id` produced by a `vpc` module, passed as an argument into a `compute` module, both wired together inside a single `main.tf` and applied together as one `terraform apply` against one state file. That composition works because both modules live inside the same Terraform run: Terraform can see the whole dependency graph and resolve it in one pass.
+
+Terragrunt units break that assumption on purpose. A `vpc` unit and a `compute` unit each have their own `terragrunt.hcl`, their own state file, and their own independent `terraform apply`. Nothing about a plain Terraform `module` block reaches across that boundary, because as far as either unit's own Terraform run is concerned, the other unit's resources do not exist. Wiring a `vpc` unit's network into a `compute` unit therefore needs a mechanism built for exactly this gap — a `dependency` block.
+
+## The dependency block: reading another unit outputs
+
+A `dependency` block names another unit by its directory and exposes that unit's outputs as values this unit can use directly inside its own `inputs`:
+
+```hcl
+# compute/terragrunt.hcl
+include "root" {
+  path = find_in_parent_folders("root.hcl")
+}
+
+dependency "vpc" {
+  config_path = "../vpc"
+
+  mock_outputs = {
+    network_id = "mock-network-id"
+  }
+
+  mock_outputs_allowed_terraform_commands = ["plan"]
+}
+
+terraform {
+  source = "git::git@github.com:acme/infrastructure-modules.git//compute?ref=v1.2.0"
+}
+
+inputs = {
+  network_id = dependency.vpc.outputs.network_id
+}
+```
+
+`config_path = "../vpc"` points at the `vpc` unit's directory. Under the hood, Terragrunt runs the equivalent of `terraform output` against that unit's state and exposes the result as `dependency.vpc.outputs`, so `dependency.vpc.outputs.network_id` reaches into the `vpc` unit's actual applied state and pulls out the value of its `network_id` output — the same output name the `vpc` unit's own Terraform module would have declared with an `output` block. That value then flows straight into this unit's `inputs`, exactly like any other input value.
+
+## mock_outputs: letting plan succeed before the dependency is applied
+
+Reading a real output only works once the `vpc` unit has actually been applied and has real state to read from. Before that, a `plan` on `compute` would fail outright, since `dependency.vpc.outputs.network_id` would have nothing to resolve to. `mock_outputs` solves that by supplying a placeholder value Terragrunt substitutes in whenever the dependency has not been applied yet, and `mock_outputs_allowed_terraform_commands` restricts exactly which commands are allowed to use that placeholder. In the example above, `mock-network-id` stands in for the real value only during `plan` — a genuine `apply` still requires the `vpc` unit's real output, so a placeholder value can never accidentally get written into real infrastructure.
+
+## Apply order: computed automatically from dependency blocks
+
+Because a `dependency` block names another unit explicitly, Terragrunt can see the full graph of which units depend on which, across an entire directory tree. When you run an operation across many units at once — the subject of the next lesson — Terragrunt uses that graph to compute the correct order on its own: the `vpc` unit gets applied before the `compute` unit that reads its outputs, without anyone hard-coding that ordering or remembering to run the units in the right sequence by hand.
+
+<Mermaid title="vpc unit outputs flowing into a compute unit dependency block and inputs" code={dependencyDiagram} />
+
+export const dependencyDiagram = `flowchart LR
+  vpc["vpc unit (own state)"] -->|terraform output| dep["dependency vpc: outputs.network_id"]
+  dep --> inputsBlock["compute unit inputs: network_id"]
+  mock["mock_outputs: network_id = mock-network-id"] -.->|used only for plan, before vpc is applied| dep`;
+
+<Callout title="The one-line takeaway">
+A `dependency "vpc" { config_path = "../vpc" }` block is how one unit reads another unit's outputs as `dependency.vpc.outputs.<name>` across the separate-state boundary that ordinary Terraform module composition cannot cross, feeding that value straight into the reading unit's own `inputs`. `mock_outputs`, scoped to specific commands with `mock_outputs_allowed_terraform_commands`, lets a `plan` on the dependent unit succeed even before the depended-on unit has actually been applied, while a real `apply` still demands the real output. Because every `dependency` block names the unit it depends on explicitly, Terragrunt can compute the correct apply order across an entire tree of units on its own, without anyone hard-coding that sequence.
+</Callout>
+
+export const quizDependency = [
+  {
+    q: 'Why is a plain Terraform module composition pattern not enough to connect a vpc unit to a compute unit in Terragrunt?',
+    options: [
+      'Terragrunt units cannot use output values at all',
+      'Each unit is applied independently with its own separate state, so a module block inside one unit cannot see resources from another unit',
+      'Terraform module blocks are removed entirely when using Terragrunt',
+      'GCP resources cannot reference each other under any circumstance',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is mock_outputs used for in a dependency block?',
+    options: [
+      'Permanently replacing the real output values even after apply',
+      'Supplying placeholder values so commands like plan can succeed before the depended-on unit has actually been applied',
+      'Skipping the dependency block entirely during apply',
+      'Generating a backend.tf file for the dependency',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'How does Terragrunt determine the correct order to apply multiple dependent units in?',
+    options: [
+      'It always applies units in alphabetical order by directory name',
+      'It requires a separate ordering file listing every unit manually',
+      'It builds the order from the dependency blocks each unit declares, applying a depended-on unit before the units that read its outputs',
+      'It applies every unit at exactly the same time regardless of dependencies',
+    ],
+    answer: 2,
+  },
+  {
+    q: 'Inside the compute unit inputs block, what does dependency.vpc.outputs.network_id refer to?',
+    options: [
+      'A hardcoded string typed directly into the compute unit',
+      'The value of the network_id output from the vpc unit, read from that unit own applied state',
+      'A Terraform variable defined only inside root.hcl',
+      'The path to the vpc unit directory',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="terragrunt-fundamentals/dependencies-between-units" questions={quizDependency} />
+
+<ProgressTracker client:visible id="terragrunt-fundamentals/dependencies-between-units" />

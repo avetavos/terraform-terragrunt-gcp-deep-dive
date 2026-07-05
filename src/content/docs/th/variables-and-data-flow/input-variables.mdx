@@ -1,0 +1,191 @@
+---
+title: 'Input Variables'
+description: 'ประกาศ variable block พร้อม type constraint, default และ sensitive value ตรวจสอบด้วย validation rule แบบ custom และลำดับความสำคัญเมื่อค่ามาจากหลายแหล่งพร้อมกัน'
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## ไอเดียในหนึ่งประโยค
+
+input variable คือ parameter ที่มีชื่อและมี type ชัดเจน ทำให้ config เดียวกันสร้าง infrastructure ต่างกันได้ตามคนเรียกและค่าที่ส่งเข้ามา
+
+## ประกาศ variable block
+
+`variable` block มีสี่ส่วนที่ควรรู้ไว้ให้แม่น `type` กำหนดรูปร่างของค่าที่ยอมรับได้ `default` เป็นค่า fallback เวลาไม่มีใครส่งค่ามา `description` ไว้บอกความตั้งใจให้คนอ่านคนถัดไป และ `sensitive` ซ่อนค่าจาก CLI output ส่วนใหญ่
+
+```hcl
+variable "environment" {
+  type        = string
+  description = "Deployment environment name, e.g. dev, staging, prod"
+  default     = "dev"
+}
+
+variable "instance_count" {
+  type        = number
+  description = "Number of Compute Engine instances to launch"
+  default     = 2
+}
+
+variable "enable_deletion_protection" {
+  type        = bool
+  description = "Whether to enable deletion protection on the Compute Engine instance"
+  default     = true
+}
+
+variable "allowed_ports" {
+  type        = list(number)
+  description = "TCP ports allowed inbound on the firewall rule"
+  default     = [22, 443]
+}
+
+variable "resource_labels" {
+  type        = map(string)
+  description = "Labels applied to every resource in this configuration"
+  default = {
+    project = "payments"
+    team    = "platform"
+  }
+}
+
+variable "db_config" {
+  type = object({
+    database_version = string
+    tier             = string
+    disk_size_gb     = number
+  })
+  description = "Structured configuration for the Cloud SQL instance"
+  default = {
+    database_version = "POSTGRES_15"
+    tier             = "db-custom-1-3840"
+    disk_size_gb     = 20
+  }
+}
+
+variable "db_password" {
+  type        = string
+  description = "Password for the Cloud SQL application user"
+  sensitive   = true
+}
+```
+
+`object({...})` ควรพูดถึงแยกไว้ต่างหาก มันเป็น structure ที่มี type และรูปร่างตายตัว ทุก key ที่ list ไว้ต้อง required (เว้นแต่จะใส่ default ผ่าน `optional()`) และ Terraform ปฏิเสธค่าที่ caller ส่งมาผิดรูปร่างตั้งแต่ตอน plan ก่อนที่จะไปเรียก GCP API เลยด้วยซ้ำ
+
+`sensitive = true` บน `db_password` มีผลแค่กับการ **แสดงผล** เท่านั้น Terraform จะซ่อนค่าใน output ของ `plan`/`apply` และใน CLI ให้เป็น `(sensitive value)` แต่มันไม่ได้เข้ารหัสหรือตัดค่าออกจาก state file — module เรื่อง state management พูดไปแล้วว่า state เก็บทุก attribute ของทุก resource ที่ manage อยู่เป็น plain text ในไฟล์ JSON รวมถึงค่าที่มาจาก sensitive variable ด้วย ให้มอง `sensitive = true` เป็นแค่การป้องกันตอนแสดงผลบน terminal กับ CI log ไม่ใช่ตัวแทนของ remote backend ที่ควบคุม access ได้ดีอยู่แล้ว
+
+## ตรวจสอบ variable ด้วย validation block
+
+`default` หรือ `type` constraint เช็คได้แค่รูปร่างของค่า ไม่ได้เช็คว่าค่านั้นสมเหตุสมผลไหม `validation` block เพิ่ม `condition` แบบ custom กับ `error_message` เฉพาะเจาะจง ทำให้ caller ได้ feedback ทันทีตอน `plan` แทนที่จะเจอ error งง ๆ จากลึก ๆ ใน Google provider
+
+```hcl
+variable "zone" {
+  type        = string
+  description = "GCP zone the resources are deployed into, e.g. us-central1-a"
+
+  validation {
+    condition     = can(regex("^[a-z]+-[a-z0-9]+-[a-z]$", var.zone))
+    error_message = "zone must look like a GCP zone, e.g. us-central1-a or europe-west1-b."
+  }
+}
+
+variable "environment" {
+  type        = string
+  description = "Deployment environment name"
+
+  validation {
+    condition     = contains(["dev", "staging", "prod"], var.environment)
+    error_message = "environment must be one of: dev, staging, prod."
+  }
+}
+```
+
+ถ้าไม่มี `validation` block แรก การส่ง `zone = "not-a-real-zone"` จะผ่าน `terraform plan` ไปเฉย ๆ แล้วไปพังตอน Terraform เรียก Google provider จริง ๆ เพื่อสร้าง resource ใน zone นั้น — feedback loop ช้ากว่ามาก และ error message ก็เฉพาะเจาะจงน้อยกว่า "zone must look like a GCP zone" มาก `can()` ที่ wrap ไว้ทำหน้าที่แปลง error จาก `regex()` ให้กลายเป็น `false` แทนที่จะ error ตรง ๆ ซึ่งตรงกับสิ่งที่ `condition` expression ต้องการพอดี — มันต้อง evaluate ออกมาเป็น `true` หรือ `false` เสมอ ห้าม raise error
+
+## ตั้งค่า variable และใครชนะ
+
+Terraform ยอมให้ตั้งค่า variable ตัวเดียวกันจากหลายที่พร้อมกัน แล้วแก้ conflict ด้วยลำดับความสำคัญที่ตายตัว เรียงจากสำคัญที่สุด (ชนะ) ไปน้อยที่สุด:
+
+1. **`-var` และ `-var-file` บน command line** ตามลำดับที่ใส่ — วิธีที่ explicit ที่สุดและชั่วคราวที่สุด
+2. **ไฟล์ `*.auto.tfvars` / `*.auto.tfvars.json`** ที่ auto-load จาก working directory ตามลำดับตัวอักษรของชื่อไฟล์
+3. **`terraform.tfvars` / `terraform.tfvars.json`** ที่ auto-load ถ้ามีไฟล์นี้อยู่
+4. **environment variable `TF_VAR_<name>`** — มีประโยชน์กับ CI pipeline และกับค่าที่ไม่อยากให้อยู่ในไฟล์เลย
+5. **`default` ของ variable เอง** — ใช้ก็ต่อเมื่อไม่มีอะไรข้างบนส่งค่ามาเลย
+
+```bash
+# Highest precedence: an explicit CLI flag for this one run
+terraform apply -var="zone=europe-west1-b"
+
+# Or point at a specific tfvars file
+terraform apply -var-file="prod.tfvars"
+
+# Environment variable equivalent of setting zone
+export TF_VAR_zone="us-east1-b"
+terraform apply
+```
+
+ถ้า `zone` ถูกตั้งไว้ใน `terraform.tfvars`, ตั้งอีกทีใน `prod.auto.tfvars`, แล้วตั้งอีกทีผ่าน `-var` บน command line ค่าจาก `-var` จะชนะ Terraform ไม่ได้ merge ค่าแบบ scalar ข้ามแหล่งกัน มันเลือกแหล่งที่ priority สูงสุดที่มีค่าอยู่เท่านั้น collection type อย่าง map กับ object เป็นข้อยกเว้นที่ควรจำไว้สำหรับบทหลัง ๆ — เครื่องมือบางตัว merge ค่าที่ nested กันแทนที่จะ override ทั้งก้อน แต่สำหรับแหล่งข้อมูลปกติข้างบนนี้ ค่าที่ประกาศไว้ในแหล่งที่ priority สูงกว่าจะแทนที่ค่าจากแหล่งที่ priority ต่ำกว่าไปเลยสำหรับ variable ตัวนั้น
+
+<Mermaid title="Multiple value sources resolve to one value per variable, by precedence" code={precedenceDiagram} />
+
+export const precedenceDiagram = `flowchart LR
+  a["-var / -var-file (CLI flag)"] --> r["Resolved value of var.zone"]
+  b["*.auto.tfvars (alphabetical)"] --> r
+  c["terraform.tfvars"] --> r
+  d["TF_VAR_zone (env var)"] --> r
+  e["default in the variable block"] --> r
+  r --> res["google_compute_instance.web"]`;
+
+<Callout title="The one-line takeaway">
+**`variable`** block ประกาศ input ที่มี type และชื่อ พร้อม **`default`** ที่เป็น optional และ `sensitive = true` ซ่อนค่าจาก CLI output เท่านั้น — ค่ายังถูกเก็บเป็น plain text ใน **state** อยู่ดี **`validation`** block เพิ่ม **`condition`** กับ **`error_message`** แบบ custom ทำให้ input ที่ผิดพังเร็วและชัดเจนตอน `plan` แทนที่จะพังลึก ๆ ใน provider call เวลา variable ตัวเดียวกันได้ค่าจากหลายที่ Terraform แก้ด้วยลำดับความสำคัญตายตัว: **`-var`/`-var-file`** ชนะ **`*.auto.tfvars`** ซึ่งชนะ **`terraform.tfvars`** ซึ่งชนะ environment variable **`TF_VAR_*`** ซึ่งชนะ **`default`** ของ variable เอง
+</Callout>
+
+export const quizInputVariables = [
+  {
+    q: 'validation block บน variable ป้องกันอะไรจริง ๆ',
+    options: [
+      'ป้องกันไม่ให้ variable มี default value ได้เลย',
+      'จับค่าที่ caller ส่งมาแล้วไม่ผ่าน custom condition ตั้งแต่ตอน plan พร้อม error message เฉพาะเจาะจง แทนที่จะพังทีหลังใน provider',
+      'เข้ารหัสค่าของ variable ใน state file',
+      'แปลง type ของค่าให้ถูกต้องอัตโนมัติ',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ถ้า variable ตัวหนึ่งมีค่าใน terraform.tfvars, ใน TF_VAR_ environment variable, และส่งผ่าน -var บน command line Terraform จะใช้ค่าไหน',
+    options: [
+      'ค่าจาก TF_VAR_ environment variable เพราะ environment variable ถูกเช็คก่อนเสมอ',
+      'Terraform merge ทั้งสามค่าเข้าด้วยกัน',
+      'ค่าจาก -var บน command line เพราะ CLI flag มี precedence สูงสุด',
+      'ค่าจาก terraform.tfvars เพราะไฟล์ explicit กว่า flag',
+    ],
+    answer: 2,
+  },
+  {
+    q: 'sensitive = true บน variable ป้องกันอะไรจริง ๆ',
+    options: [
+      'ลบค่าออกจาก state file ไปเลย',
+      'ซ่อนค่าจาก output ของ plan และ apply บน CLI แต่ค่ายังถูกเก็บเป็น plain text ใน state',
+      'เข้ารหัสค่าทุกที่ที่มันปรากฏ รวมถึงใน state',
+      'ห้ามนำค่านั้นไปใช้ใน resource argument ใด ๆ',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ระหว่างไฟล์ *.auto.tfvars กับ terraform.tfvars ถ้าตั้ง variable ตัวเดียวกัน อันไหนชนะ',
+    options: [
+      'terraform.tfvars ชนะเสมอเพราะไม่มี prefix',
+      'ทั้งคู่ไม่ได้ auto-load เลยต้องอ้างอิงเองถึงจะใช้ได้',
+      'ไฟล์ auto.tfvars ชนะ และถ้ามีหลายไฟล์จะโหลดตามลำดับตัวอักษร',
+      'ถูก merge กันทีละ field ไม่ว่า type จะเป็นอะไร',
+    ],
+    answer: 2,
+  },
+];
+
+<Quiz client:visible id="variables-and-data-flow/input-variables" questions={quizInputVariables} />
+
+<ProgressTracker client:visible id="variables-and-data-flow/input-variables" />

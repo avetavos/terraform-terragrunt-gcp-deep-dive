@@ -1,0 +1,191 @@
+---
+title: 'Input Variables'
+description: 'Declaring variable blocks with type constraints, defaults, and sensitive values, validating them with custom rules, and the precedence order Terraform uses when a value comes from more than one source.'
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## The idea in one sentence
+
+An input variable is a named, typed parameter that lets the same Terraform configuration produce different infrastructure depending on who calls it and with what values.
+
+## Declaring a variable block
+
+A `variable` block has four parts worth knowing well: `type` constrains what shape of value is acceptable, `default` supplies a fallback when nobody sets a value, `description` documents intent for the next reader, and `sensitive` redacts the value from most CLI output.
+
+```hcl
+variable "environment" {
+  type        = string
+  description = "Deployment environment name, e.g. dev, staging, prod"
+  default     = "dev"
+}
+
+variable "instance_count" {
+  type        = number
+  description = "Number of Compute Engine instances to launch"
+  default     = 2
+}
+
+variable "enable_deletion_protection" {
+  type        = bool
+  description = "Whether to enable deletion protection on the Compute Engine instance"
+  default     = true
+}
+
+variable "allowed_ports" {
+  type        = list(number)
+  description = "TCP ports allowed inbound on the firewall rule"
+  default     = [22, 443]
+}
+
+variable "resource_labels" {
+  type        = map(string)
+  description = "Labels applied to every resource in this configuration"
+  default = {
+    project = "payments"
+    team    = "platform"
+  }
+}
+
+variable "db_config" {
+  type = object({
+    database_version = string
+    tier             = string
+    disk_size_gb     = number
+  })
+  description = "Structured configuration for the Cloud SQL instance"
+  default = {
+    database_version = "POSTGRES_15"
+    tier             = "db-custom-1-3840"
+    disk_size_gb     = 20
+  }
+}
+
+variable "db_password" {
+  type        = string
+  description = "Password for the Cloud SQL application user"
+  sensitive   = true
+}
+```
+
+`object({...})` is worth calling out: it is a typed, fixed-shape structure — every key you list is required (unless you give it a default with `optional()`), and Terraform rejects a caller-supplied value that has the wrong shape at plan time, well before any GCP API call happens.
+
+The `sensitive = true` argument on `db_password` only affects **display**. Terraform masks the value in `plan`/`apply` output and in the CLI as `(sensitive value)`. It does not encrypt or omit the value from the state file — the state-management module already covered this: state stores every attribute of every managed resource in plain text inside the JSON, including values that came from a sensitive variable. Treat `sensitive = true` as a display protection for terminals and CI logs, not as a substitute for a properly access-controlled remote backend.
+
+## Validating a variable with a validation block
+
+A `default` or a `type` constraint only checks the shape of a value, not whether it makes sense. A `validation` block adds a custom `condition` and a specific `error_message`, so a caller gets immediate, actionable feedback at `plan` time instead of a confusing error from deep inside the Google provider.
+
+```hcl
+variable "zone" {
+  type        = string
+  description = "GCP zone the resources are deployed into, e.g. us-central1-a"
+
+  validation {
+    condition     = can(regex("^[a-z]+-[a-z0-9]+-[a-z]$", var.zone))
+    error_message = "zone must look like a GCP zone, e.g. us-central1-a or europe-west1-b."
+  }
+}
+
+variable "environment" {
+  type        = string
+  description = "Deployment environment name"
+
+  validation {
+    condition     = contains(["dev", "staging", "prod"], var.environment)
+    error_message = "environment must be one of: dev, staging, prod."
+  }
+}
+```
+
+Without that first `validation` block, passing `zone = "not-a-real-zone"` would sail through `terraform plan` and only fail once Terraform actually calls the Google provider to create a resource in that zone — a much slower feedback loop, and a much less specific error message than "zone must look like a GCP zone." The `can()` wrapper turns a `regex()` failure into `false` instead of an outright error, which is exactly what a `condition` expression needs: it must always evaluate to `true` or `false`, never raise.
+
+## Setting variable values, and who wins
+
+Terraform lets you set a value for the same variable from several places at once, and it resolves conflicts with a strict, well-defined precedence. From highest priority (wins) to lowest:
+
+1. **`-var` and `-var-file` on the command line**, in the order given — the most explicit, most temporary way to set a value.
+2. **`*.auto.tfvars` / `*.auto.tfvars.json` files**, auto-loaded from the working directory in lexical (alphabetical) order of filename.
+3. **`terraform.tfvars` / `terraform.tfvars.json`**, auto-loaded if present.
+4. **`TF_VAR_<name>` environment variables** — useful for CI pipelines and for values you do not want sitting in a file at all.
+5. **The variable's own `default`** — used only if nothing above supplied a value.
+
+```bash
+# Highest precedence: an explicit CLI flag for this one run
+terraform apply -var="zone=europe-west1-b"
+
+# Or point at a specific tfvars file
+terraform apply -var-file="prod.tfvars"
+
+# Environment variable equivalent of setting zone
+export TF_VAR_zone="us-east1-b"
+terraform apply
+```
+
+If `zone` is set in `terraform.tfvars`, again in `prod.auto.tfvars`, and again via `-var` on the command line, the `-var` value wins — Terraform does not merge scalar values across sources, it picks the highest-priority one that exists. Collection types like maps and objects are the exception worth remembering later: some tooling merges nested values rather than fully overriding, but for the plain sources above, a defined value at a higher-priority source simply replaces a lower-priority one for that variable.
+
+<Mermaid title="Multiple value sources resolve to one value per variable, by precedence" code={precedenceDiagram} />
+
+export const precedenceDiagram = `flowchart LR
+  a["-var / -var-file (CLI flag)"] --> r["Resolved value of var.zone"]
+  b["*.auto.tfvars (alphabetical)"] --> r
+  c["terraform.tfvars"] --> r
+  d["TF_VAR_zone (env var)"] --> r
+  e["default in the variable block"] --> r
+  r --> res["google_compute_instance.web"]`;
+
+<Callout title="The one-line takeaway">
+A **`variable`** block declares a typed, named input with an optional **`default`**, and `sensitive = true` masks it from CLI output only — the value is still stored in plain text in **state**. A **`validation`** block adds a **`condition`** and a custom **`error_message`** so a bad input fails fast and clearly at `plan` time instead of deep inside a provider call. When the same variable gets a value from more than one place, Terraform resolves it by strict precedence: **`-var`/`-var-file`** beats **`*.auto.tfvars`**, which beats **`terraform.tfvars`**, which beats **`TF_VAR_*`** environment variables, which beats the variable's own **`default`**.
+</Callout>
+
+export const quizInputVariables = [
+  {
+    q: 'What does a validation block on a variable actually prevent?',
+    options: [
+      'It prevents the variable from ever having a default value',
+      'It catches a caller-supplied value that fails a custom condition at plan time, with a specific error message, instead of failing later inside the provider',
+      'It encrypts the variable value in the state file',
+      'It automatically converts the value to the correct type',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'If a variable has a value in terraform.tfvars, in a TF_VAR_ environment variable, and passed via -var on the command line, which value does Terraform use?',
+    options: [
+      'The TF_VAR_ environment variable, because environment variables are always checked first',
+      'Terraform merges all three values together',
+      'The -var command line value, because CLI flags have the highest precedence',
+      'The terraform.tfvars value, because files are more explicit than flags',
+    ],
+    answer: 2,
+  },
+  {
+    q: 'What does sensitive = true on a variable actually protect?',
+    options: [
+      'It removes the value entirely from the state file',
+      'It masks the value from plan and apply output in the CLI, but the value is still stored in plain text in state',
+      'It encrypts the value everywhere it appears, including state',
+      'It prevents the value from being used in any resource argument',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Between *.auto.tfvars files and terraform.tfvars, which one wins if both set the same variable?',
+    options: [
+      'terraform.tfvars always wins because it has no prefix',
+      'Neither is auto-loaded, so both are ignored unless referenced explicitly',
+      'auto.tfvars files win, and are themselves loaded in alphabetical order when there are several',
+      'They are merged field by field regardless of type',
+    ],
+    answer: 2,
+  },
+];
+
+<Quiz client:visible id="variables-and-data-flow/input-variables" questions={quizInputVariables} />
+
+<ProgressTracker client:visible id="variables-and-data-flow/input-variables" />

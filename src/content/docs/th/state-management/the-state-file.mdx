@@ -1,0 +1,144 @@
+---
+title: 'The State File'
+description: 'state ของ Terraform คืออะไรจริง ๆ ทำไม Terraform ทำงานโดยไม่มี state ไม่ได้ และทำไม terraform.tfstate ห้ามถูก commit เข้า git'
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## ไอเดียในหนึ่งประโยค
+
+**state** ของ Terraform คือไฟล์ JSON ที่แมป resource แต่ละตัวใน configuration ของคุณเข้ากับ object จริงที่มันสร้างขึ้น และมันเป็นสิ่งเดียวที่ทำให้ Terraform รู้ว่าตัวเองจัดการอะไรอยู่
+
+## ทำไม Terraform ถึงต้องมี state
+
+ตอนคุณรัน `terraform apply` Terraform สร้าง resource ผ่าน API ของ Google Cloud — Compute Engine instance, Cloud Storage bucket, IAM binding สักตัว API ของ GCP ไม่มีแนวคิดเรื่อง "Terraform" เลย ถ้า project หนึ่งมี Compute Engine instance 500 ตัว Compute Engine API ก็บอกไม่ได้ว่าตัวไหนคือตัวที่ Terraform สร้างให้กับ `resource "google_compute_instance" "web"` block นี้ ตัวไหนที่เพื่อนร่วมทีมสร้างมือใน Console และตัวไหนเป็นของ Terraform configuration อื่นไปเลย
+
+Terraform แก้ปัญหานี้ด้วยการเก็บ record ของตัวเอง ทุกครั้งที่ `apply` Terraform จะเขียน mapping ระหว่าง resource address ใน configuration กับ ID จริงของ infrastructure ลงไฟล์ state ที่ชื่อ default คือ `terraform.tfstate`
+
+```hcl
+resource "google_compute_instance" "web" {
+  name         = "web-vm"
+  machine_type = "e2-medium"
+  zone         = "us-central1-a"
+
+  boot_disk {
+    initialize_params {
+      image = "debian-cloud/debian-12"
+    }
+  }
+
+  network_interface {
+    network = "default"
+  }
+}
+```
+
+หลัง `apply` ไฟล์ state จะบันทึกประมาณว่า `google_compute_instance.web -> projects/my-project-id/zones/us-central1-a/instances/web-vm` พร้อม attribute ทุกตัวที่ Compute Engine API ส่งกลับมาสำหรับ instance นั้น — internal IP, self link, network interface และอื่น ๆ ข้อมูลที่ cache ไว้นี้ทำให้ Terraform ไม่ต้องเรียก GCP API แล้ว describe resource ทุกตัวใหม่แค่เพื่อคำนวณ plan มันเทียบ configuration กับ state ล่าสุดก่อนได้เลย นี่คือทั้งวิธีที่มันตรวจจับว่าอะไรเปลี่ยน และเป็นข้อดีด้าน performance จริง ๆ กับ configuration ขนาดใหญ่ state ยังเป็นที่เก็บ dependency metadata ด้วย ทำให้ Terraform รู้ลำดับที่ต้องสร้าง แก้ไข หรือลบ resource
+
+## ความเสี่ยงของ plaintext ที่ซ่อนอยู่ใน state file
+
+state file ไม่ได้ผ่านการ sanitize attribute value ใด ๆ ที่ Terraform ได้รับจาก provider — หรือที่คุณตั้งตรงใน configuration — จะถูกเขียนลง `terraform.tfstate` แบบ **plaintext** รวมถึงค่าที่เป็น secret ด้วย ตัวอย่างที่เจอบ่อย
+
+```hcl
+resource "google_sql_user" "app" {
+  name     = "app_admin"
+  instance = google_sql_database_instance.main.name
+  password = "S3cretPassword!"
+}
+```
+
+คุณไม่เคยรัน `terraform output` กับ password ตัวนั้น และไม่เคย print มันใน log แต่มันก็ยังไปอยู่ใน `terraform.tfstate` แบบ plaintext อยู่ดี เพราะ Terraform ต้องจำ attribute ทุกตัวที่มันตั้งไว้ เพื่อตรวจ drift ตอน `plan` ครั้งถัดไป ใครก็ตามที่อ่านไฟล์นั้นได้ก็อ่าน password ได้ด้วย
+
+นี่คือเหตุผลที่ `terraform.tfstate` ห้าม commit เข้า version control เด็ดขาด ใส่มันลง `.gitignore` ตั้งแต่ commit แรกของโปรเจกต์ใหม่
+
+```bash
+# .gitignore
+terraform.tfstate
+terraform.tfstate.backup
+*.tfstate
+*.tfstate.*
+```
+
+บทถัดไปจะพูดถึงการย้าย state ออกจาก laptop ไปไว้บน remote backend ที่ควบคุม access ได้จริง ซึ่งเป็นวิธีแก้ความเสี่ยงนี้ที่แท้จริง — `.gitignore` แค่กันอุบัติเหตุที่เห็นชัดที่สุดเท่านั้น
+
+## การดู state
+
+Terraform มีคำสั่งสามตัวสำหรับดูข้างใน state โดยไม่ต้องเปิดไฟล์ JSON เอง
+
+```bash
+# Human-readable dump of the entire current state
+terraform show
+
+# List every resource address currently tracked in state
+terraform state list
+
+# Show full attribute detail for one specific resource
+terraform state show google_compute_instance.web
+```
+
+`terraform state list` คือวิธีเร็วที่สุดในการตอบคำถามว่า "configuration นี้จัดการอะไรอยู่ตอนนี้" มัน print address อย่าง `google_compute_instance.web` หรือ `module.network.google_compute_network.main` โดยไม่มีรายละเอียดอื่น `terraform state show <address>` จะลงลึกไป address ใดตัวหนึ่ง แล้ว print attribute ทุกตัวที่ Terraform บันทึกไว้ ซึ่งบ่อยครั้งเร็วกว่าการไปเปิด Google Cloud Console เวลาต้องเช็คค่าที่ Terraform track อยู่
+
+<Mermaid title="Config and real GCP resources both feed the state file that the next plan reads" code={stateFlowDiagram} />
+
+export const stateFlowDiagram = `flowchart LR
+  cfg["Terraform config (.tf files)"] --> apply["terraform apply"]
+  apply --> gcp["Real GCP resources"]
+  gcp -->|attributes written back| state["terraform.tfstate"]
+  cfg -->|next run| plan["terraform plan"]
+  state -->|read for comparison| plan`;
+
+<Callout title="สรุปหนึ่งบรรทัด">
+**state** ของ Terraform คือ record แบบ JSON ที่แมป resource address ใน configuration เข้ากับ object ID จริงบน GCP พร้อม attribute ของมัน — มันมีอยู่เพราะ provider API บอก Terraform ไม่ได้ว่าตัวเองจัดการอะไร และมันยังทำหน้าที่เป็น cache ด้าน performance ทำให้ `plan` ไม่ต้อง describe resource ทุกตัวใหม่ตั้งแต่ต้น เพราะ state เก็บทุก attribute แบบ **plaintext** รวมถึง secret อย่าง database password ด้วย `terraform.tfstate` และ `terraform.tfstate.backup` ต้องอยู่ใน `.gitignore` ตั้งแต่วันแรก ใช้ `terraform state list` เพื่อดูว่า track อะไรอยู่ และ `terraform state show <address>` เพื่อดูรายละเอียดของ resource ตัวใดตัวหนึ่ง
+</Callout>
+
+export const quizStateFile = [
+  {
+    q: 'ทำไม Terraform ถึงต้องมี state file แทนที่จะ query cloud provider API ทุกครั้ง',
+    options: [
+      'state file ทำให้ Terraform รันเร็วขึ้นโดยไม่มีเหตุผลอื่น',
+      'provider API บอกไม่ได้ว่า resource ตัวไหนที่ Terraform สร้างเทียบกับตัวที่สร้างด้วยวิธีอื่น Terraform เลยต้องเก็บ record ของตัวเอง',
+      'state file เป็นสิ่งที่ Google Cloud บังคับใช้เพื่อการเรียกเก็บเงิน',
+      'state ของ Terraform มาแทนที่ configuration file ทั้งหมด',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'database password ถูกตั้งเป็น resource attribute แต่ไม่เคยถูก print ด้วย terraform output มันยังไปอยู่แบบ plaintext ที่ไหนได้ไหม',
+    options: [
+      'ไม่ได้ มีแค่ค่าที่ส่งเข้า output block เท่านั้นที่ถูกเก็บ',
+      'ได้ ทุก attribute ที่ Terraform บันทึกสำหรับ resource จะถูกเขียนลง state file แบบ plaintext รวมถึงค่า sensitive ด้วย',
+      'ได้เฉพาะตอนที่ไม่ใส่ flag -sensitive ใน resource block',
+      'ไม่ได้ Terraform เข้ารหัส attribute value ทุกตัวใน state ให้อัตโนมัติ',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'terraform state list กับ terraform state show ต่างกันยังไง',
+    options: [
+      'เป็นคำสั่งเดียวกันคนละชื่อ',
+      'state list แสดง resource address ที่ track ทั้งหมด ส่วน state show แสดงรายละเอียด attribute ของ address ใดตัวหนึ่ง',
+      'state list ใช้ได้เฉพาะกับ remote backend เท่านั้น',
+      'state show แสดง resource list และ state list แสดง attribute ของมัน',
+    ],
+    answer: 1,
+  },
+  {
+    q: '.gitignore ของโปรเจกต์ Terraform ใหม่ ควรมีอะไรตั้งแต่ commit แรก',
+    options: [
+      'มีแค่ไฟล์ configuration .tf เท่านั้น',
+      'terraform.tfstate และ terraform.tfstate.backup เพราะ state อาจมี secret แบบ plaintext อยู่',
+      'ไม่ต้องมีอะไรเลย state file commit ได้ปลอดภัยตราบใดที่มีการ review',
+      'มีแค่ binary ของ provider plugin เท่านั้น',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="state-management/the-state-file" questions={quizStateFile} />
+
+<ProgressTracker client:visible id="state-management/the-state-file" />

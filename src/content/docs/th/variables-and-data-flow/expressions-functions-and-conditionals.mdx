@@ -1,0 +1,184 @@
+---
+title: 'Expressions, Functions, and Conditionals'
+description: 'ใช้ built-in function กลุ่ม string, collection, และ networking ทดลอง expression อย่างปลอดภัยด้วย terraform console เขียน conditional expression และสร้าง nested block ซ้ำจำนวนไม่คงที่ด้วย dynamic'
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## ไอเดียในหนึ่งประโยค
+
+Terraform configuration ไม่ได้มีแค่ค่า static — built-in function แปลงข้อมูล, conditional expression เลือกระหว่างสองค่า, และ `dynamic` block สร้าง nested block จำนวนไม่คงที่ ทั้งหมดนี้ evaluate ตอน `plan` ก่อนที่จะไปเรียก GCP API เลยด้วยซ้ำ
+
+## Built-in function แยกตามหมวด
+
+Terraform มี built-in function ชุดตายตัว — เราสร้าง function เองไม่ได้ — แบ่งหมวดคร่าว ๆ ตามชนิดข้อมูลที่มันทำงานด้วย มีไม่กี่ตัวที่เจอบ่อยมากใน GCP configuration:
+
+```hcl
+locals {
+  # String functions
+  bucket_suffix = join("-", ["assets", "prod", "us"])
+  path_parts    = split("/", "projects/my-project/zones/us-central1-a")
+  log_message   = format("instance %s in zone %s", "web-1", "us-central1-a")
+
+  # Collection functions
+  tier_lookup = lookup({ dev = "db-f1-micro", prod = "db-custom-2-7680" }, "dev", "db-f1-micro")
+  merged_labels = merge(
+    { managed_by = "terraform" },
+    { environment = "prod" },
+  )
+  has_ssh = contains([22, 443, 8080], 22)
+
+  # Networking function: carve a /24 out of a /16 VPC range
+  subnet_a = cidrsubnet("10.0.0.0/16", 8, 0)
+  subnet_b = cidrsubnet("10.0.0.0/16", 8, 1)
+}
+```
+
+`join` กับ `split` เป็นด้านตรงข้ามกัน — ตัวหนึ่งเปลี่ยน list ให้เป็น string ที่มี delimiter คั่น อีกตัวเปลี่ยน string ที่มี delimiter กลับเป็น list `lookup` อ่าน map ด้วย key พร้อม fallback ที่เป็น argument ตัวที่สามชัดเจน ทำให้ key ที่หายไปไม่ทำให้เกิด error `merge` รวมหลาย map เข้าเป็นก้อนเดียว โดย argument ที่มาทีหลัง override key จาก argument ก่อนหน้า `contains` เช็คว่ามีสมาชิกอยู่ใน list ไหมและคืนค่า boolean ธรรมดา `cidrsubnet(prefix, newbits, netnum)` คือตัวที่ควรจำให้แม่นสำหรับงาน networking บน GCP มันรับ CIDR block ตั้งต้น ขยาย prefix length ไปอีก `newbits` บิต แล้วคืน subnet ตัวที่ `netnum` ของขนาดใหม่นั้น — เหมาะเจาะพอดีสำหรับตัด `10.0.0.0/16` ของ VPC network ให้เป็น `/24` หลายชุดโดยไม่ต้องคำนวณ address เองด้วยมือ
+
+## terraform console — REPL สำหรับทดลอง expression
+
+ก่อนจะเอา function หรือ expression ที่ยังไม่คุ้นมือไปใส่ใน resource argument จริง `terraform console` เปิด interactive REPL ที่ evaluate expression กับ configuration และ state ปัจจุบันได้เลย โดยไม่ต้อง plan หรือ apply อะไร
+
+```bash
+terraform console
+```
+
+```
+> cidrsubnet("10.0.0.0/16", 8, 1)
+"10.0.1.0/24"
+> join("-", ["assets", "prod", "us"])
+"assets-prod-us"
+> var.environment
+"dev"
+```
+
+นี่คือวิธีที่เร็วที่สุดในการตอบคำถาม "expression นี้ evaluate ออกมาเป็นอะไรกันแน่" — พิมพ์เข้าไป อ่านผลลัพธ์ แล้วค่อยเอา expression ที่ใช้ได้จริงไปวางในไฟล์ `.tf` มันเป็น read-only กับ infrastructure จริง `terraform console` อ่าน variable, local, และ state ที่มีอยู่ได้ แต่สร้าง เปลี่ยน หรือทำลายอะไรไม่ได้เลย
+
+## Conditional expression
+
+conditional expression มีรูปร่าง `condition ? true_val : false_val` และ evaluate ออกมาเป็นค่าใดค่าหนึ่งในสองฝั่งตามว่า `condition` เป็น `true` หรือ `false`
+
+```hcl
+variable "environment" {
+  type        = string
+  description = "Deployment environment name"
+  default     = "dev"
+}
+
+locals {
+  machine_type = var.environment == "prod" ? "e2-standard-4" : "e2-medium"
+}
+
+resource "google_compute_instance" "web" {
+  name         = "web-server"
+  machine_type = local.machine_type
+  zone         = "us-central1-a"
+
+  boot_disk {
+    initialize_params {
+      image = "debian-cloud/debian-12"
+    }
+  }
+
+  network_interface {
+    network = "default"
+    access_config {}
+  }
+}
+```
+
+สามส่วนคือ `condition` (expression ที่ต้อง evaluate ออกมาเป็น boolean), `true_val` (ใช้เมื่อ `condition` เป็น `true`), และ `false_val` (ใช้เมื่อ `condition` เป็น `false`) ในตัวอย่างนี้ `local.machine_type` จะได้ `"e2-standard-4"` ก็ต่อเมื่อ `var.environment` เท่ากับ `"prod"` เป๊ะ ๆ และตกไปที่ `"e2-medium"` สำหรับค่าอื่นทั้งหมด รวมถึง `"dev"` กับ `"staging"`
+
+## dynamic block — nested block จำนวนไม่คงที่
+
+`count` หรือ `for_each` บน resource สร้าง resource ทั้งก้อนจำนวนไม่คงที่ ซึ่งบทถัดไปจะพูดถึง `dynamic` block แก้ปัญหาที่คล้ายกันแต่ต่างกันคือ สร้าง nested block ที่ซ้ำกันจำนวนไม่คงที่ภายใน resource เดียว
+
+```hcl
+variable "allowed_ports" {
+  type        = list(number)
+  description = "TCP ports allowed inbound on the firewall rule"
+  default     = [22, 80, 443]
+}
+
+resource "google_compute_firewall" "allow_multiple" {
+  name    = "allow-multiple-ports"
+  network = "default"
+
+  dynamic "allow" {
+    for_each = var.allowed_ports
+    content {
+      protocol = "tcp"
+      ports    = [allow.value]
+    }
+  }
+}
+```
+
+`dynamic "allow"` block วนลูปผ่าน `var.allowed_ports` และสร้าง nested block `allow { ... }` หนึ่งอันต่อหนึ่ง element ภายใน `google_compute_firewall.allow_multiple` resource เดียว ภายใน `content` `allow.value` อ้างถึง element ปัจจุบัน — ชื่อ iterator variable default เป็นชื่อ label ของ dynamic block เอง คือ `allow` ใช้ `dynamic` เมื่อสิ่งที่ซ้ำคือ nested block ภายใน resource เดียว ใช้ `count` หรือ `for_each` บนตัว resource เมื่อสิ่งที่ซ้ำคือทั้ง resource
+
+<Mermaid title="A conditional expression and a function call resolve to one final value used in a resource argument" code={conditionalExpressionDiagram} />
+
+export const conditionalExpressionDiagram = `flowchart LR
+  a["var.environment"] --> c{"environment == prod ?"}
+  c -->|true| t["e2-standard-4"]
+  c -->|false| f["e2-medium"]
+  t --> m["local.machine_type"]
+  f --> m
+  m --> r["google_compute_instance.web.machine_type"]`;
+
+<Callout title="The one-line takeaway">
+built-in **function** ของ Terraform ครอบคลุม string (`join`, `split`, `format`), collection (`lookup`, `merge`, `contains`), และ networking (`cidrsubnet` สำหรับตัด VPC range ให้เป็น subnet) — `terraform console` คือวิธีที่เร็วที่สุดในการเช็คว่า expression ไหนก็ตาม evaluate ออกมาเป็นอะไรกันแน่ ก่อนที่จะเอาไปใส่ resource argument **conditional expression** (`condition ? true_val : false_val`) เลือกระหว่างสองค่าตรง ๆ ตาม boolean condition **`dynamic`** block สร้าง nested block ที่ซ้ำกันจำนวนไม่คงที่ภายใน resource เดียว ขับเคลื่อนด้วย `for_each` บน collection — คนละแนวคิดกับ `count`/`for_each` meta-argument บน resource ที่บทถัดไปจะพูดถึง ซึ่งสร้าง resource ทั้งก้อนจำนวนไม่คงที่แทน
+</Callout>
+
+export const quizExpressionsFunctions = [
+  {
+    q: 'terraform console ใช้ทำอะไร',
+    options: [
+      'apply infrastructure change ได้เร็วกว่า terraform apply',
+      'REPL แบบ interactive สำหรับ evaluate expression และ function กับ config และ state ปัจจุบัน โดยไม่เปลี่ยน infrastructure จริงเลย',
+      'เข้ารหัสค่า sensitive ก่อนที่จะลงไปใน state file',
+      'สร้าง resource จำนวนไม่คงที่จาก for_each meta-argument',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'conditional expression มีสามส่วนอะไรบ้าง',
+    options: [
+      'ชื่อ function, argument list, และ return type',
+      'condition ที่ evaluate ออกมาเป็น boolean, true_val, และ false_val',
+      'for_each map, key, และ value',
+      'variable, type constraint, และ default',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ควรใช้ dynamic block แทน count หรือ for_each บน resource เมื่อไหร่',
+    options: [
+      'เมื่อต้องการ resource ทั้งก้อนจำนวนไม่คงที่แยกกัน',
+      'เมื่อต้องการ nested block ที่ซ้ำกันจำนวนไม่คงที่ภายใน resource เดียว เช่น allow block หลายอันใน firewall resource เดียว',
+      'เมื่อต้องการซ่อนค่าจาก CLI output',
+      'เมื่อต้องการ validate ค่า variable ตอน plan',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'cidrsubnet(prefix, newbits, netnum) ทำงานอย่างไร',
+    options: [
+      'รวมสอง CIDR range แยกกันเข้าเป็น supernet เดียว',
+      'ขยาย CIDR prefix ไปอีก newbits บิต แล้วคืน subnet ตัวที่ netnum ของขนาดใหม่นั้น',
+      'เช็คว่า IP address เป็นสมาชิกของ CIDR range หรือไม่',
+      'แปลง CIDR range ให้เป็น list ของ IP address แต่ละตัว',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="variables-and-data-flow/expressions-functions-and-conditionals" questions={quizExpressionsFunctions} />
+
+<ProgressTracker client:visible id="variables-and-data-flow/expressions-functions-and-conditionals" />

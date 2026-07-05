@@ -1,0 +1,184 @@
+---
+title: 'Module Composition and Sources'
+description: 'source argument บอกว่าโค้ดของ module มาจากไหน วิธีต่อ output ของ module หนึ่งเข้ากับ input ของอีก module และเมื่อไหร่ที่ควรใช้ public Terraform Registry แทนการเขียนเอง'
+sidebar:
+  order: 2
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## The idea in one sentence
+
+**`source`** argument ใน `module` block บอกว่าโค้ดของ module นั้นอยู่ที่ไหน — local path, public Terraform Registry หรือ Git URL — และ infrastructure จริงถูกสร้างขึ้นด้วยการเอา `output` ของ module หนึ่งไปต่อเป็น `variable` ของอีก module ไม่ใช่เขียน configuration แบนราบก้อนเดียว
+
+## source argument: โค้ดของ module มาจากไหน
+
+`module` block ทุกตัวต้องมี `source` argument และ Terraform รองรับรูปแบบหลักสามแบบ แบบง่ายที่สุดคือ local relative path ชี้ไปที่ directory ของไฟล์ `.tf` ที่อยู่ใน repository เดียวกับตัวที่เรียกใช้
+
+```hcl
+module "vpc" {
+  source = "./modules/vpc"
+
+  project_id   = var.project_id
+  network_name = "app-network"
+}
+```
+
+local path เหมาะตอนที่ module ยังผูกกับ repository เดียวอยู่ หรือตอนที่คุณกำลังพัฒนามันไปพร้อมกับโค้ดที่เรียกใช้มัน แต่พอ module reuse ได้จริงข้ามหลาย configuration คุณมักอยากเผยแพร่มันไว้ที่ที่ทุก caller เข้าถึงได้เองโดยไม่ต้องผูกกับ repository ใดเป็นพิเศษ — ตรงนี้แหละที่ public Terraform Registry กับ Git source เข้ามามีบทบาท
+
+public Terraform Registry เก็บ module จากชุมชนและ vendor ต่าง ๆ ภายใต้ address รูปแบบ `namespace/name/provider` ซึ่ง `terraform init` resolve ให้อัตโนมัติโดยไม่ต้องใช้ URL เลย
+
+```hcl
+module "vpc" {
+  source  = "terraform-google-modules/network/google"
+  version = "~> 9.0"
+
+  project_id   = var.project_id
+  network_name = "app-network"
+}
+```
+
+Git URL คือรูปแบบที่สาม เหมาะกับ module ส่วนตัวหรือภายในองค์กรที่ไม่ได้เผยแพร่ขึ้น registry ไหนเลย การต่อ `?ref=` ท้าย URL คือการ pin source ไว้ที่ tag, branch หรือ commit ที่ระบุ เหมือนกับที่ `version` pin module จาก Registry
+
+```hcl
+module "vpc" {
+  source = "git::https://github.com/acme-corp/terraform-modules.git//vpc?ref=v2.3.0"
+
+  project_id   = var.project_id
+  network_name = "app-network"
+}
+```
+
+สังเกต double slash ก่อนคำว่า `vpc` ใน Git URL — ทุกอย่างก่อนหน้านั้นคือ repository ที่จะ clone และทุกอย่างหลังจากนั้นคือ subdirectory ภายใน repository นั้นที่ module ตัวจริงอยู่ เรื่องนี้สำคัญเพราะ repository เดียวมักเก็บหลาย module ไว้ด้วยกัน ไม่ใช่แค่ตัวเดียว
+
+## ประกอบ module เข้าด้วยกัน: ส่ง output ไปเป็น input
+
+infrastructure ที่ซับซ้อนจริง ๆ แทบไม่เคยเป็น configuration แบนราบก้อนเดียว แต่เป็น module เล็ก ๆ ที่ focus ชัดเจนหลายตัวต่อกัน โดย `output` ของ module หนึ่งกลายเป็น input `variable` ของ module ถัดไปโดยตรง ลองดู `vpc` module ที่สร้าง network กับ subnet ของมัน และ `compute-instance` module ที่ต้องรู้ว่าจะ attach instance เข้ากับ network และ subnetwork ไหน
+
+```hcl
+# modules/vpc/outputs.tf
+output "network_id" {
+  description = "Self link of the VPC network created by this module"
+  value       = google_compute_network.this.id
+}
+
+output "subnet_ids" {
+  description = "Map of region to subnetwork ID"
+  value       = { for s in google_compute_subnetwork.this : s.region => s.id }
+}
+```
+
+```hcl
+# modules/compute-instance/variables.tf
+variable "network_id" {
+  description = "ID of the VPC network to attach the instance to"
+  type        = string
+}
+
+variable "subnet_id" {
+  description = "ID of the subnetwork to attach the instance to"
+  type        = string
+}
+```
+
+root configuration instantiate module ทั้งสองตัวและส่ง output ของตัวแรกเข้าไปเป็น input ของตัวที่สองตรง ๆ โดยไม่ต้อง copy ID ด้วยมือระหว่างทาง
+
+```hcl
+# root main.tf
+module "vpc" {
+  source       = "./modules/vpc"
+  project_id   = var.project_id
+  network_name = "app-network"
+}
+
+module "compute_instance" {
+  source     = "./modules/compute-instance"
+  project_id = var.project_id
+  network_id = module.vpc.network_id
+  subnet_id  = module.vpc.subnet_ids["us-central1"]
+}
+```
+
+Terraform resolve dependency ตรงนี้ให้อัตโนมัติ เพราะ `module.compute_instance` อ้างอิงถึง `module.vpc.network_id` Terraform จึงรู้ว่าต้องสร้าง network ก่อน instance โดยที่คุณไม่ต้องเขียน `depends_on` เพิ่มเลย
+
+## ใช้ public Terraform Registry ให้เป็นประโยชน์
+
+การเขียน `vpc` module เองตั้งแต่ศูนย์เป็นแบบฝึกหัดที่ดี แต่สำหรับงาน production มันมักไม่ใช่การใช้เวลาที่คุ้มค่าที่สุด องค์กร `terraform-google-modules` บน public Registry ดูแล module อย่าง `terraform-google-modules/network/google` ที่จัดการรายละเอียดยิบย่อยของ GCP networking ไว้แล้ว — custom subnet range, secondary range สำหรับ GKE, Shared VPC, Cloud NAT — ผ่านการใช้งานจริงจากชุมชนจำนวนมากที่เจอ edge case เดียวกับที่คุณจะเจอเองในที่สุด
+
+แต่ module จาก Registry ก็ยังเป็นโค้ดของคนอื่นที่รันใน project ของคุณด้วย credential ของคุณ ก่อนจะพึ่งพามันใน production ควรอ่านให้รู้ว่ามันสร้างอะไรจริง ๆ — `main.tf` ของมัน ค่า default ของมัน IAM role หรือ API ที่มันเปิดใช้แทนคุณ module จาก Registry ที่ดูแลดีคือ productivity lever จริง ไม่ใช่ตัวแทนของการเข้าใจว่าอะไรถูก deploy เข้า GCP project ของคุณ
+
+<Mermaid title="Root configuration wiring vpc module outputs into compute-instance module inputs" code={moduleCompositionDiagram} />
+
+export const moduleCompositionDiagram = `flowchart LR
+  subgraph root["Root module"]
+    rvpc["module.vpc"]
+    rci["module.compute_instance"]
+  end
+  subgraph vpcmod["Child module: modules/vpc"]
+    vout1["output: network_id"]
+    vout2["output: subnet_ids"]
+  end
+  subgraph cimod["Child module: modules/compute-instance"]
+    cin1["variable: network_id"]
+    cin2["variable: subnet_id"]
+  end
+  rvpc --> vout1
+  rvpc --> vout2
+  vout1 -->|module.vpc.network_id| rci
+  vout2 -->|module.vpc.subnet_ids| rci
+  rci --> cin1
+  rci --> cin2`;
+
+<Callout title="The one-line takeaway">
+**`source`** argument บน `module` block ชี้ว่าโค้ดของมันอยู่ที่ไหน — local path สำหรับ module ที่ยังผูกกับ repository เดียว, public **Terraform Registry** สำหรับ module ของชุมชนที่ดูแลดีและ resolve ผ่าน `namespace/name/provider`, หรือ **Git URL** (pin ได้ด้วย `?ref=`) สำหรับ module ส่วนตัวหรือภายในองค์กร infrastructure จริงถูกประกอบขึ้นจาก module เล็ก ๆ ที่ focus ชัดเจนหลายตัวต่อกัน ด้วยการส่ง `output` ของ module หนึ่งเป็น input `variable` ของอีก module และ Terraform resolve dependency ระหว่างมันให้อัตโนมัติ การเลือกใช้ module จาก Registry ที่คนใช้กันเยอะอย่าง `terraform-google-modules/network/google` มักเป็นจุดเริ่มต้นที่ดีกว่าการเขียนเองตั้งแต่ศูนย์ ตราบใดที่คุณยังอ่านสิ่งที่มันสร้างก่อนจะเชื่อใจมันใน production
+</Callout>
+
+export const quizModuleComposition = [
+  {
+    q: 'source argument ของ module รองรับรูปแบบหลักสามแบบอะไรบ้าง',
+    options: [
+      'local relative path, public Terraform Registry หรือ Git URL',
+      'Terraform รองรับแค่ local relative path เท่านั้น',
+      'JSON manifest, YAML manifest หรือ HCL manifest',
+      'S3 bucket, GCS bucket หรือ Azure Blob container',
+    ],
+    answer: 0,
+  },
+  {
+    q: 'ในตัวอย่างการประกอบ vpc กับ compute-instance module compute-instance module รู้ได้อย่างไรว่าต้อง attach เข้ากับ network ไหน',
+    options: [
+      'มัน hardcode ชื่อ network ไว้ใน main.tf ของตัวเอง',
+      'root configuration ส่ง module.vpc.network_id เป็นค่าของ variable network_id ของ compute-instance module',
+      'Terraform แชร์ output ของทุก module ให้กันเองอัตโนมัติโดยไม่ต้อง wiring',
+      'มันอ่าน network ID จาก local state file ที่ vpc module เขียนไว้',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'query parameter ref บน Git module source ทำหน้าที่อะไร',
+    options: [
+      'กำหนด Terraform CLI version ที่ต้องใช้กับ module นั้น',
+      'pin source ไว้ที่ tag, branch หรือ commit ที่ระบุ คล้ายกับที่ version pin module จาก Registry',
+      'เปลี่ยนชื่อ module ภายใน root configuration',
+      'ไม่มีผลอะไรเลย ใช้เพื่อเป็นเอกสารเท่านั้น',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'เมื่อไหร่ที่การเลือกใช้ module จาก public Terraform Registry อย่าง terraform-google-modules/network/google เหมาะสมที่สุด',
+    options: [
+      'ไม่มีทางเหมาะเลย production infrastructure ควรเขียนเองทั้งหมดตั้งแต่ศูนย์เสมอ',
+      'เฉพาะตอนที่ไม่มี local path หรือ Git source ให้ใช้เท่านั้น',
+      'เมื่อ module นั้นแก้ปัญหาแบบที่พบบ่อยและเข้าใจกันดีอยู่แล้ว และคุณยังอ่านสิ่งที่มันสร้างก่อนจะเชื่อใจมันใน production',
+      'เฉพาะ module ที่ไม่มี configuration option เลยเท่านั้น',
+    ],
+    answer: 2,
+  },
+];
+
+<Quiz client:visible id="modules/module-composition-and-sources" questions={quizModuleComposition} />
+
+<ProgressTracker client:visible id="modules/module-composition-and-sources" />

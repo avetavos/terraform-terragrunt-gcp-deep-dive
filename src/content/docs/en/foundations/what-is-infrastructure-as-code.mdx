@@ -1,0 +1,133 @@
+---
+title: 'What Is Infrastructure as Code'
+description: 'The manual console problem, declarative versus imperative infrastructure as code, and where Terraform fits among Deployment Manager, Pulumi, Ansible, and OpenTofu.'
+sidebar:
+  order: 2
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## The idea in one sentence
+
+Infrastructure as Code means describing your cloud resources in a text file that lives in version control, instead of clicking through a console — the file is the source of truth, and a tool reconciles reality to match it.
+
+## The problem with ClickOps
+
+Picture an engineer opening the Google Cloud console and creating a VPC network, a couple of subnets, a Compute Engine VM, and a firewall rule by hand. It works. Then three weeks later someone else opens the console, tweaks a firewall rule to unblock a deploy, and never tells anyone. A month after that, someone deletes what looks like an orphaned Cloud Storage bucket — it was not orphaned.
+
+This pattern has a name, usually said with a grimace: **ClickOps**. The failure mode is not that any single click was wrong. It is that the sequence of clicks is:
+
+- **Unrepeatable** — nobody can stand up an identical environment from scratch, because the "instructions" were a person's muscle memory.
+- **Undocumented** — the console shows the current state, not *why* it looks that way or who changed what.
+- **Drift-prone** — the moment two people can independently change the same project, the project's real state and anyone's mental model of it start to diverge, silently.
+
+Nobody can answer "what is actually deployed right now, and why" just by reading anything. The console itself is the only source of truth, and it has no memory, no review process, and no diff.
+
+## Declarative versus imperative
+
+Infrastructure as Code (IaC) fixes this by making the desired infrastructure a file: checked into git, reviewed in a pull request like any other code change, with history you can `git blame`. But not all IaC tools work the same way, and the distinction matters:
+
+- **Declarative** IaC — you describe the end state you want, and the tool figures out how to get there. Terraform is declarative: a `resource` block says "there should be a storage bucket named this, with these properties," and Terraform works out whether that means creating it, updating it, or leaving it alone.
+- **Imperative** IaC — you write an ordered script of steps: "create a VPC network, then create a subnet inside it, then launch an instance in that subnet." The script describes *how*, and it is your job to keep it correct as things change; running it twice can misbehave unless every step is written to be safe to repeat.
+
+```hcl
+# Declarative: describe the desired end state.
+# Terraform decides what needs to change to get there.
+resource "google_storage_bucket" "reports" {
+  name     = "acme-monthly-reports"
+  location = "US"
+}
+```
+
+```bash
+# Imperative equivalent: an explicit, ordered command.
+# Running this twice creates two buckets (if the name were unique)
+# or errors out — the script itself has no idea what already exists.
+gcloud storage buckets create gs://acme-monthly-reports --location=US
+```
+
+Notice the declarative version never mentions *create*. That verb is decided by Terraform, at plan time, based on what it finds.
+
+## How Terraform reconciles state
+
+Terraform's core loop is always the same three-way comparison:
+
+1. Read the **current real-world state** of the resources it manages (it keeps a record of this in a state file).
+2. Read your **declared configuration** — the HCL describing what you want.
+3. Compute a **plan**: the minimal set of creates, updates, and destroys needed to make the real world match the configuration.
+
+Nothing gets torn down and rebuilt from scratch just because you changed one argument. If you only changed a VM's labels, the plan is an in-place update to that one attribute — everything else Terraform manages is left untouched.
+
+<Mermaid title="Terraform reconciles desired configuration against real infrastructure" code={iacDiagram} />
+
+export const iacDiagram = `flowchart LR
+  config["HCL config (desired state)"] --> tf["Terraform"]
+  real["Real GCP resources (actual state)"] --> tf
+  tf --> plan["Plan: the diff"]
+  plan --> apply["Apply: minimal changes"]`;
+
+## Where Terraform fits
+
+Terraform is not the only IaC tool, and it helps to know what it is not:
+
+- **Google Cloud Deployment Manager** — GCP's original declarative IaC tool, using YAML templates (optionally extended with Python or Jinja2), but GCP-only. There is no equivalent way to manage an AWS account or a Datadog monitor from the same template, and Google now steers new projects toward **Infrastructure Manager**, a managed service that runs Terraform configurations directly rather than a separate templating language.
+- **Pulumi** — also provider-based and state-tracked, but you write actual programming languages (TypeScript, Python, Go) instead of a declarative HCL syntax, trading a smaller learning curve for the full expressiveness (and full complexity) of a general-purpose language.
+- **Ansible** — primarily a **configuration management** tool: it logs into existing machines and runs tasks against them (install a package, edit a config file, restart a service). Its playbooks are closer to imperative in practice — ordered tasks executed top to bottom — and it has no built-in state file tracking what it created.
+
+Terraform's niche is **declarative, provider-based, state-tracked infrastructure provisioning**: a plugin model (**providers**) lets the same workflow and HCL syntax target GCP, AWS, Azure, Kubernetes, Datadog, and hundreds of other systems, with a state file recording exactly what Terraform is responsible for.
+
+One more name worth knowing: **OpenTofu**. After a 2023 licensing change to Terraform, a group of contributors and companies forked the last open-source release into OpenTofu, now maintained under the Linux Foundation. It is a compatible, open-source alternative — the HCL syntax, providers, and workflow you learn here apply to it directly.
+
+<Callout title="The one-line takeaway">
+Infrastructure as Code replaces unrepeatable, undocumented console clicks with a **declarative** text file in version control: you describe *what* you want, Terraform reads the real GCP state, diffs it against your configuration, and computes the **minimal plan** of creates, updates, and destroys — as opposed to imperative tools (a script of ordered steps) or configuration-management tools like Ansible; **OpenTofu** is a compatible open-source fork worth knowing about.
+</Callout>
+
+export const quizIac = [
+  {
+    q: 'What is the core problem with making infrastructure changes by clicking through a cloud console (ClickOps)?',
+    options: [
+      'The console is too slow to use for small changes',
+      'Changes are unrepeatable, undocumented, and drift silently — nobody can tell what is deployed and why just by reading anything',
+      'Consoles cannot create Compute Engine instances',
+      'It costs more money than using a CLI',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is the difference between declarative and imperative Infrastructure as Code',
+    options: [
+      'Declarative IaC describes the desired end state and lets the tool figure out how to get there; imperative IaC is an ordered script of steps you must keep correct yourself',
+      'They are two names for the same thing',
+      'Imperative IaC cannot be version controlled',
+      'Declarative IaC only works with GCP',
+    ],
+    answer: 0,
+  },
+  {
+    q: 'What does Terraform compute between your desired configuration and the real infrastructure state',
+    options: [
+      'It always destroys everything and recreates it from scratch',
+      'A plan: the minimal set of creates, updates, and destroys needed to reconcile real state with the declared configuration',
+      'A backup of the current state only',
+      'A full imperative script for a human to run manually',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which statement about Terraform alternatives is accurate',
+    options: [
+      'Deployment Manager is multi-cloud, unlike Terraform',
+      'Ansible is primarily a configuration-management tool for existing machines and is more imperative in practice; Pulumi uses general-purpose programming languages instead of HCL',
+      'Pulumi and Terraform use identical syntax',
+      'OpenTofu is a proprietary competitor unrelated to Terraform',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="foundations/what-is-infrastructure-as-code" questions={quizIac} />
+
+<ProgressTracker client:visible id="foundations/what-is-infrastructure-as-code" />

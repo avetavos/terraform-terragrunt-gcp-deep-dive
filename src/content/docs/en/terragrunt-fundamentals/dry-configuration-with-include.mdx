@@ -1,0 +1,141 @@
+---
+title: 'DRY Configuration with include'
+description: 'How the include block, find_in_parent_folders, and read_terragrunt_config let a unit inherit root.hcl and intermediate config without repeating any of it.'
+sidebar:
+  order: 2
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## The idea in one sentence
+
+A unit's `terragrunt.hcl` uses an `include` block plus `find_in_parent_folders()` to pull in everything `root.hcl` already defines, and can layer in smaller intermediate config files the same way, so none of that shared setup is ever typed twice.
+
+## The include block: inheriting root.hcl without repeating it
+
+The previous lesson showed a unit's `terragrunt.hcl` referencing `root.hcl` in three lines, without explaining how that reference works. The mechanism is the `include` block:
+
+```hcl
+# network/terragrunt.hcl
+include "root" {
+  path = find_in_parent_folders("root.hcl")
+}
+```
+
+`include "root"` tells Terragrunt to read the file at `path` and merge its `remote_state`, `generate`, and any other top-level blocks into this unit's own config, as though the unit had written all of that itself. The label `"root"` is just a name for this particular `include` block — a unit could in principle have more than one `include`, each pulling in a different file, and the label is how you would tell them apart. Without this block, every unit would need its own copy of the `remote_state` and `generate` blocks from the previous lesson, which is exactly the repetition Terragrunt is meant to remove.
+
+## find_in_parent_folders: walking up the tree to find the file
+
+`find_in_parent_folders("root.hcl")` does not assume any fixed distance between a unit and the shared config above it. It starts in the unit's own directory and walks upward, one parent directory at a time, until it finds a file named `root.hcl`, then returns the path to it. That means a unit two levels deep and a unit five levels deep can both write the exact same `include` block and still find the correct file:
+
+```text
+acme-infra/
+├── root.hcl
+└── prod/
+    ├── project.hcl
+    └── network/
+        └── terragrunt.hcl
+```
+
+From `prod/network/terragrunt.hcl`, `find_in_parent_folders("root.hcl")` climbs past `prod/` and lands on `acme-infra/root.hcl`. If no file with that name exists anywhere above the unit, Terragrunt raises an error rather than silently proceeding without it — a missing `root.hcl` is treated as a configuration mistake, not something to skip past.
+
+## locals and read_terragrunt_config: sharing config between levels
+
+`include` is built for one specific job: inheriting the single shared `root.hcl`. Plenty of config is not truly global, though — it might apply to just one GCP project's worth of units, sitting one level below the root. For that, a `locals` block combined with `read_terragrunt_config()` lets any unit read a smaller, more targeted file and pull specific values out of it. Continuing the layout above, `prod/project.hcl` holds values specific to that one GCP project:
+
+```hcl
+# prod/project.hcl
+locals {
+  project_id = "acme-prod-123456"
+  region     = "us-central1"
+}
+```
+
+Every unit under `prod/` reads it the same way:
+
+```hcl
+# prod/network/terragrunt.hcl
+include "root" {
+  path = find_in_parent_folders("root.hcl")
+}
+
+locals {
+  project_vars = read_terragrunt_config(find_in_parent_folders("project.hcl"))
+}
+
+inputs = {
+  project_id = local.project_vars.locals.project_id
+  region     = local.project_vars.locals.region
+  cidr_block = "10.0.0.0/16"
+}
+```
+
+`read_terragrunt_config()` parses the target file and hands back its contents as a value, so `local.project_vars.locals.project_id` reaches into that file's own `locals` block to pull out `project_id`. Nothing stops a directory tree from having several such files at different levels — a `project.hcl` per GCP project, an `env.hcl` per environment — each read the same way, each avoiding one more piece of copy-pasted config.
+
+## inputs: the Terragrunt equivalent of a .tfvars file
+
+The `inputs` block seen in both examples above is how a unit's `terragrunt.hcl` supplies variable values to the underlying Terraform module, the same job a `.tfvars` file would normally do. Every key inside `inputs` is passed through to Terraform as a variable value for the module that unit's `terraform` block points at — no separate `.tfvars` file needs to exist in the module at all. This is what makes combining inherited values with unit-specific ones so direct: `project_id` and `region` above come from `project.hcl` by way of `local.project_vars`, while `cidr_block` is written directly in the unit, and both land in the same `inputs` map with no special syntax to mix the two.
+
+<Mermaid title="root.hcl, an intermediate project.hcl, and a leaf unit combining both" code={dryConfigDiagram} />
+
+export const dryConfigDiagram = `flowchart TD
+  root["root.hcl (remote_state + generate)"]
+  project["prod/project.hcl (locals: project_id, region)"]
+  unit["prod/network/terragrunt.hcl"]
+  root -->|include + find_in_parent_folders| unit
+  project -->|read_terragrunt_config + find_in_parent_folders| unit
+  unit --> inputsBlock["inputs: project_id, region, cidr_block"]`;
+
+<Callout title="The one-line takeaway">
+An `include "root" { path = find_in_parent_folders("root.hcl") } ` block is how a unit inherits everything `root.hcl` defines, with `find_in_parent_folders()` walking up the directory tree so the same `include` block works no matter how deep the unit sits. Config that is narrower than the whole repository but still shared by more than one unit — like a single GCP project's settings — belongs in a smaller intermediate file such as `project.hcl`, read with a `locals` block and `read_terragrunt_config(find_in_parent_folders("project.hcl"))` rather than `include`. Whatever values a unit ends up with, from `root.hcl`, from an intermediate file, or written directly, all flow into the same `inputs = { ... }` map, which is Terragrunt's equivalent of a `.tfvars` file for that unit's underlying module.
+</Callout>
+
+export const quizDryConfig = [
+  {
+    q: 'What does an include block with find_in_parent_folders actually do?',
+    options: [
+      'It copies the contents of root.hcl into a new file on disk',
+      'It reads the file at the given path, walking up parent directories to locate it, and merges that config into the current unit',
+      'It deletes root.hcl after reading it once',
+      'It only works if the unit is exactly one directory below root.hcl',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is read_terragrunt_config paired with a locals block typically used for?',
+    options: [
+      'Replacing the include block entirely for every unit',
+      'Pulling specific values out of a smaller, more targeted config file, such as one GCP project settings file shared by several units',
+      'Generating a backend.tf file the same way remote_state does',
+      'Running terraform apply on a different unit',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'The inputs block in a unit terragrunt.hcl is the Terragrunt equivalent of what?',
+    options: [
+      'A .tfvars file supplying variable values to the underlying Terraform module',
+      'A provider block',
+      'A remote_state block',
+      'A Terraform output value',
+    ],
+    answer: 0,
+  },
+  {
+    q: 'What happens if find_in_parent_folders cannot locate the named file anywhere above the unit?',
+    options: [
+      'Terragrunt silently continues without any shared config',
+      'Terragrunt raises an error instead of proceeding',
+      'Terragrunt automatically creates an empty file with that name',
+      'Terragrunt falls back to the unit own terragrunt.hcl as the root config',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="terragrunt-fundamentals/dry-configuration-with-include" questions={quizDryConfig} />
+
+<ProgressTracker client:visible id="terragrunt-fundamentals/dry-configuration-with-include" />

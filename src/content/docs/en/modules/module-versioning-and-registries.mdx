@@ -1,0 +1,128 @@
+---
+title: 'Module Versioning and Registries'
+description: 'Why pinning a module version matters, what the pessimistic constraint operator allows and blocks, and when a private module source makes more sense than the public Registry.'
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## The idea in one sentence
+
+A module's **`version`** constraint pins which release of a Registry or Git-tagged module Terraform is allowed to resolve, for exactly the same reason a provider version constraint matters: without it, a routine `terraform init -upgrade` could silently pull in a newer module release with breaking changes that nobody reviewed.
+
+## Why pinning a module version matters
+
+This is the same underlying problem the provider dependency lock file solves, just one level up the stack. When a `module` block sources from the public Registry or a Git tag without a `version` constraint, Terraform resolves the newest available release every time `init` runs cold — a fresh clone in CI, a new laptop, a rebuilt cache. If the module's author ships a breaking change in that newer release — a renamed variable, a different default, a resource that now gets replaced instead of updated — it gets pulled in and applied without anyone on your team ever reading that module's changelog first.
+
+```hcl
+module "vpc" {
+  source = "terraform-google-modules/network/google"
+  # no version constraint — always resolves to the latest release
+
+  project_id   = var.project_id
+  network_name = "app-network"
+}
+```
+
+Pinning a `version` turns that into a deliberate, reviewable decision instead of something that happens to you by accident:
+
+```hcl
+module "vpc" {
+  source  = "terraform-google-modules/network/google"
+  version = "~> 9.0"
+
+  project_id   = var.project_id
+  network_name = "app-network"
+}
+```
+
+## The pessimistic constraint operator: ~>
+
+The `~>` operator is called the pessimistic constraint operator, and it means allow upgrades, but only ones unlikely to break anything. `version = "~> 9.0"` allows Terraform to resolve any `9.x` release — `9.1.0`, `9.4.2`, `9.12.0` — since those are supposed to be backward compatible under semantic versioning, but it blocks `10.0.0` outright, because a major version bump is exactly where a module's author is allowed to introduce breaking changes.
+
+The same operator works one segment more precisely too: `version = "~> 9.2.0"` allows patch releases like `9.2.1` and `9.2.7`, but blocks `9.3.0` — useful when you want to hold even minor-version bumps until you have reviewed them. `~> 9.0`, allowing the whole `9.x` line, is the common default for most teams; the tighter `~> 9.2.0` form is for modules where you have been burned by minor-version behavior changes before.
+
+Upgrading past a blocked boundary is still one command away when you are ready — bump the `version` constraint in your `.tf` file, then run `terraform init -upgrade` — the constraint just makes sure that upgrade is something a person decided to do, not something that happened silently on the next `init`.
+
+## Private sources and publishing your own module
+
+Not every module belongs on the public Registry. A module that encodes one company's specific security policies, naming conventions, or internal service wiring has no reason to be public, and probably should not be. Terraform supports the same `source` mechanics for these cases — a private Git repository (often over SSH, so `init` can authenticate with existing credentials) or a private module registry, such as Terraform Cloud's private registry or an internally hosted one:
+
+```hcl
+module "internal_service" {
+  source  = "git::ssh://git@github.com/acme-corp/terraform-modules.git//internal-service?ref=v1.4.0"
+
+  project_id = var.project_id
+}
+```
+
+If you do want to publish a module of your own to the public Terraform Registry, the Registry expects a specific repository naming pattern: `terraform-<PROVIDER>-<NAME>`, for example `terraform-google-vpc` for a module targeting the `google` provider. The Registry parses that name directly into the module's address (`namespace/name/provider`), so a repository named anything else will not be picked up.
+
+<Mermaid title="Module source pinned to a version tag compared with an unpinned source" code={moduleVersioningDiagram} />
+
+export const moduleVersioningDiagram = `flowchart LR
+  subgraph pinned["Pinned: version = ~> 9.0"]
+    p1["terraform init today"] --> p2["Resolves 9.4.2 (latest 9.x)"]
+    p2 --> p3["terraform init -upgrade later"]
+    p3 --> p4["Still resolves within 9.x, blocks 10.0.0"]
+  end
+  subgraph unpinned["Unpinned: no version constraint"]
+    u1["terraform init today"] --> u2["Resolves 9.4.2 (latest overall)"]
+    u2 --> u3["terraform init tomorrow"]
+    u3 --> u4["Silently resolves 10.0.0 with breaking changes"]
+  end`;
+
+<Callout title="The one-line takeaway">
+A module's **`version`** constraint matters for the same reason a provider version constraint does: without one, a routine `terraform init` or `init -upgrade` can silently resolve a newer Registry or Git-tagged module release with breaking changes nobody reviewed. The **pessimistic constraint operator**, `~> 9.0`, allows any `9.x` release but blocks the `10.0.0` major bump, making upgrades a deliberate decision instead of an accident. Modules specific to one organization belong behind a **private Git source** or **private registry** instead of the public one, and a module you do publish publicly must live in a repository named `terraform-<PROVIDER>-<NAME>` for the Registry to pick it up correctly.
+</Callout>
+
+export const quizModuleVersioning = [
+  {
+    q: 'What risk does an unpinned module version constraint introduce',
+    options: [
+      'None, Terraform always resolves the same module version regardless of when init runs',
+      'A fresh terraform init could silently resolve a newer module release with breaking changes that nobody reviewed',
+      'It prevents terraform init from working at all',
+      'It forces every teammate to use the exact same Terraform CLI version',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does the constraint version = ~> 9.0 allow and what does it block',
+    options: [
+      'It allows any 9.x release and blocks 10.0.0',
+      'It allows only exactly version 9.0 and blocks every other release',
+      'It allows every future major version and blocks only 9.0 itself',
+      'It has no effect on which version Terraform resolves',
+    ],
+    answer: 0,
+  },
+  {
+    q: 'Why might an organization use a private Git repository or private registry for a module instead of the public Terraform Registry',
+    options: [
+      'Private sources are required for every GCP module regardless of content',
+      'The module encodes internal, company-specific infrastructure that has no reason to be public',
+      'Terraform cannot resolve version constraints on the public Registry',
+      'Private sources do not support a version argument',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What repository naming pattern does the public Terraform Registry expect for a module you want to publish',
+    options: [
+      'module-<NAME>-<PROVIDER>',
+      'terraform-<PROVIDER>-<NAME>',
+      'gcp-module-<NAME>',
+      'Any repository name is accepted as long as it contains main.tf',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="modules/module-versioning-and-registries" questions={quizModuleVersioning} />
+
+<ProgressTracker client:visible id="modules/module-versioning-and-registries" />

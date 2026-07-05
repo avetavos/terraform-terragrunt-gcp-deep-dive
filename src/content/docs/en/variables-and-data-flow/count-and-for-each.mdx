@@ -1,0 +1,202 @@
+---
+title: 'Count and For Each'
+description: 'Creating multiple resource copies with count and for_each, the index-shifting foot-gun that makes count risky for ordered lists, and how for expressions differ from the for_each meta-argument.'
+sidebar:
+  order: 4
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## The idea in one sentence
+
+`count` and `for_each` both create more than one copy of a resource from a single block, but they address those copies in fundamentally different ways, and that difference decides how safely you can add or remove one later.
+
+## count — a numeric meta-argument
+
+`count` takes a whole number and creates that many near-identical copies of a resource, indexed `0` through `count - 1`. Inside the resource, `count.index` gives the current copy's position; outside, each copy is addressed by that same numeric index.
+
+```hcl
+variable "instance_count" {
+  type        = number
+  description = "Number of Compute Engine instances to launch"
+  default     = 3
+}
+
+resource "google_compute_instance" "web" {
+  count        = var.instance_count
+  name         = "web-${count.index}"
+  machine_type = "e2-medium"
+  zone         = "us-central1-a"
+
+  boot_disk {
+    initialize_params {
+      image = "debian-cloud/debian-12"
+    }
+  }
+
+  network_interface {
+    network = "default"
+    access_config {}
+  }
+}
+```
+
+With `instance_count = 3`, Terraform creates `google_compute_instance.web[0]`, `web[1]`, and `web[2]`. Each is addressed externally by that bracketed index — `google_compute_instance.web[0]` refers specifically to the first copy, `web[1]` to the second, and so on.
+
+## The index-shifting foot-gun
+
+`count`'s real weakness is that a copy's identity is nothing more than its position in the list. Suppose instead of a plain number, `count` is driven by a list of names:
+
+```hcl
+variable "instance_names" {
+  type        = list(string)
+  description = "Names of Compute Engine instances to launch"
+  default     = ["web-a", "web-b", "web-c"]
+}
+
+resource "google_compute_instance" "web" {
+  count        = length(var.instance_names)
+  name         = var.instance_names[count.index]
+  machine_type = "e2-medium"
+  zone         = "us-central1-a"
+
+  boot_disk {
+    initialize_params {
+      image = "debian-cloud/debian-12"
+    }
+  }
+
+  network_interface {
+    network = "default"
+    access_config {}
+  }
+}
+```
+
+Here `web[0]` is `"web-a"`, `web[1]` is `"web-b"`, and `web[2]` is `"web-c"`. Now remove `"web-b"` from the middle of the list, leaving `["web-a", "web-c"]`. Terraform does not understand that `"web-b"` specifically was removed — all it sees is that index `1` now maps to a different name than before, and index `2` no longer exists. The plan Terraform produces is destroy `web[2]` (the old `"web-c"` no longer has an index), then destroy and recreate `web[1]` with the new name `"web-c"` — even though conceptually only `"web-b"` should have been touched. Every resource whose index shifted gets destroyed and recreated, with all the downtime, IP address changes, and disk loss that implies, purely because it moved position in the list.
+
+## for_each — addressed by stable key, not position
+
+`for_each` takes a map or a set of strings and creates one resource instance per key, addressed by that key rather than a numeric index.
+
+```hcl
+variable "instances" {
+  type        = map(string)
+  description = "Map of instance key to machine type"
+  default = {
+    primary   = "e2-medium"
+    secondary = "e2-small"
+    batch     = "e2-standard-2"
+  }
+}
+
+resource "google_compute_instance" "web" {
+  for_each     = var.instances
+  name         = "web-${each.key}"
+  machine_type = each.value
+  zone         = "us-central1-a"
+
+  boot_disk {
+    initialize_params {
+      image = "debian-cloud/debian-12"
+    }
+  }
+
+  network_interface {
+    network = "default"
+    access_config {}
+  }
+}
+```
+
+Each instance is addressed externally as `google_compute_instance.web["primary"]`, `web["secondary"]`, and `web["batch"]`. Inside the resource, `each.key` is the map key and `each.value` is its associated value. Now remove `"secondary"` from the map entirely. Terraform destroys exactly `google_compute_instance.web["secondary"]` and nothing else — `web["primary"]` and `web["batch"]` are keyed by their own names, not by position, so they are completely undisturbed by a key going away in the middle.
+
+## for expressions — comprehension, not a resource meta-argument
+
+A `for` expression is a general-purpose comprehension that transforms one collection into another — it has nothing to do, by itself, with creating multiple resources. It just happens to share the word "for" with `for_each`, which trips people up.
+
+```hcl
+variable "instance_names" {
+  type        = list(string)
+  description = "Names of Compute Engine instances"
+  default     = ["web-a", "web-b", "web-c"]
+}
+
+locals {
+  # for expression producing a list: transform each name to uppercase
+  upper_names = [for name in var.instance_names : upper(name)]
+
+  # for expression producing a map: build a lookup from name to a derived label
+  name_to_label = { for name in var.instance_names : name => "label-${name}" }
+}
+```
+
+`[for name in var.instance_names : upper(name)]` is a `for` expression that produces a new list. `{ for name in var.instance_names : name => "label-${name}" }` is a `for` expression that produces a new map. Neither one is the `for_each` meta-argument on a resource block — a `for` expression transforms data you already have into different data, while the `for_each` meta-argument on a resource decides how many instances of that resource to create and what key addresses each one. It is entirely normal, and common, to use a `for` expression to build the map you then hand to a resource's `for_each`.
+
+<Mermaid title="count shifts every index after a mid-list removal; for_each only touches the removed key" code={countForEachDiagram} />
+
+export const countForEachDiagram = `flowchart TB
+  subgraph count_case["count with a list"]
+    direction LR
+    c0["web[0] = web-a"] --> c1["web[1] = web-b"] --> c2["web[2] = web-c"]
+    c2 -.remove web-b.-> shift["web[1] destroyed and recreated, web[2] destroyed"]
+  end
+  subgraph foreach_case["for_each with a map"]
+    direction LR
+    f0["web[primary]"] --- f1["web[secondary]"] --- f2["web[batch]"]
+    f1 -.remove secondary.-> untouched["only web[secondary] destroyed, primary and batch undisturbed"]
+  end`;
+
+<Callout title="The one-line takeaway">
+**`count`** creates numbered copies of a resource addressed by a plain integer index (`web[0]`, `web[1]`) — removing an item from the middle of the underlying list shifts every later index down by one, so Terraform destroys and recreates every copy after the removed one, not just the one you meant to remove. **`for_each`** creates copies addressed by a stable map or set key (`web["primary"]`) instead, so removing one key destroys only that one resource instance and leaves every other key completely undisturbed. A **`for` expression** (`[for x in list : ...]`, `{for k, v in map : k => v}`) is a separate concept entirely — a comprehension that transforms a collection into another collection, distinct from the `for_each` resource meta-argument even though the keyword overlaps.
+</Callout>
+
+export const quizCountForEach = [
+  {
+    q: 'What specifically goes wrong when you remove an item from the middle of a list driving a count-based resource',
+    options: [
+      'Terraform refuses to plan until the list is restored to its original length',
+      'Every index after the removed item shifts down by one, so Terraform destroys and recreates those resources even though only one item should have been removed',
+      'Terraform automatically renumbers the resources without any destroy or recreate',
+      'Only the removed item is destroyed, and every other index is left completely untouched',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why does for_each avoid the index-shifting problem that count has',
+    options: [
+      'for_each does not actually support removing items from a map at all',
+      'for_each secretly uses numeric indexes internally too, so the problem is the same',
+      'for_each addresses each resource instance by a stable map or set key rather than a position, so removing one key only affects that key',
+      'for_each recreates every resource on every apply regardless of changes',
+    ],
+    answer: 2,
+  },
+  {
+    q: 'What is the difference between a for expression and the for_each resource meta-argument',
+    options: [
+      'They are two names for the exact same feature with no difference at all',
+      'A for expression is a comprehension that transforms one collection into another, while for_each on a resource decides how many resource instances to create and their keys',
+      'A for expression only works inside variable blocks, never inside locals',
+      'The for_each meta-argument can only be used with lists, never with maps',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'How is an individual resource instance addressed when using for_each with a map',
+    options: [
+      'By a zero-based numeric index like web[0]',
+      'By the map key, like web["primary"]',
+      'Only by its position in the Terraform configuration file',
+      'for_each does not allow addressing individual instances at all',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="variables-and-data-flow/count-and-for-each" questions={quizCountForEach} />
+
+<ProgressTracker client:visible id="variables-and-data-flow/count-and-for-each" />
