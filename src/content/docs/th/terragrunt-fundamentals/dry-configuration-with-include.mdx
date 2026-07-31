@@ -16,7 +16,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 ## include block: inherit root.hcl โดยไม่ต้องเขียนซ้ำ
 
-บทก่อนหน้าโชว์ `terragrunt.hcl` ของ unit ที่อ้างถึง `root.hcl` ด้วยสามบรรทัด แต่ยังไม่ได้อธิบายว่ามันทำงานยังไง กลไกนั้นคือ `include` block
+บทก่อนหน้าโชว์ `terragrunt.hcl` ของ unit ที่อ้างถึง `root.hcl` ด้วยสามบรรทัด แต่ยังไม่ได้อธิบายว่าทำงานยังไง กลไกนั้นคือ `include` block
 
 ```hcl
 # network/terragrunt.hcl
@@ -25,11 +25,11 @@ include "root" {
 }
 ```
 
-`include "root"` บอก Terragrunt ให้อ่านไฟล์ที่ `path` แล้ว merge `remote_state`, `generate`, และ top-level block อื่น ๆ ของมันเข้ากับ config ของ unit นี้ เหมือนกับว่า unit เขียนสิ่งเหล่านั้นเองทั้งหมด label `"root"` เป็นแค่ชื่อของ `include` block ตัวนี้ unit หนึ่งตัวมี `include` มากกว่าหนึ่งอันได้ในทางทฤษฎี แต่ละอันดึงคนละไฟล์ label นี่แหละคือตัวแยกความแตกต่างระหว่างพวกมัน ถ้าไม่มี block นี้ ทุก unit จะต้องมี `remote_state` กับ `generate` เป็นสำเนาของตัวเองจากบทก่อนหน้า ซึ่งเป็นความซ้ำซ้อนที่ Terragrunt เกิดมาเพื่อกำจัดพอดี
+`include "root"` บอก Terragrunt ให้อ่านไฟล์ที่ `path` แล้ว merge `remote_state`, `generate`, และ top-level block อื่น ๆ เข้ากับ config ของ unit นี้ เหมือนกับว่า unit เขียนสิ่งเหล่านั้นเองทั้งหมด label `"root"` เป็นแค่ชื่อของ `include` block ตัวนี้ unit หนึ่งตัวมี `include` มากกว่าหนึ่งอันได้ในทางทฤษฎี แต่ละอันดึงคนละไฟล์ label นี่แหละคือตัวแยกความแตกต่าง ถ้าไม่มี block นี้ ทุก unit จะต้องมี `remote_state` กับ `generate` เป็นสำเนาของตัวเองจากบทก่อนหน้า นั่นคือความซ้ำซ้อนที่ Terragrunt เกิดมาเพื่อกำจัดพอดี
 
 ## find_in_parent_folders: เดินขึ้นต้นไม้ directory เพื่อหาไฟล์
 
-`find_in_parent_folders("root.hcl")` ไม่ได้สมมติระยะห่างคงที่ระหว่าง unit กับ shared config ชั้นบน มันเริ่มที่ directory ของ unit เอง แล้วเดินขึ้นไปทีละ parent directory จนเจอไฟล์ชื่อ `root.hcl` แล้วคืนค่า path ของไฟล์นั้นกลับมา แปลว่า unit ที่ลึกสองชั้นกับ unit ที่ลึกห้าชั้นเขียน `include` block เหมือนกันเป๊ะ ๆ ได้ และยังหาไฟล์ที่ถูกต้องเจออยู่ดี
+`find_in_parent_folders("root.hcl")` ไม่ได้สมมติระยะห่างคงที่ระหว่าง unit กับ shared config ชั้นบน แต่เริ่มที่ directory ของ unit เอง แล้วเดินขึ้นไปทีละ parent directory จนเจอไฟล์ชื่อ `root.hcl` แล้วคืนค่า path ของไฟล์นั้นกลับมา แปลว่า unit ที่ลึกสองชั้นกับ unit ที่ลึกห้าชั้นเขียน `include` block เหมือนกันเป๊ะ ๆ ได้ และยังหาไฟล์ที่ถูกต้องเจออยู่ดี
 
 ```text
 acme-infra/
@@ -40,7 +40,7 @@ acme-infra/
         └── terragrunt.hcl
 ```
 
-จาก `prod/network/terragrunt.hcl` `find_in_parent_folders("root.hcl")` ไต่ผ่าน `prod/` ขึ้นไปเจอ `acme-infra/root.hcl` ถ้าไม่มีไฟล์ชื่อนั้นอยู่ที่ไหนเลยเหนือ unit ขึ้นไป Terragrunt จะ throw error ออกมาแทนที่จะรันต่อไปเงียบ ๆ โดยไม่มีมัน `root.hcl` ที่หายไปถือเป็นความผิดพลาดของ config ไม่ใช่สิ่งที่ข้ามผ่านไปได้
+จาก `prod/network/terragrunt.hcl` `find_in_parent_folders("root.hcl")` ไต่ผ่าน `prod/` ขึ้นไปเจอ `acme-infra/root.hcl` ถ้าไม่มีไฟล์ชื่อนั้นอยู่ที่ไหนเลยเหนือ unit ขึ้นไป Terragrunt จะ throw error ออกมาแทนที่จะรันต่อไปเงียบ ๆ โดยไม่มีไฟล์นั้น `root.hcl` ที่หายไปถือเป็นความผิดพลาดของ config ไม่ใช่สิ่งที่ข้ามผ่านไปได้
 
 ## locals กับ read_terragrunt_config: share config ข้ามระดับ
 
@@ -54,7 +54,7 @@ locals {
 }
 ```
 
-ทุก unit ใต้ `prod/` อ่านมันด้วยวิธีเดียวกัน
+ทุก unit ใต้ `prod/` อ่านไฟล์นั้นด้วยวิธีเดียวกัน
 
 ```hcl
 # prod/network/terragrunt.hcl
@@ -77,7 +77,7 @@ inputs = {
 
 ## inputs: เทียบเท่า .tfvars ของ Terragrunt
 
-`inputs` block ที่เห็นในสองตัวอย่างข้างบนคือวิธีที่ `terragrunt.hcl` ของ unit ส่งค่า variable ให้ Terraform module ข้างใต้ ทำหน้าที่เดียวกับที่ไฟล์ `.tfvars` ปกติทำ ทุก key ข้างใน `inputs` ถูกส่งต่อให้ Terraform เป็นค่า variable ของ module ที่ `terraform` block ของ unit นั้นชี้ไปหา โดยไม่ต้องมีไฟล์ `.tfvars` แยกอยู่ใน module เลย นี่คือสิ่งที่ทำให้การรวมค่าที่ inherit มากับค่าเฉพาะของ unit ทำได้ตรง ๆ `project_id` กับ `region` ข้างบนมาจาก `project.hcl` ผ่าน `local.project_vars` ส่วน `cidr_block` เขียนตรงในตัว unit เอง ทั้งสองแบบไปอยู่ใน `inputs` map เดียวกันโดยไม่ต้องมี syntax พิเศษมาผสมมันเข้าด้วยกัน
+`inputs` block ที่เห็นในสองตัวอย่างข้างบนคือวิธีที่ `terragrunt.hcl` ของ unit ส่งค่า variable ให้ Terraform module ข้างใต้ ทำหน้าที่เดียวกับที่ไฟล์ `.tfvars` ปกติทำ ทุก key ข้างใน `inputs` ถูกส่งต่อให้ Terraform เป็นค่า variable ของ module ที่ `terraform` block ของ unit นั้นชี้ไปหา โดยไม่ต้องมีไฟล์ `.tfvars` แยกอยู่ใน module เลย นี่คือสิ่งที่ทำให้การรวมค่าที่ inherit มากับค่าเฉพาะของ unit ทำได้ตรง ๆ `project_id` กับ `region` ข้างบนมาจาก `project.hcl` ผ่าน `local.project_vars` ส่วน `cidr_block` เขียนตรงในตัว unit เอง ทั้งสองแบบไปอยู่ใน `inputs` map เดียวกันโดยไม่ต้องมี syntax พิเศษมาผสมเข้าด้วยกัน
 
 <Mermaid title="root.hcl, project.hcl ระดับกลาง, และ leaf unit ที่รวมทั้งสองเข้าด้วยกัน" code={dryConfigDiagram} />
 
@@ -98,7 +98,7 @@ export const quizDryConfig = [
     q: 'include block คู่กับ find_in_parent_folders ทำอะไรจริง ๆ',
     options: [
       'copy เนื้อหาของ root.hcl ไปสร้างไฟล์ใหม่บน disk',
-      'อ่านไฟล์ที่ path ที่กำหนด โดยเดินขึ้น parent directory เพื่อหามัน แล้ว merge config นั้นเข้ากับ unit ปัจจุบัน',
+      'อ่านไฟล์ที่ path ที่กำหนด โดยเดินขึ้น parent directory เพื่อหาไฟล์นั้น แล้ว merge config นั้นเข้ากับ unit ปัจจุบัน',
       'ลบ root.hcl ทิ้งหลังจากอ่านครั้งเดียว',
       'ทำงานได้เฉพาะตอน unit อยู่ต่ำกว่า root.hcl แค่หนึ่งชั้นเท่านั้น',
     ],

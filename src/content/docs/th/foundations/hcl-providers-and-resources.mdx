@@ -12,7 +12,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 ## ไอเดียในหนึ่งประโยค
 
-configuration ของ Terraform ทุกส่วนคือ **block** เขียนด้วย HCL — `terraform`, `provider`, `resource` และ `data` คือสี่ตัวที่คุณจะเขียนบ่อยที่สุด รวมกันแล้วมันบอก Terraform ว่าต้องโหลด plugin อะไร คุยกับ GCP ยังไง ต้องสร้างอะไร และต้องอ่านอะไร
+configuration ของ Terraform ทุกส่วนคือ **block** เขียนด้วย HCL — `terraform`, `provider`, `resource` และ `data` คือสี่ตัวที่คุณจะเขียนบ่อยที่สุด รวมกันแล้วสี่ตัวนี้บอก Terraform ว่าต้องโหลด plugin อะไร คุยกับ GCP ยังไง ต้องสร้างอะไร และต้องอ่านอะไร
 
 ## HCL block syntax
 
@@ -65,7 +65,7 @@ provider "google" {
 
 ## resource block: สอง label ที่มีความหมาย
 
-`resource` block คือวิธีบอก Terraform ว่า "สิ่งนี้ควรมีอยู่" มันมี label สองตัวเสมอ
+`resource` block คือวิธีบอก Terraform ว่า "สิ่งนี้ควรมีอยู่" resource block มี label สองตัวเสมอ
 
 ```hcl
 resource "google_compute_instance" "web" {
@@ -86,13 +86,13 @@ resource "google_compute_instance" "web" {
 ```
 
 - label แรก `google_compute_instance` คือ **type** ของ resource ถูกกำหนดโดย provider และเป็นตัวตัดสินว่า argument ไหนใช้ได้ และ GCP API ตัวไหนที่ Terraform จะเรียก
-- label ที่สอง `web` คือ **name** ที่คุณเลือกเอง มันมีความหมายแค่ภายใน configuration นี้เท่านั้น
+- label ที่สอง `web` คือ **name** ที่คุณเลือกเอง มีความหมายแค่ภายใน configuration นี้เท่านั้น
 
-รวมกันแล้วทั้งสองตัวคือ **address** ของ resource นั้น คือ `google_compute_instance.web` ซึ่งเป็นวิธีอ้างอิง attribute ของ resource นี้จากที่ไหนก็ได้ใน configuration ของคุณ เช่น `google_compute_instance.web.id` หรือ `google_compute_instance.web.self_link`
+รวมกันแล้วทั้งสองตัวคือ **address** ของ resource นั้น คือ `google_compute_instance.web` ที่ใช้อ้างอิง attribute ของ resource นี้จากที่ไหนก็ได้ใน configuration ของคุณ เช่น `google_compute_instance.web.id` หรือ `google_compute_instance.web.self_link`
 
 ## data block: อ่านโดยไม่เป็นเจ้าของ
 
-`data` block อ่านข้อมูลของสิ่งที่มีอยู่แล้ว คือ infrastructure ที่ configuration นี้ไม่ได้จัดการและจะไม่มีวันสร้าง อัปเดต หรือลบ มันคือ read-only lookup ของ Terraform
+`data` block อ่านข้อมูลของสิ่งที่มีอยู่แล้ว คือ infrastructure ที่ configuration นี้ไม่ได้จัดการและจะไม่มีวันสร้าง อัปเดต หรือลบ นี่คือ read-only lookup ของ Terraform
 
 ```hcl
 data "google_compute_image" "debian" {
@@ -117,16 +117,16 @@ resource "google_compute_instance" "web" {
 }
 ```
 
-`data.google_compute_image.debian.self_link` อ่านเหมือน resource address เป๊ะ ๆ แค่มี `data.` นำหน้า — label type กับ name ทำงานแบบเดียวกัน แต่ไม่มีอะไรจาก `data` block ที่จะโผล่เป็น create, update หรือ destroy ใน plan เลย มันมีหน้าที่อ่านอย่างเดียว
+`data.google_compute_image.debian.self_link` อ่านเหมือน resource address เป๊ะ ๆ แค่มี `data.` นำหน้า — label type กับ name ทำงานแบบเดียวกัน แต่ไม่มีอะไรจาก `data` block ที่จะโผล่เป็น create, update หรือ destroy ใน plan เลย เพราะมีหน้าที่อ่านอย่างเดียว
 
 ## Dependency graph
 
-Terraform ไม่ได้ apply configuration ของคุณเรียงจากบนลงล่างตามที่เขียนไว้ แต่มันสร้าง **DAG** (directed acyclic graph) ของทุก resource และ data source แล้วใช้กราฟนั้นหาลำดับที่ถูกต้อง — พร้อมทั้งดูว่า resource ตัวไหนเป็นอิสระจากกันพอที่จะสร้าง **พร้อมกัน** ได้
+Terraform ไม่ได้ apply configuration ของคุณเรียงจากบนลงล่างตามที่เขียนไว้ แต่สร้าง **DAG** (directed acyclic graph) ของทุก resource และ data source แล้วใช้กราฟนั้นหาลำดับที่ถูกต้อง — พร้อมทั้งดูว่า resource ตัวไหนเป็นอิสระจากกันพอที่จะสร้าง **พร้อมกัน** ได้
 
 edge ในกราฟนั้นมาจากสองที่
 
 - **Implicit dependency** เมื่อไหร่ที่ argument ของ resource หนึ่งอ้างอิง attribute ของอีก resource หนึ่ง (เช่น `google_compute_subnetwork.app` อ้างอิง `google_compute_network.vpc.id` หรือ instance อ้างอิง ID ของ subnetwork) Terraform จะสรุปเองว่า resource ที่ถูกอ้างอิงต้องมีอยู่ก่อน
-- **Explicit dependency** คือ `depends_on` บน resource ใช้ตอนที่ resource หนึ่งขึ้นกับอีกตัวจริง ๆ แต่ความสัมพันธ์นั้นไม่โผล่ผ่าน attribute reference ไหนเลย (เช่น IAM binding ที่ต้องมีอยู่ก่อนแอปเริ่มพึ่งพามัน โดยไม่มี argument เชื่อมกันตรง ๆ)
+- **Explicit dependency** คือ `depends_on` บน resource ใช้ตอนที่ resource หนึ่งขึ้นกับอีกตัวจริง ๆ แต่ความสัมพันธ์นั้นไม่โผล่ผ่าน attribute reference ไหนเลย (เช่น IAM binding ที่ต้องมีอยู่ก่อนแอปเริ่มพึ่งพา โดยไม่มี argument เชื่อมกันตรง ๆ)
 
 ```hcl
 resource "google_compute_network" "vpc" {
@@ -165,7 +165,7 @@ export const dagDiagram = `flowchart LR
   bucket["google_storage_bucket.logs (unrelated, applies in parallel)"]`;
 
 <Callout title="สรุปหนึ่งบรรทัด">
-configuration แบบ HCL ประกอบด้วย **block**: `terraform` ประกาศ provider และ version ที่ต้องใช้, `provider` ตั้งค่าว่า Terraform คุยกับ GCP ยังไง, `resource` block (ระบุด้วย **type** และ **name** ที่คุณเลือก รวมกันเป็น **address**) ประกาศสิ่งที่ Terraform ควรสร้างและจัดการ ส่วน `data` block มีหน้าที่ **อ่าน** infrastructure ที่มีอยู่แล้วเท่านั้นโดยไม่เป็นเจ้าของมัน Terraform สร้าง **dependency graph (DAG)** จาก implicit reference กับ `depends_on` แบบ explicit แล้ว apply resource ที่เป็นอิสระต่อกันพร้อมกัน
+configuration แบบ HCL ประกอบด้วย **block**: `terraform` ประกาศ provider และ version ที่ต้องใช้, `provider` ตั้งค่าว่า Terraform คุยกับ GCP ยังไง, `resource` block (ระบุด้วย **type** และ **name** ที่คุณเลือก รวมกันเป็น **address**) ประกาศสิ่งที่ Terraform ควรสร้างและจัดการ ส่วน `data` block มีหน้าที่ **อ่าน** infrastructure ที่มีอยู่แล้วเท่านั้นโดยไม่เข้าไปเป็นเจ้าของ Terraform สร้าง **dependency graph (DAG)** จาก implicit reference กับ `depends_on` แบบ explicit แล้ว apply resource ที่เป็นอิสระต่อกันพร้อมกัน
 </Callout>
 
 export const quizHcl = [
@@ -194,17 +194,17 @@ export const quizHcl = [
     options: [
       'เรียงจากบนลงล่างตามลำดับที่เขียนในไฟล์เป๊ะ ๆ',
       'เรียงตามตัวอักษรของชื่อ resource',
-      'มันสร้าง dependency graph (DAG) จาก implicit attribute reference กับ depends_on แบบ explicit แล้วเรียงลำดับพร้อม parallelize ตามนั้น',
-      'มันสร้างทุก resource พร้อมกันเป๊ะ ๆ เสมอ',
+      'Terraform สร้าง dependency graph (DAG) จาก implicit attribute reference กับ depends_on แบบ explicit แล้วเรียงลำดับพร้อม parallelize ตามนั้น',
+      'Terraform สร้างทุก resource พร้อมกันเป๊ะ ๆ เสมอ',
     ],
     answer: 2,
   },
   {
     q: 'ข้อไหนอธิบาย required_providers ใน terraform block ได้ถูกต้อง',
     options: [
-      'มันตั้งค่า GCP region ให้ทุก resource',
-      'มันระบุ provider แต่ละตัวที่ต้องใช้ รวมถึง registry source และ version constraint ที่รับได้',
-      'มันแสดงรายชื่อ resource type ทุกตัวที่ใช้ใน configuration',
+      'ตั้งค่า GCP region ให้ทุก resource',
+      'ระบุ provider แต่ละตัวที่ต้องใช้ รวมถึง registry source และ version constraint ที่รับได้',
+      'แสดงรายชื่อ resource type ทุกตัวที่ใช้ใน configuration',
       'จำเป็นเฉพาะตอนใช้ data block เท่านั้น',
     ],
     answer: 1,

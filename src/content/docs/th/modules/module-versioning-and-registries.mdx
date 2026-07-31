@@ -10,13 +10,13 @@ import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-## The idea in one sentence
+## ไอเดียในหนึ่งประโยค
 
-**`version`** constraint บน module บอกว่า release ไหนของ Registry module หรือ Git-tagged module ที่ Terraform ได้รับอนุญาตให้ resolve ด้วยเหตุผลเดียวกับที่ version constraint ของ provider สำคัญ — ถ้าไม่มีมัน `terraform init -upgrade` ธรรมดา ๆ ครั้งหนึ่งอาจดึง module release ใหม่ที่มี breaking change เข้ามาโดยไม่มีใคร review ก่อนเลย
+**`version`** constraint บน module บอกว่า release ไหนของ Registry module หรือ Git-tagged module ที่ Terraform ได้รับอนุญาตให้ resolve ด้วยเหตุผลเดียวกับที่ version constraint ของ provider สำคัญ — ถ้าไม่มี `terraform init -upgrade` ธรรมดา ๆ ครั้งหนึ่งอาจดึง module release ใหม่ที่มี breaking change เข้ามาโดยไม่มีใคร review ก่อนเลย
 
 ## ทำไมการ pin version ของ module ถึงสำคัญ
 
-นี่คือปัญหาเดียวกับที่ provider dependency lock file แก้ไข แค่ขยับขึ้นมาอีกชั้นหนึ่ง เมื่อ `module` block ดึง source มาจาก public Registry หรือ Git tag โดยไม่มี `version` constraint Terraform จะ resolve release ล่าสุดที่มีอยู่ทุกครั้งที่ `init` รันแบบ cold — clone ใหม่ใน CI, laptop เครื่องใหม่, cache ที่ถูกสร้างใหม่ ถ้าคนเขียน module ปล่อย breaking change มาใน release ใหม่นั้น — variable ที่เปลี่ยนชื่อ, default ที่ต่างไป, resource ที่ตอนนี้ต้อง replace แทนที่จะ update — มันจะถูกดึงเข้ามาแล้ว apply โดยไม่มีใครในทีมได้อ่าน changelog ของ module นั้นก่อนเลย
+นี่คือปัญหาเดียวกับที่ provider dependency lock file แก้ไข แค่ขยับขึ้นมาอีกชั้นหนึ่ง เมื่อ `module` block ดึง source มาจาก public Registry หรือ Git tag โดยไม่มี `version` constraint Terraform จะ resolve release ล่าสุดที่มีอยู่ทุกครั้งที่ `init` รันแบบ cold — clone ใหม่ใน CI, laptop เครื่องใหม่, cache ที่ถูกสร้างใหม่ ถ้าคนเขียน module ปล่อย breaking change มาใน release ใหม่นั้น — variable ที่เปลี่ยนชื่อ, default ที่ต่างไป, resource ที่ตอนนี้ต้อง replace แทนที่จะ update — การเปลี่ยนนั้นจะถูกดึงเข้ามาแล้ว apply โดยไม่มีใครในทีมได้อ่าน changelog ของ module นั้นก่อนเลย
 
 ```hcl
 module "vpc" {
@@ -42,9 +42,9 @@ module "vpc" {
 
 ## pessimistic constraint operator: ~>
 
-`~>` เรียกว่า pessimistic constraint operator และความหมายของมันคืออนุญาตให้ upgrade ได้ แต่เฉพาะ upgrade ที่ไม่น่าจะทำให้อะไรพัง `version = "~> 9.0"` อนุญาตให้ Terraform resolve release ในสาย `9.x` ตัวไหนก็ได้ — `9.1.0`, `9.4.2`, `9.12.0` — เพราะตาม semantic versioning ตัวเหล่านี้ควร backward compatible กัน แต่มันบล็อก `10.0.0` เอาไว้เด็ดขาด เพราะ major version bump คือจุดที่คนเขียน module ได้รับอนุญาตให้ใส่ breaking change เข้ามา
+`~>` เรียกว่า pessimistic constraint operator ความหมายคืออนุญาตให้ upgrade ได้ แต่เฉพาะ upgrade ที่ไม่น่าจะทำให้อะไรพัง `version = "~> 9.0"` อนุญาตให้ Terraform resolve release ในสาย `9.x` ตัวไหนก็ได้ — `9.1.0`, `9.4.2`, `9.12.0` — เพราะตาม semantic versioning ตัวเหล่านี้ควร backward compatible กัน แต่บล็อก `10.0.0` เอาไว้เด็ดขาด เพราะ major version bump คือจุดที่คนเขียน module ได้รับอนุญาตให้ใส่ breaking change เข้ามา
 
-operator ตัวเดียวกันนี้ใช้ได้ละเอียดกว่านั้นอีกระดับ `version = "~> 9.2.0"` อนุญาต patch release อย่าง `9.2.1` กับ `9.2.7` แต่บล็อก `9.3.0` — มีประโยชน์ตอนที่คุณอยากกัน minor version bump ไว้ก่อนจนกว่าจะได้ review มัน `~> 9.0` ที่อนุญาตทั้งสาย `9.x` คือ default ทั่วไปของทีมส่วนใหญ่ ส่วนรูปแบบที่แคบกว่าอย่าง `~> 9.2.0` เหมาะกับ module ที่เคยโดน minor version เปลี่ยน behavior มาก่อน
+operator ตัวเดียวกันนี้ใช้ได้ละเอียดกว่านั้นอีกระดับ `version = "~> 9.2.0"` อนุญาต patch release อย่าง `9.2.1` กับ `9.2.7` แต่บล็อก `9.3.0` — มีประโยชน์ตอนที่คุณอยากกัน minor version bump ไว้ก่อนจนกว่าจะได้ review ก่อน `~> 9.0` ที่อนุญาตทั้งสาย `9.x` คือ default ทั่วไปของทีมส่วนใหญ่ ส่วนรูปแบบที่แคบกว่าอย่าง `~> 9.2.0` เหมาะกับ module ที่เคยโดน minor version เปลี่ยน behavior มาก่อน
 
 การ upgrade ข้ามขอบเขตที่ถูกบล็อกไว้ก็ยังทำได้ในคำสั่งเดียวเมื่อคุณพร้อม — แก้ `version` constraint ใน `.tf` file แล้วรัน `terraform init -upgrade` — constraint แค่ทำให้แน่ใจว่า upgrade นั้นเป็นสิ่งที่คนตัดสินใจทำเอง ไม่ใช่สิ่งที่เกิดขึ้นเงียบ ๆ ตอน `init` ครั้งถัดไป
 
@@ -77,7 +77,7 @@ export const moduleVersioningDiagram = `flowchart LR
   end`;
 
 <Callout title="The one-line takeaway">
-module **`version`** constraint สำคัญด้วยเหตุผลเดียวกับที่ provider version constraint สำคัญ — ถ้าไม่มีมัน `terraform init` หรือ `init -upgrade` ธรรมดา ๆ ครั้งหนึ่งอาจ resolve Registry หรือ Git-tagged module release ใหม่ที่มี breaking change ที่ไม่มีใคร review มาก่อนโดยเงียบ ๆ **pessimistic constraint operator** อย่าง `~> 9.0` อนุญาตให้ resolve release ในสาย `9.x` ตัวไหนก็ได้ แต่บล็อก major bump `10.0.0` ทำให้การ upgrade เป็นการตัดสินใจที่จงใจแทนที่จะเป็นอุบัติเหตุ module ที่เฉพาะเจาะจงกับองค์กรหนึ่งควรอยู่หลัง **private Git source** หรือ **private registry** แทนที่จะเป็น public Registry และ module ที่คุณ publish สู่สาธารณะต้องอยู่ใน repository ที่ชื่อ `terraform-<PROVIDER>-<NAME>` เพื่อให้ Registry ดึงมันเข้ามาได้ถูกต้อง
+module **`version`** constraint สำคัญด้วยเหตุผลเดียวกับที่ provider version constraint สำคัญ — ถ้าไม่มี `terraform init` หรือ `init -upgrade` ธรรมดา ๆ ครั้งหนึ่งอาจ resolve Registry หรือ Git-tagged module release ใหม่ที่มี breaking change ที่ไม่มีใคร review มาก่อนโดยเงียบ ๆ **pessimistic constraint operator** อย่าง `~> 9.0` อนุญาตให้ resolve release ในสาย `9.x` ตัวไหนก็ได้ แต่บล็อก major bump `10.0.0` ทำให้การ upgrade เป็นการตัดสินใจที่จงใจแทนที่จะเป็นอุบัติเหตุ module ที่เฉพาะเจาะจงกับองค์กรหนึ่งควรอยู่หลัง **private Git source** หรือ **private registry** แทนที่จะเป็น public Registry และ module ที่คุณ publish สู่สาธารณะต้องอยู่ใน repository ที่ชื่อ `terraform-<PROVIDER>-<NAME>` เพื่อให้ Registry ดึงเข้ามาได้ถูกต้อง
 </Callout>
 
 export const quizModuleVersioning = [
@@ -86,8 +86,8 @@ export const quizModuleVersioning = [
     options: [
       'ไม่มีเลย Terraform resolve module version เดิมเสมอไม่ว่า init จะรันเมื่อไหร่',
       'terraform init ครั้งใหม่อาจ resolve module release ใหม่ที่มี breaking change โดยไม่มีใคร review มาก่อนแบบเงียบ ๆ',
-      'มันทำให้ terraform init ใช้งานไม่ได้เลย',
-      'มันบังคับให้ทุกคนในทีมต้องใช้ Terraform CLI version เดียวกันเป๊ะ',
+      'ทำให้ terraform init ใช้งานไม่ได้เลย',
+      'บังคับให้ทุกคนในทีมต้องใช้ Terraform CLI version เดียวกันเป๊ะ',
     ],
     answer: 1,
   },

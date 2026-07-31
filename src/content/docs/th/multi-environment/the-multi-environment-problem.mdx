@@ -40,7 +40,7 @@ environments
     └── main.tf
 ```
 
-วันแรก ทั้งสามไฟล์เหมือนกันทุกตัวอักษร ยกเว้นค่า hardcode ไม่กี่จุด เช่น machine type ตรงนี้ ชื่อ bucket ตรงนั้น มันใช้งานได้ และรู้สึกเร็วดี ไม่ต้องออกแบบ shared module ไม่ต้องคิด abstraction ให้ถูกต้อง แค่สาม folder ของโค้ด `.tf` ธรรมดา
+วันแรก ทั้งสามไฟล์เหมือนกันทุกตัวอักษร ยกเว้นค่า hardcode ไม่กี่จุด เช่น machine type ตรงนี้ ชื่อ bucket ตรงนั้น ทุกอย่างใช้งานได้ และรู้สึกเร็วดี ไม่ต้องออกแบบ shared module ไม่ต้องคิด abstraction ให้ถูกต้อง แค่สาม folder ของโค้ด `.tf` ธรรมดา
 
 ```hcl
 # Day one: dev/main.tf, staging/main.tf, and prod/main.tf are all this rule, verbatim
@@ -104,7 +104,7 @@ export const quizMultiEnvProblem = [
       'Terraform ไม่ยอม apply configuration ที่มีอยู่มากกว่าหนึ่ง directory',
       'fix หรือ tweak ที่ทำใน copy หนึ่งไม่ถูก apply ไปยัง copy อื่นโดยอัตโนมัติ ทำให้ copy แต่ละชุด drift ออกไปเป็น configuration ที่ต่างกันและไม่มีเอกสารเมื่อเวลาผ่านไป',
       'Google provider ไม่อนุญาตให้ copy-paste directory',
-      'มันทำให้ setup แรกเริ่มช้ากว่าการเขียน shared module',
+      'ทำให้ setup แรกเริ่มช้ากว่าการเขียน shared module',
     ],
     answer: 1,
   },

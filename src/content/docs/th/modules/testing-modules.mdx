@@ -10,22 +10,22 @@ import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-## The idea in one sentence
+## ไอเดียในหนึ่งประโยค
 
 `terraform validate`, `terraform plan` และ `terraform test` แต่ละตัวตรวจสอบคนละเรื่องกันจริง ๆ — syntax, diff ของโลกจริง และ behavior ที่ถูก assert จริง — การผ่านตัวหนึ่งไม่ได้แปลว่าอีกตัวจะผ่านด้วย
 
 ## สามระดับความมั่นใจที่ต่างกัน
 
-มันน่าเผลอคิดว่า `validate`, `plan` และ `test` เป็นสามวิธีที่ถามคำถามเดียวกัน แต่จริง ๆ แล้วมันตรวจคนละเรื่องกัน และแต่ละตัวจับ mistake คนละแบบที่อีกสองตัวจับไม่ได้เลย
+น่าเผลอคิดว่า `validate`, `plan` และ `test` เป็นสามวิธีที่ถามคำถามเดียวกัน แต่จริง ๆ แล้วตรวจคนละเรื่องกัน และแต่ละตัวจับ mistake คนละแบบที่อีกสองตัวจับไม่ได้เลย
 
-`terraform validate` ตรวจว่า HCL ของคุณ syntax ถูกต้องและ consistent กันภายใน — ว่า `variable` ทุกตัวที่ถูกอ้างอิงมีอยู่จริง type ตรงกัน argument ที่ required ครบ ที่สำคัญคือ `validate` ไม่เคยคุยกับ GCP เลย มันไม่มี credential ไม่เรียก API ไหนเลย และบอกไม่ได้ว่า `project_id` เป็นของจริงหรือ account ของคุณมีสิทธิ์สร้าง `google_storage_bucket` หรือเปล่า
+`terraform validate` ตรวจว่า HCL ของคุณ syntax ถูกต้องและ consistent กันภายใน — ว่า `variable` ทุกตัวที่ถูกอ้างอิงมีอยู่จริง type ตรงกัน argument ที่ required ครบ ที่สำคัญคือ `validate` ไม่เคยคุยกับ GCP เลย ไม่มี credential ไม่เรียก API ไหนเลย และบอกไม่ได้ว่า `project_id` เป็นของจริงหรือ account ของคุณมีสิทธิ์สร้าง `google_storage_bucket` หรือเปล่า
 
 ```bash
 terraform validate
 # Success! The configuration is valid.
 ```
 
-`terraform plan` ไปไกลกว่านั้น มัน authenticate เข้า GCP API จริง อ่าน state ปัจจุบันของ resource ที่มีอยู่ และคำนวณ diff ว่าอะไรจะเปลี่ยน นี่จับ error กลุ่มที่ `validate` จับไม่ได้เลย — ค่า `location` ที่ API ปฏิเสธ, `project_id` ที่ credential ของคุณเข้าไม่ถึง, quota ที่เกิน แต่ `plan` ก็ยังไม่ได้ assert อะไรเลยว่าผลลัพธ์ถูกต้องตามที่คุณตั้งใจไว้ มันแค่โชว์ให้ดูว่าจะเกิดอะไรขึ้น
+`terraform plan` ไปไกลกว่านั้น โดย authenticate เข้า GCP API จริง อ่าน state ปัจจุบันของ resource ที่มีอยู่ และคำนวณ diff ว่าอะไรจะเปลี่ยน นี่จับ error กลุ่มที่ `validate` จับไม่ได้เลย — ค่า `location` ที่ API ปฏิเสธ, `project_id` ที่ credential ของคุณเข้าไม่ถึง, quota ที่เกิน แต่ `plan` ก็ยังไม่ได้ assert อะไรเลยว่าผลลัพธ์ถูกต้องตามที่คุณตั้งใจไว้ แค่โชว์ให้ดูว่าจะเกิดอะไรขึ้น
 
 ```bash
 terraform plan
@@ -34,7 +34,7 @@ terraform plan
 #   + location = "US"
 ```
 
-`terraform test` เป็นตัวเดียวในสามตัวที่ assert behavior ที่คาดหวังไว้จริง ๆ — ว่าชื่อ bucket ตรงกับที่คุณส่งเข้าไปจริงไหม output ตัวหนึ่งมีค่าตรงกับที่คาดไว้จริงไหม การผ่าน `validate` หรือแม้แต่ `plan` ที่ clean บอกแค่ว่า configuration well-formed และ GCP ยอมรับมัน ไม่มีตัวไหนบอกว่า module ตัวนี้ทำงานตามที่คุณออกแบบไว้จริงหรือเปล่า
+`terraform test` เป็นตัวเดียวในสามตัวที่ assert behavior ที่คาดหวังไว้จริง ๆ — ว่าชื่อ bucket ตรงกับที่คุณส่งเข้าไปจริงไหม output ตัวหนึ่งมีค่าตรงกับที่คาดไว้จริงไหม การผ่าน `validate` หรือแม้แต่ `plan` ที่ clean บอกแค่ว่า configuration well-formed และ GCP ยอมรับ ไม่มีตัวไหนบอกว่า module ตัวนี้ทำงานตามที่คุณออกแบบไว้จริงหรือเปล่า
 
 ## native test framework ของ Terraform
 
@@ -57,11 +57,11 @@ run "bucket_name_matches_input" {
 }
 ```
 
-ตัวอย่างนี้ test module `gcs-bucket` จากก่อนหน้านี้ในโมดูลนี้ มัน assert ว่า resource ของ bucket ข้างใน module ได้ `name` ตรงกับที่ caller ส่งเข้ามาเป็น `bucket_name` เป๊ะ ไม่ใช่แค่ว่า configuration syntax ถูกต้อง หรือ GCP ยอมรับมันเท่านั้น
+ตัวอย่างนี้ test module `gcs-bucket` จากก่อนหน้านี้ในโมดูลนี้ โดย assert ว่า resource ของ bucket ข้างใน module ได้ `name` ตรงกับที่ caller ส่งเข้ามาเป็น `bucket_name` เป๊ะ ไม่ใช่แค่ว่า configuration syntax ถูกต้อง หรือ GCP ยอมรับเท่านั้น
 
 ## command = plan เทียบกับ command = apply
 
-ทุก `run` block มี `command` argument และการเลือกระหว่างสองค่าของมันคือ tradeoff จริง ไม่ใช่แค่พิธีการ `command = plan` คำนวณ plan แล้ว assert กับค่าที่ plan ไว้ โดยไม่สร้าง resource จริงเลยแม้แต่ตัวเดียว มันเร็ว ฟรี และรันได้ทุก commit อย่างปลอดภัย นี่คือเหตุผลที่มันควรครอบคลุม test case ส่วนใหญ่ของคุณ
+ทุก `run` block มี `command` argument และการเลือกระหว่างสองค่านั้นคือ tradeoff จริง ไม่ใช่แค่พิธีการ `command = plan` คำนวณ plan แล้ว assert กับค่าที่ plan ไว้ โดยไม่สร้าง resource จริงเลยแม้แต่ตัวเดียว วิธีนี้เร็ว ฟรี และรันได้ทุก commit อย่างปลอดภัย นี่คือเหตุผลที่ควรครอบคลุม test case ส่วนใหญ่ของคุณ
 
 ```hcl
 run "bucket_name_matches_input" {
@@ -74,7 +74,7 @@ run "bucket_name_matches_input" {
 }
 ```
 
-`command = apply` สร้าง resource จริงใน GCP จริง ๆ assert กับ attribute ที่เกิดขึ้นจริงของมัน แล้ว teardown ทุกอย่างทิ้งตอนท้ายไฟล์ test นี่คือ integration testing ของจริง — มันจับสิ่งที่ plan-only test จับไม่ได้ เช่น naming collision ที่ GCP API ปฏิเสธเฉพาะตอน apply เท่านั้น — แต่มันช้ากว่าและเสียค่าใช้จ่าย cloud resource จริงชั่วครู่ ดังนั้นควรเลือกใช้มันอย่างตั้งใจ ไม่ใช่ใช้เป็น default
+`command = apply` สร้าง resource จริงใน GCP จริง ๆ assert กับ attribute ที่เกิดขึ้นจริง แล้ว teardown ทุกอย่างทิ้งตอนท้ายไฟล์ test นี่คือ integration testing ของจริง — เพราะจับสิ่งที่ plan-only test จับไม่ได้ เช่น naming collision ที่ GCP API ปฏิเสธเฉพาะตอน apply เท่านั้น — แต่ช้ากว่าและเสียค่าใช้จ่าย cloud resource จริงชั่วครู่ ดังนั้นควรเลือกใช้อย่างตั้งใจ ไม่ใช่ใช้เป็น default
 
 ```hcl
 run "bucket_actually_created" {
@@ -100,10 +100,10 @@ export const quizTestingModules = [
   {
     q: 'terraform validate ตรวจอะไรได้ และตรวจอะไรไม่ได้เลย',
     options: [
-      'มันตรวจว่า GCP ยอมรับทุกค่า แต่ตรวจ HCL syntax ไม่ได้',
-      'มันตรวจ HCL syntax และ internal configuration consistency เท่านั้น และไม่เคยคุยกับ GCP เลย',
-      'มันตรวจ attribute จริงของ resource หลังสร้างเสร็จ แต่ไม่ตรวจ syntax',
-      'มันตรวจทั้ง syntax และ live GCP state เหมือนกับ terraform plan เป๊ะ',
+      'ตรวจว่า GCP ยอมรับทุกค่า แต่ตรวจ HCL syntax ไม่ได้',
+      'ตรวจ HCL syntax และ internal configuration consistency เท่านั้น และไม่เคยคุยกับ GCP เลย',
+      'ตรวจ attribute จริงของ resource หลังสร้างเสร็จ แต่ไม่ตรวจ syntax',
+      'ตรวจทั้ง syntax และ live GCP state เหมือนกับ terraform plan เป๊ะ',
     ],
     answer: 1,
   },

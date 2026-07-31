@@ -10,7 +10,7 @@ import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-## The idea in one sentence
+## ไอเดียในหนึ่งประโยค
 
 **`source`** argument ใน `module` block บอกว่าโค้ดของ module นั้นอยู่ที่ไหน — local path, public Terraform Registry หรือ Git URL — และ infrastructure จริงถูกสร้างขึ้นด้วยการเอา `output` ของ module หนึ่งไปต่อเป็น `variable` ของอีก module ไม่ใช่เขียน configuration แบนราบก้อนเดียว
 
@@ -27,7 +27,7 @@ module "vpc" {
 }
 ```
 
-local path เหมาะตอนที่ module ยังผูกกับ repository เดียวอยู่ หรือตอนที่คุณกำลังพัฒนามันไปพร้อมกับโค้ดที่เรียกใช้มัน แต่พอ module reuse ได้จริงข้ามหลาย configuration คุณมักอยากเผยแพร่มันไว้ที่ที่ทุก caller เข้าถึงได้เองโดยไม่ต้องผูกกับ repository ใดเป็นพิเศษ — ตรงนี้แหละที่ public Terraform Registry กับ Git source เข้ามามีบทบาท
+local path เหมาะตอนที่ module ยังผูกกับ repository เดียวอยู่ หรือตอนที่คุณกำลังพัฒนาไปพร้อมกับโค้ดที่เรียกใช้ แต่พอ module reuse ได้จริงข้ามหลาย configuration คุณมักอยากเผยแพร่ไว้ที่ที่ทุก caller เข้าถึงได้เองโดยไม่ต้องผูกกับ repository ใดเป็นพิเศษ — ตรงนี้แหละที่ public Terraform Registry กับ Git source เข้ามามีบทบาท
 
 public Terraform Registry เก็บ module จากชุมชนและ vendor ต่าง ๆ ภายใต้ address รูปแบบ `namespace/name/provider` ซึ่ง `terraform init` resolve ให้อัตโนมัติโดยไม่ต้องใช้ URL เลย
 
@@ -56,7 +56,7 @@ module "vpc" {
 
 ## ประกอบ module เข้าด้วยกัน: ส่ง output ไปเป็น input
 
-infrastructure ที่ซับซ้อนจริง ๆ แทบไม่เคยเป็น configuration แบนราบก้อนเดียว แต่เป็น module เล็ก ๆ ที่ focus ชัดเจนหลายตัวต่อกัน โดย `output` ของ module หนึ่งกลายเป็น input `variable` ของ module ถัดไปโดยตรง ลองดู `vpc` module ที่สร้าง network กับ subnet ของมัน และ `compute-instance` module ที่ต้องรู้ว่าจะ attach instance เข้ากับ network และ subnetwork ไหน
+infrastructure ที่ซับซ้อนจริง ๆ แทบไม่เคยเป็น configuration แบนราบก้อนเดียว แต่เป็น module เล็ก ๆ ที่ focus ชัดเจนหลายตัวต่อกัน โดย `output` ของ module หนึ่งกลายเป็น input `variable` ของ module ถัดไปโดยตรง ลองดู `vpc` module ที่สร้าง network กับ subnet ของตัวเอง และ `compute-instance` module ที่ต้องรู้ว่าจะ attach instance เข้ากับ network และ subnetwork ไหน
 
 ```hcl
 # modules/vpc/outputs.tf
@@ -106,9 +106,9 @@ Terraform resolve dependency ตรงนี้ให้อัตโนมัต
 
 ## ใช้ public Terraform Registry ให้เป็นประโยชน์
 
-การเขียน `vpc` module เองตั้งแต่ศูนย์เป็นแบบฝึกหัดที่ดี แต่สำหรับงาน production มันมักไม่ใช่การใช้เวลาที่คุ้มค่าที่สุด องค์กร `terraform-google-modules` บน public Registry ดูแล module อย่าง `terraform-google-modules/network/google` ที่จัดการรายละเอียดยิบย่อยของ GCP networking ไว้แล้ว — custom subnet range, secondary range สำหรับ GKE, Shared VPC, Cloud NAT — ผ่านการใช้งานจริงจากชุมชนจำนวนมากที่เจอ edge case เดียวกับที่คุณจะเจอเองในที่สุด
+การเขียน `vpc` module เองตั้งแต่ศูนย์เป็นแบบฝึกหัดที่ดี แต่สำหรับงาน production มักไม่ใช่การใช้เวลาที่คุ้มค่าที่สุด องค์กร `terraform-google-modules` บน public Registry ดูแล module อย่าง `terraform-google-modules/network/google` ที่จัดการรายละเอียดยิบย่อยของ GCP networking ไว้แล้ว — custom subnet range, secondary range สำหรับ GKE, Shared VPC, Cloud NAT — ผ่านการใช้งานจริงจากชุมชนจำนวนมากที่เจอ edge case เดียวกับที่คุณจะเจอเองในที่สุด
 
-แต่ module จาก Registry ก็ยังเป็นโค้ดของคนอื่นที่รันใน project ของคุณด้วย credential ของคุณ ก่อนจะพึ่งพามันใน production ควรอ่านให้รู้ว่ามันสร้างอะไรจริง ๆ — `main.tf` ของมัน ค่า default ของมัน IAM role หรือ API ที่มันเปิดใช้แทนคุณ module จาก Registry ที่ดูแลดีคือ productivity lever จริง ไม่ใช่ตัวแทนของการเข้าใจว่าอะไรถูก deploy เข้า GCP project ของคุณ
+แต่ module จาก Registry ก็ยังเป็นโค้ดของคนอื่นที่รันใน project ของคุณด้วย credential ของคุณ ก่อนจะพึ่งพาใน production ควรอ่านให้รู้ว่า module สร้างอะไรจริง ๆ — `main.tf`, ค่า default, IAM role หรือ API ที่เปิดใช้แทนคุณ module จาก Registry ที่ดูแลดีคือ productivity lever จริง ไม่ใช่ตัวแทนของการเข้าใจว่าอะไรถูก deploy เข้า GCP project ของคุณ
 
 <Mermaid title="Root configuration wiring vpc module outputs into compute-instance module inputs" code={moduleCompositionDiagram} />
 
@@ -133,7 +133,7 @@ export const moduleCompositionDiagram = `flowchart LR
   rci --> cin2`;
 
 <Callout title="The one-line takeaway">
-**`source`** argument บน `module` block ชี้ว่าโค้ดของมันอยู่ที่ไหน — local path สำหรับ module ที่ยังผูกกับ repository เดียว, public **Terraform Registry** สำหรับ module ของชุมชนที่ดูแลดีและ resolve ผ่าน `namespace/name/provider`, หรือ **Git URL** (pin ได้ด้วย `?ref=`) สำหรับ module ส่วนตัวหรือภายในองค์กร infrastructure จริงถูกประกอบขึ้นจาก module เล็ก ๆ ที่ focus ชัดเจนหลายตัวต่อกัน ด้วยการส่ง `output` ของ module หนึ่งเป็น input `variable` ของอีก module และ Terraform resolve dependency ระหว่างมันให้อัตโนมัติ การเลือกใช้ module จาก Registry ที่คนใช้กันเยอะอย่าง `terraform-google-modules/network/google` มักเป็นจุดเริ่มต้นที่ดีกว่าการเขียนเองตั้งแต่ศูนย์ ตราบใดที่คุณยังอ่านสิ่งที่มันสร้างก่อนจะเชื่อใจมันใน production
+**`source`** argument บน `module` block ชี้ว่าโค้ดของ module อยู่ที่ไหน — local path สำหรับ module ที่ยังผูกกับ repository เดียว, public **Terraform Registry** สำหรับ module ของชุมชนที่ดูแลดีและ resolve ผ่าน `namespace/name/provider`, หรือ **Git URL** (pin ได้ด้วย `?ref=`) สำหรับ module ส่วนตัวหรือภายในองค์กร infrastructure จริงถูกประกอบขึ้นจาก module เล็ก ๆ ที่ focus ชัดเจนหลายตัวต่อกัน ด้วยการส่ง `output` ของ module หนึ่งเป็น input `variable` ของอีก module และ Terraform resolve dependency ระหว่างกันให้อัตโนมัติ การเลือกใช้ module จาก Registry ที่คนใช้กันเยอะอย่าง `terraform-google-modules/network/google` มักเป็นจุดเริ่มต้นที่ดีกว่าการเขียนเองตั้งแต่ศูนย์ ตราบใดที่คุณยังอ่านสิ่งที่ module สร้างก่อนจะเชื่อใจใน production
 </Callout>
 
 export const quizModuleComposition = [
@@ -150,10 +150,10 @@ export const quizModuleComposition = [
   {
     q: 'ในตัวอย่างการประกอบ vpc กับ compute-instance module compute-instance module รู้ได้อย่างไรว่าต้อง attach เข้ากับ network ไหน',
     options: [
-      'มัน hardcode ชื่อ network ไว้ใน main.tf ของตัวเอง',
+      'hardcode ชื่อ network ไว้ใน main.tf ของตัวเอง',
       'root configuration ส่ง module.vpc.network_id เป็นค่าของ variable network_id ของ compute-instance module',
       'Terraform แชร์ output ของทุก module ให้กันเองอัตโนมัติโดยไม่ต้อง wiring',
-      'มันอ่าน network ID จาก local state file ที่ vpc module เขียนไว้',
+      'อ่าน network ID จาก local state file ที่ vpc module เขียนไว้',
     ],
     answer: 1,
   },
@@ -172,7 +172,7 @@ export const quizModuleComposition = [
     options: [
       'ไม่มีทางเหมาะเลย production infrastructure ควรเขียนเองทั้งหมดตั้งแต่ศูนย์เสมอ',
       'เฉพาะตอนที่ไม่มี local path หรือ Git source ให้ใช้เท่านั้น',
-      'เมื่อ module นั้นแก้ปัญหาแบบที่พบบ่อยและเข้าใจกันดีอยู่แล้ว และคุณยังอ่านสิ่งที่มันสร้างก่อนจะเชื่อใจมันใน production',
+      'เมื่อ module นั้นแก้ปัญหาแบบที่พบบ่อยและเข้าใจกันดีอยู่แล้ว และคุณยังอ่านสิ่งที่ module สร้างก่อนจะเชื่อใจใน production',
       'เฉพาะ module ที่ไม่มี configuration option เลยเท่านั้น',
     ],
     answer: 2,

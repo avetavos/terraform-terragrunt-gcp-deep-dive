@@ -48,7 +48,7 @@ resource "google_compute_instance" "web" {
 
 ## ปัญหา index เลื่อน
 
-จุดอ่อนจริง ๆ ของ `count` คือ identity ของแต่ละชุดไม่มีอะไรมากไปกว่าตำแหน่งของมันใน list สมมติว่าแทนที่จะเป็นตัวเลขธรรมดา `count` ขับเคลื่อนด้วย list ของชื่อ:
+จุดอ่อนจริง ๆ ของ `count` คือ identity ของแต่ละชุดไม่มีอะไรมากไปกว่าตำแหน่งใน list สมมติว่าแทนที่จะเป็นตัวเลขธรรมดา `count` ขับเคลื่อนด้วย list ของชื่อ:
 
 ```hcl
 variable "instance_names" {
@@ -76,7 +76,7 @@ resource "google_compute_instance" "web" {
 }
 ```
 
-ตรงนี้ `web[0]` คือ `"web-a"`, `web[1]` คือ `"web-b"`, และ `web[2]` คือ `"web-c"` ทีนี้ลบ `"web-b"` ออกจากกลางๆ list เหลือ `["web-a", "web-c"]` Terraform ไม่เข้าใจว่า `"web-b"` ถูกลบไปโดยเฉพาะ มันเห็นแค่ว่า index `1` ตอนนี้ map ไปหาชื่อที่ต่างจากเดิม และ index `2` ไม่มีอยู่แล้ว plan ที่ Terraform สร้างออกมาคือ destroy `web[2]` (`"web-c"` ตัวเก่าไม่มี index แล้ว) แล้ว destroy กับ recreate `web[1]` ด้วยชื่อใหม่ `"web-c"` ทั้งที่ในความเป็นจริงมีแค่ `"web-b"` ที่ควรถูกแตะต้อง ทุก resource ที่ index เลื่อนจะโดน destroy แล้ว recreate พร้อม downtime, IP address ที่เปลี่ยน, และ disk ที่หายไปตามมา แค่เพราะมันขยับตำแหน่งใน list
+ตรงนี้ `web[0]` คือ `"web-a"`, `web[1]` คือ `"web-b"`, และ `web[2]` คือ `"web-c"` ทีนี้ลบ `"web-b"` ออกจากกลางๆ list เหลือ `["web-a", "web-c"]` Terraform ไม่เข้าใจว่า `"web-b"` ถูกลบไปโดยเฉพาะ เห็นแค่ว่า index `1` ตอนนี้ map ไปหาชื่อที่ต่างจากเดิม และ index `2` ไม่มีอยู่แล้ว plan ที่ Terraform สร้างออกมาคือ destroy `web[2]` (`"web-c"` ตัวเก่าไม่มี index แล้ว) แล้ว destroy กับ recreate `web[1]` ด้วยชื่อใหม่ `"web-c"` ทั้งที่ในความเป็นจริงมีแค่ `"web-b"` ที่ควรถูกแตะต้อง ทุก resource ที่ index เลื่อนจะโดน destroy แล้ว recreate พร้อม downtime, IP address ที่เปลี่ยน, และ disk ที่หายไปตามมา แค่เพราะขยับตำแหน่งใน list
 
 ## for_each — address ด้วย key ที่ stable ไม่ใช่ตำแหน่ง
 
@@ -116,7 +116,7 @@ resource "google_compute_instance" "web" {
 
 ## for expression — comprehension ไม่ใช่ resource meta-argument
 
-`for` expression คือ comprehension แบบทั่วไปที่แปลง collection หนึ่งเป็นอีก collection หนึ่ง มันไม่เกี่ยวอะไรกับการสร้าง resource หลายชุดโดยตัวมันเอง แค่บังเอิญใช้คำว่า "for" ร่วมกับ `for_each` ซึ่งทำให้คนสับสนกันบ่อย
+`for` expression คือ comprehension แบบทั่วไปที่แปลง collection หนึ่งเป็นอีก collection หนึ่ง ไม่เกี่ยวอะไรกับการสร้าง resource หลายชุดเลย แค่บังเอิญใช้คำว่า "for" ร่วมกับ `for_each` ซึ่งทำให้คนสับสนกันบ่อย
 
 ```hcl
 variable "instance_names" {
@@ -134,7 +134,7 @@ locals {
 }
 ```
 
-`[for name in var.instance_names : upper(name)]` คือ `for` expression ที่สร้าง list ใหม่ `{ for name in var.instance_names : name => "label-${name}" }` คือ `for` expression ที่สร้าง map ใหม่ ทั้งสองอันไม่ใช่ `for_each` meta-argument บน resource block เลย — `for` expression แปลงข้อมูลที่มีอยู่แล้วให้เป็นข้อมูลอีกแบบ ในขณะที่ `for_each` meta-argument บน resource ตัดสินว่าจะสร้าง resource นั้นกี่ instance และ key อะไร address แต่ละอัน การใช้ `for` expression สร้าง map แล้วส่งต่อให้ `for_each` ของ resource เป็นเรื่องปกติมากและเจอบ่อย
+`[for name in var.instance_names : upper(name)]` คือ `for` expression ที่สร้าง list ใหม่ `{ for name in var.instance_names : name => "label-${name}" }` คือ `for` expression ที่สร้าง map ใหม่ ทั้งสองอันไม่ใช่ `for_each` meta-argument บน resource block เลย — `for` expression แปลงข้อมูลที่มีอยู่แล้วให้เป็นข้อมูลอีกแบบ ส่วน `for_each` meta-argument บน resource ตัดสินว่าจะสร้าง resource นั้นกี่ instance และ key อะไร address แต่ละอัน การใช้ `for` expression สร้าง map แล้วส่งต่อให้ `for_each` ของ resource เป็นเรื่องปกติมากและเจอบ่อย
 
 <Mermaid title="count shifts every index after a mid-list removal; for_each only touches the removed key" code={countForEachDiagram} />
 
@@ -151,7 +151,7 @@ export const countForEachDiagram = `flowchart TB
   end`;
 
 <Callout title="The one-line takeaway">
-**`count`** สร้าง resource ที่มีเลขกำกับ address ด้วย integer index ธรรมดา (`web[0]`, `web[1]`) — ลบ item ออกจากกลาง list ที่มันอ้างอิงจะทำให้ index ถัดไปทุกตัวเลื่อนลงมาหนึ่งขั้น ทำให้ Terraform destroy แล้ว recreate ทุกชุดที่อยู่หลัง item ที่ลบ ไม่ใช่แค่ชุดเดียวที่ตั้งใจจะลบ **`for_each`** สร้าง resource ที่ address ด้วย map หรือ set key ที่ stable (`web["primary"]`) แทน ลบ key เดียวจะ destroy แค่ resource instance นั้นเท่านั้น key อื่นทุกตัวไม่ถูกกระทบเลย **`for` expression** (`[for x in list : ...]`, `{for k, v in map : k => v}`) เป็นคนละแนวคิดกันเลย — มันคือ comprehension ที่แปลง collection หนึ่งเป็นอีก collection หนึ่ง ต่างจาก `for_each` resource meta-argument แม้คำจะซ้ำกัน
+**`count`** สร้าง resource ที่มีเลขกำกับ address ด้วย integer index ธรรมดา (`web[0]`, `web[1]`) — ลบ item ออกจากกลาง list ที่อ้างอิงอยู่จะทำให้ index ถัดไปทุกตัวเลื่อนลงมาหนึ่งขั้น ทำให้ Terraform destroy แล้ว recreate ทุกชุดที่อยู่หลัง item ที่ลบ ไม่ใช่แค่ชุดเดียวที่ตั้งใจจะลบ **`for_each`** สร้าง resource ที่ address ด้วย map หรือ set key ที่ stable (`web["primary"]`) แทน ลบ key เดียวจะ destroy แค่ resource instance นั้นเท่านั้น key อื่นทุกตัวไม่ถูกกระทบเลย **`for` expression** (`[for x in list : ...]`, `{for k, v in map : k => v}`) เป็นคนละแนวคิดกันเลย — เพราะคือ comprehension ที่แปลง collection หนึ่งเป็นอีก collection หนึ่ง ต่างจาก `for_each` resource meta-argument แม้คำจะซ้ำกัน
 </Callout>
 
 export const quizCountForEach = [

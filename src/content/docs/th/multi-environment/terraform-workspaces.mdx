@@ -1,6 +1,6 @@
 ---
 title: 'Terraform Workspaces'
-description: 'Terraform workspace ทำให้ configuration เดียวจัดการหลาย state ที่มีชื่อได้ยังไง และทำไมมันยังใช้ backend กับ provider configuration ร่วมกันอยู่'
+description: 'Terraform workspace ทำให้ configuration เดียวจัดการหลาย state ที่มีชื่อได้ยังไง และทำไมยังใช้ backend กับ provider configuration ร่วมกันอยู่'
 sidebar:
   order: 2
 ---
@@ -81,7 +81,7 @@ provider "google" {
 }
 ```
 
-Terraform จัดการแยก state object ของแต่ละ workspace ไว้ในเครื่องเดียวกันโดยอัตโนมัติ ทำให้ `dev`, `staging`, `prod` ไม่ทับ state file กันเอง แต่ bucket เอง, `project` ใน block `provider "google"`, และ credential ที่ Terraform ใช้ authenticate เหมือนกันเป๊ะไม่ว่า workspace ไหนจะ active อยู่ ตรงนี้ไม่มี boundary แข็ง ๆ เลยสักนิด ไม่มีอะไรกันไม่ให้คนที่อยู่ใน workspace `dev` คิดว่ากำลังจะแก้ instance ทดสอบที่ทิ้งได้ ทั้งที่จริง ๆ ทุก workspace ใช้ GCP project `acme-shared-project` เดียวกันและ resource ที่ใกล้เคียง prod จริงที่อยู่ในนั้นร่วมกัน การเลือก `terraform workspace select` ผิดตามด้วย `apply` คือความผิดพลาดที่เกิดขึ้นได้ง่ายมาก และ workspace เองไม่มีทางป้องกันมันให้คุณเลย
+Terraform จัดการแยก state object ของแต่ละ workspace ไว้ในเครื่องเดียวกันโดยอัตโนมัติ ทำให้ `dev`, `staging`, `prod` ไม่ทับ state file กันเอง แต่ bucket เอง, `project` ใน block `provider "google"`, และ credential ที่ Terraform ใช้ authenticate เหมือนกันเป๊ะไม่ว่า workspace ไหนจะ active อยู่ ตรงนี้ไม่มี boundary แข็ง ๆ เลยสักนิด ไม่มีอะไรกันไม่ให้คนที่อยู่ใน workspace `dev` คิดว่ากำลังจะแก้ instance ทดสอบที่ทิ้งได้ ทั้งที่จริง ๆ ทุก workspace ใช้ GCP project `acme-shared-project` เดียวกันและ resource ที่ใกล้เคียง prod จริงที่อยู่ในนั้นร่วมกัน การเลือก `terraform workspace select` ผิดตามด้วย `apply` คือความผิดพลาดที่เกิดขึ้นได้ง่ายมาก และ workspace เองไม่มีทางป้องกันให้คุณเลย
 
 <Mermaid title="One Terraform configuration and backend, three workspaces, three state files, one shared GCP project" code={workspacesDiagram} />
 
@@ -103,7 +103,7 @@ export const quizTerraformWorkspaces = [
     q: 'Terraform workspace ให้สิ่งที่แยกกันจริงคืออะไร',
     options: [
       'GCP project ที่แยกกันในแต่ละ workspace',
-      'state file ที่แยกกันในแต่ละ workspace ในขณะที่ backend, provider configuration, และโค้ด .tf ยังใช้ร่วมกัน',
+      'state file ที่แยกกันในแต่ละ workspace ส่วน backend, provider configuration, และโค้ด .tf ยังใช้ร่วมกัน',
       'provider block ที่แยกกันในแต่ละ workspace',
       'credential ชุดที่แยกกันในแต่ละ workspace',
     ],
@@ -134,7 +134,7 @@ export const quizTerraformWorkspaces = [
     options: [
       'เนื้อหาของ state file',
       'ชื่อ workspace ที่ active อยู่',
-      'block backend และ block provider รวมถึง GCP project ที่มันชี้ไป',
+      'block backend และ block provider รวมถึง GCP project ที่ชี้ไป',
       'ผลลัพธ์ของ terraform workspace list',
     ],
     answer: 2,

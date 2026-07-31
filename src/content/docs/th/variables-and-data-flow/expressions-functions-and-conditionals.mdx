@@ -16,7 +16,7 @@ Terraform configuration ไม่ได้มีแค่ค่า static — bu
 
 ## Built-in function แยกตามหมวด
 
-Terraform มี built-in function ชุดตายตัว — เราสร้าง function เองไม่ได้ — แบ่งหมวดคร่าว ๆ ตามชนิดข้อมูลที่มันทำงานด้วย มีไม่กี่ตัวที่เจอบ่อยมากใน GCP configuration:
+Terraform มี built-in function ชุดตายตัว — เราสร้าง function เองไม่ได้ — แบ่งหมวดคร่าว ๆ ตามชนิดข้อมูลที่ทำงานด้วย มีไม่กี่ตัวที่เจอบ่อยมากใน GCP configuration:
 
 ```hcl
 locals {
@@ -39,7 +39,7 @@ locals {
 }
 ```
 
-`join` กับ `split` เป็นด้านตรงข้ามกัน — ตัวหนึ่งเปลี่ยน list ให้เป็น string ที่มี delimiter คั่น อีกตัวเปลี่ยน string ที่มี delimiter กลับเป็น list `lookup` อ่าน map ด้วย key พร้อม fallback ที่เป็น argument ตัวที่สามชัดเจน ทำให้ key ที่หายไปไม่ทำให้เกิด error `merge` รวมหลาย map เข้าเป็นก้อนเดียว โดย argument ที่มาทีหลัง override key จาก argument ก่อนหน้า `contains` เช็คว่ามีสมาชิกอยู่ใน list ไหมและคืนค่า boolean ธรรมดา `cidrsubnet(prefix, newbits, netnum)` คือตัวที่ควรจำให้แม่นสำหรับงาน networking บน GCP มันรับ CIDR block ตั้งต้น ขยาย prefix length ไปอีก `newbits` บิต แล้วคืน subnet ตัวที่ `netnum` ของขนาดใหม่นั้น — เหมาะเจาะพอดีสำหรับตัด `10.0.0.0/16` ของ VPC network ให้เป็น `/24` หลายชุดโดยไม่ต้องคำนวณ address เองด้วยมือ
+`join` กับ `split` เป็นด้านตรงข้ามกัน — ตัวหนึ่งเปลี่ยน list ให้เป็น string ที่มี delimiter คั่น อีกตัวเปลี่ยน string ที่มี delimiter กลับเป็น list `lookup` อ่าน map ด้วย key พร้อม fallback ที่เป็น argument ตัวที่สามชัดเจน ทำให้ key ที่หายไปไม่ทำให้เกิด error `merge` รวมหลาย map เข้าเป็นก้อนเดียว โดย argument ที่มาทีหลัง override key จาก argument ก่อนหน้า `contains` เช็คว่ามีสมาชิกอยู่ใน list ไหมและคืนค่า boolean ธรรมดา `cidrsubnet(prefix, newbits, netnum)` คือตัวที่ควรจำให้แม่นสำหรับงาน networking บน GCP function นี้รับ CIDR block ตั้งต้น ขยาย prefix length ไปอีก `newbits` บิต แล้วคืน subnet ตัวที่ `netnum` ของขนาดใหม่นั้น — เหมาะเจาะพอดีสำหรับตัด `10.0.0.0/16` ของ VPC network ให้เป็น `/24` หลายชุดโดยไม่ต้องคำนวณ address เองด้วยมือ
 
 ## terraform console — REPL สำหรับทดลอง expression
 
@@ -58,7 +58,7 @@ terraform console
 "dev"
 ```
 
-นี่คือวิธีที่เร็วที่สุดในการตอบคำถาม "expression นี้ evaluate ออกมาเป็นอะไรกันแน่" — พิมพ์เข้าไป อ่านผลลัพธ์ แล้วค่อยเอา expression ที่ใช้ได้จริงไปวางในไฟล์ `.tf` มันเป็น read-only กับ infrastructure จริง `terraform console` อ่าน variable, local, และ state ที่มีอยู่ได้ แต่สร้าง เปลี่ยน หรือทำลายอะไรไม่ได้เลย
+นี่คือวิธีที่เร็วที่สุดในการตอบคำถาม "expression นี้ evaluate ออกมาเป็นอะไรกันแน่" — พิมพ์เข้าไป อ่านผลลัพธ์ แล้วค่อยเอา expression ที่ใช้ได้จริงไปวางในไฟล์ `.tf` คำสั่งนี้เป็น read-only กับ infrastructure จริง `terraform console` อ่าน variable, local, และ state ที่มีอยู่ได้ แต่สร้าง เปลี่ยน หรือทำลายอะไรไม่ได้เลย
 
 ## Conditional expression
 

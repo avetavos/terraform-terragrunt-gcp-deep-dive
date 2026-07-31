@@ -1,6 +1,6 @@
 ---
 title: 'Writing a Reusable Module'
-description: 'module คืออะไรกันแน่ ทำไม file layout ของมันถึงเหมือนกับ root configuration และวิธีออกแบบให้มี responsibility เดียวที่ชัดเจน'
+description: 'module คืออะไรกันแน่ ทำไม file layout ถึงเหมือนกับ root configuration และวิธีออกแบบให้มี responsibility เดียวที่ชัดเจน'
 sidebar:
   order: 1
 ---
@@ -10,13 +10,13 @@ import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-## The idea in one sentence
+## ไอเดียในหนึ่งประโยค
 
 **module** คือ directory ของไฟล์ `.tf` ธรรมดา — directory ที่คุณรัน `terraform apply` ตรง ๆ เรียกว่า **root module** ส่วน directory ไหนก็ตามที่ถูกเรียกผ่าน `module` block เรียกว่า **child module** ดังนั้นจึงไม่มีอะไรพิเศษเชิงโครงสร้างที่ทำให้ไฟล์กลุ่มหนึ่ง "เป็น module"
 
 ## ไม่มี keyword module — มีแค่วิธีใช้งาน
 
-จุดนี้มักทำให้คนงงตอนได้ยินครั้งแรก Terraform ไม่มีไฟล์พิเศษ ไม่มี `module.tf` ไม่มี marker วิเศษที่เปลี่ยน directory ให้กลายเป็น module ทุก directory ของไฟล์ `.tf` ที่คุณเคยเขียนก็คือ module อยู่แล้ว directory ที่คุณรัน `terraform init` กับ `terraform apply` ตรง ๆ เรียกว่า **root module** ทันทีที่คุณอ้างอิง directory อื่นที่มีไฟล์ `.tf` ผ่าน `module` block directory นั้นก็กลายเป็น **child module** — แต่ไฟล์ `.tf` ข้างในของมันก็หน้าตาเหมือนกับ root configuration ทุกประการ
+จุดนี้มักทำให้คนงงตอนได้ยินครั้งแรก Terraform ไม่มีไฟล์พิเศษ ไม่มี `module.tf` ไม่มี marker วิเศษที่เปลี่ยน directory ให้กลายเป็น module ทุก directory ของไฟล์ `.tf` ที่คุณเคยเขียนก็คือ module อยู่แล้ว directory ที่คุณรัน `terraform init` กับ `terraform apply` ตรง ๆ เรียกว่า **root module** ทันทีที่คุณอ้างอิง directory อื่นที่มีไฟล์ `.tf` ผ่าน `module` block directory นั้นก็กลายเป็น **child module** — แต่ไฟล์ `.tf` ข้างในก็หน้าตาเหมือนกับ root configuration ทุกประการ
 
 ```hcl
 # root main.tf — calling a child module
@@ -30,13 +30,13 @@ module "bucket" {
 
 ## ทำไม file layout ของ module ถึงเหมือน root config
 
-เพราะ module ก็คือ Terraform configuration ตัวหนึ่ง มันจึงตาม convention สามไฟล์เดียวกับที่คุณใช้กับ root config อยู่แล้ว แค่เปลี่ยนกลุ่มเป้าหมายไป:
+เพราะ module ก็คือ Terraform configuration ตัวหนึ่ง จึงตาม convention สามไฟล์เดียวกับที่คุณใช้กับ root config อยู่แล้ว แค่เปลี่ยนกลุ่มเป้าหมายไป:
 
-- **`variables.tf`** — input ของ module นี่คือ public API surface ของมัน คือสิ่งที่ caller ต้องหรืออาจส่งเข้ามา
+- **`variables.tf`** — input ของ module นี่คือ public API surface ของ module คือสิ่งที่ caller ต้องหรืออาจส่งเข้ามา
 - **`main.tf`** — resource ที่ module นี้จัดการจริง
-- **`outputs.tf`** — ค่าที่ module นี้ส่งกลับไปให้คนที่เรียกมันมา
+- **`outputs.tf`** — ค่าที่ module นี้ส่งกลับไปให้ผู้เรียกใช้
 
-ประเด็นนี้ควรจำให้ขึ้นใจ module ไม่ใช่ construct พิเศษสำหรับ templating ที่ซ้อนอยู่บน Terraform อีกที มันคือ Terraform configuration ธรรมดา ที่บังเอิญรับ parameter ผ่าน `variables.tf` ตอนเข้า และส่งค่าออกผ่าน `outputs.tf` ตอนออก
+ประเด็นนี้ควรจำให้ขึ้นใจ module ไม่ใช่ construct พิเศษสำหรับ templating ที่ซ้อนอยู่บน Terraform อีกที แต่คือ Terraform configuration ธรรมดา ที่บังเอิญรับ parameter ผ่าน `variables.tf` ตอนเข้า และส่งค่าออกผ่าน `outputs.tf` ตอนออก
 
 ```hcl
 # modules/gcs-bucket/variables.tf
@@ -85,12 +85,12 @@ output "logs_bucket_url" {
 
 ## ออกแบบ module ให้มี responsibility เดียวที่ชัดเจน
 
-ข้อผิดพลาดในการออกแบบ module ที่ใหญ่ที่สุดคือ scope creep — module ที่เริ่มจาก "VPC network" ตัวหนึ่ง ค่อย ๆ โตขึ้นมามี IAM binding ตรงนี้ มี Compute Engine instance ตรงนั้น มี Cloud Function ที่อื่นอีก จนไม่มีใครเอา module นี้ไปใช้ซ้ำกับงานอื่นได้เลยนอกจากงานเดิมที่มันถูกสร้างมา ควรเล็งไปที่ module ที่ทำงานเดียวและ scope ชัดเจน เช่น "VPC network ที่มี public/private subnet" ไม่ใช่ "networking, IAM และ compute ทั้งหมดของ GCP เรา"
+ข้อผิดพลาดในการออกแบบ module ที่ใหญ่ที่สุดคือ scope creep — module ที่เริ่มจาก "VPC network" ตัวหนึ่ง ค่อย ๆ โตขึ้นมามี IAM binding ตรงนี้ มี Compute Engine instance ตรงนั้น มี Cloud Function ที่อื่นอีก จนไม่มีใครเอา module นี้ไปใช้ซ้ำกับงานอื่นได้เลยนอกจากงานเดิมที่สร้างมาเพื่อสิ่งนั้น ควรเล็งไปที่ module ที่ทำงานเดียวและ scope ชัดเจน เช่น "VPC network ที่มี public/private subnet" ไม่ใช่ "networking, IAM และ compute ทั้งหมดของ GCP เรา"
 
 มีสองนิสัยเชิงปฏิบัติที่ช่วยให้ module reuse ได้จริง แทนที่จะเผลอ specific กับ caller คนเดียว:
 
-- **ตั้ง default ที่สมเหตุสมผลให้ input ที่เป็น optional** ถ้า caller ส่วนใหญ่ต้องการค่าเดียวกันสำหรับ input หนึ่ง ให้ตั้ง `default` ไว้ใน `variables.tf` เพื่อให้ caller ธรรมดาไม่ต้องระบุมันเลย
-- **อย่า over-parameterize ตั้งแต่วันแรก** มันน่าเผลอทำมาก ที่จะ expose ทุก field ของ resource ให้เป็น variable ไว้ก่อน "เผื่อไว้" แต่ทุก variable ที่เพิ่มเข้ามาคือส่วนหนึ่งของ public API ของ module ที่ถาวร ที่คุณต้องเขียนเอกสารและดูแลต่อไป ควรเพิ่ม input ตอนที่ caller จริง ๆ ต้องการความยืดหยุ่นนั้น ไม่ใช่เพิ่มไว้ล่วงหน้าสำหรับ caller สมมติ
+- **ตั้ง default ที่สมเหตุสมผลให้ input ที่เป็น optional** ถ้า caller ส่วนใหญ่ต้องการค่าเดียวกันสำหรับ input หนึ่ง ให้ตั้ง `default` ไว้ใน `variables.tf` เพื่อให้ caller ธรรมดาไม่ต้องระบุเลย
+- **อย่า over-parameterize ตั้งแต่วันแรก** น่าเผลอทำมาก ที่จะ expose ทุก field ของ resource ให้เป็น variable ไว้ก่อน "เผื่อไว้" แต่ทุก variable ที่เพิ่มเข้ามาคือส่วนหนึ่งของ public API ของ module ที่ถาวร ที่คุณต้องเขียนเอกสารและดูแลต่อไป ควรเพิ่ม input ตอนที่ caller จริง ๆ ต้องการความยืดหยุ่นนั้น ไม่ใช่เพิ่มไว้ล่วงหน้าสำหรับ caller สมมติ
 
 ```hcl
 # modules/gcs-bucket/variables.tf
@@ -106,7 +106,7 @@ variable "force_destroy" {
 }
 ```
 
-ในตัวอย่างนี้ `force_destroy` มี default ที่สมเหตุสมผล — caller ส่วนใหญ่ไม่ต้องแตะมันเลย — ในขณะที่ `bucket_name` ไม่มี default เพราะ caller แต่ละคนต้องการชื่อ bucket ที่ต่างกันจริง ๆ และไม่มี default ไหนที่เดาได้อย่างสมเหตุสมผล
+ในตัวอย่างนี้ `force_destroy` มี default ที่สมเหตุสมผล — caller ส่วนใหญ่ไม่ต้องแตะเลย — ส่วน `bucket_name` ไม่มี default เพราะ caller แต่ละคนต้องการชื่อ bucket ที่ต่างกันจริง ๆ และไม่มี default ไหนที่เดาได้อย่างสมเหตุสมผล
 
 <Mermaid title="A module directory called from a root configuration via a module block" code={gcsModuleAnatomyDiagram} />
 
@@ -122,7 +122,7 @@ export const gcsModuleAnatomyDiagram = `flowchart LR
   outs -->|module.bucket.url| rmain`;
 
 <Callout title="The one-line takeaway">
-**module** ก็แค่ directory ของไฟล์ `.tf` directory ที่คุณ `apply` ตรง ๆ เรียกว่า **root module** ส่วน directory ที่ถูกอ้างอิงผ่าน `module` block กลายเป็น **child module** — ไม่มี syntax พิเศษเกี่ยวข้องเลย เพราะ module คือ Terraform configuration เต็มรูปแบบ มันจึงตาม convention **`variables.tf` / `main.tf` / `outputs.tf`** เหมือน root config โดยที่ `variables.tf` ทำหน้าที่เป็น public input และ `outputs.tf` เป็นสิ่งที่ expose กลับให้ caller การออกแบบ module ที่ดีหมายถึง responsibility เดียวที่ชัดเจน มี **default** ที่สมเหตุสมผลสำหรับ input ที่เป็น optional และเพิ่ม variable ใหม่เฉพาะตอนที่ caller จริงต้องการความยืดหยุ่นนั้น ไม่ใช่ over-parameterize ไว้ล่วงหน้า
+**module** ก็แค่ directory ของไฟล์ `.tf` directory ที่คุณ `apply` ตรง ๆ เรียกว่า **root module** ส่วน directory ที่ถูกอ้างอิงผ่าน `module` block กลายเป็น **child module** — ไม่มี syntax พิเศษเกี่ยวข้องเลย เพราะ module คือ Terraform configuration เต็มรูปแบบ จึงตาม convention **`variables.tf` / `main.tf` / `outputs.tf`** เหมือน root config โดยที่ `variables.tf` ทำหน้าที่เป็น public input และ `outputs.tf` เป็นสิ่งที่ expose กลับให้ caller การออกแบบ module ที่ดีหมายถึง responsibility เดียวที่ชัดเจน มี **default** ที่สมเหตุสมผลสำหรับ input ที่เป็น optional และเพิ่ม variable ใหม่เฉพาะตอนที่ caller จริงต้องการความยืดหยุ่นนั้น ไม่ใช่ over-parameterize ไว้ล่วงหน้า
 </Callout>
 
 export const quizWritingReusableModule = [
@@ -160,7 +160,7 @@ export const quizWritingReusableModule = [
     q: 'ในตัวอย่าง gcs-bucket module ทำไม bucket_name ถึงไม่มี default แต่ force_destroy มี',
     options: [
       'เพราะ variable ประเภท string ตั้ง default ไม่ได้ใน Terraform',
-      'เพราะ caller แต่ละคนต้องการชื่อ bucket ที่ต่างกันจริง ๆ โดยไม่มี default ที่สมเหตุสมผล ในขณะที่ caller ส่วนใหญ่พอใจกับ behavior เดิมของ force_destroy',
+      'เพราะ caller แต่ละคนต้องการชื่อ bucket ที่ต่างกันจริง ๆ โดยไม่มี default ที่สมเหตุสมผล ส่วน caller ส่วนใหญ่พอใจกับ behavior เดิมของ force_destroy',
       'เพราะ outputs.tf ต้องมี variable อย่างน้อยหนึ่งตัวที่ไม่มี default',
       'เพราะ force_destroy เป็น required argument บน google_storage_bucket',
     ],

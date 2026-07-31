@@ -14,9 +14,9 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 การ ship Terraform กับ Terragrunt ขึ้น production บน GCP ไม่ใช่การตัดสินใจก้อนใหญ่ก้อนเดียว แต่เป็น checklist ของการตัดสินใจเล็ก ๆ หลายข้อ — แต่ละข้อครอบคลุมไปแล้วก่อนหน้านี้ในคอร์ส — ที่ต้องเป็นจริงพร้อมกันทั้งหมด
 
-## Checklist
+## เช็กลิสต์
 
-ไม่มีข้อไหนในนี้เป็นไอเดียใหม่เลยตอนนี้ สิ่งที่ใหม่คือการเห็นมันเรียงกันเป็นลิสต์เดียว เพราะความพร้อมสำหรับ production คือทุกข้อเป็นจริงพร้อม ๆ กัน ไม่ใช่ข้อใดข้อหนึ่งทำได้ดีเป็นพิเศษ
+ไม่มีข้อไหนในนี้เป็นไอเดียใหม่เลยตอนนี้ สิ่งที่ใหม่คือการเห็นทั้งหมดเรียงกันเป็นลิสต์เดียว เพราะความพร้อมสำหรับ production คือทุกข้อเป็นจริงพร้อม ๆ กัน ไม่ใช่ข้อใดข้อหนึ่งทำได้ดีเป็นพิเศษ
 
 - **remote GCS backend ที่มี locking ในตัวตั้งไว้ตั้งแต่วันแรก** บล็อก `backend "gcs"` ตั้งไว้ก่อน `apply` ครั้งแรก ไม่ใช่มาเพิ่มทีหลังหลังจาก state file เสียหายจนต้องแก้ปัญหาแบบเร่งด่วน GCS ไม่ต้องมี lock-table resource แยกต่างหาก locking เป็นส่วนหนึ่งของ backend อยู่แล้ว ครอบคลุมไว้ใน State Management
 - **provider กับ module version ต้อง pin ไว้ ไม่ปล่อยลอย** `.terraform.lock.hcl` ที่ commit ไว้ pin provider version กับ checksum ไว้แน่นอน module `source` reference ใช้ tag หรือ version constraint ที่ระบุไว้ชัด ไม่ใช่ชื่อ branch ที่เลื่อนไปเรื่อย ๆ ใต้เท้าคุณ ครอบคลุมไว้ใน Foundations กับ Modules
@@ -124,7 +124,7 @@ inputs = {
 
 ทุกชิ้นส่วนตรงนี้ย้อนกลับไปหาบทเรียนก่อนหน้าได้หมด GCS locking ในตัวคือเรื่อง locking ของ module State Management, `root.hcl` คู่กับ `include` คือ DRY backend pattern ของ Terragrunt Fundamentals, `dependency` block คือสิ่งที่ให้ `cloudsql` reference output จริงของ `vpc` ได้โดยไม่ต้องมีคนจำว่า unit ไหนต้อง apply ก่อน และ source `../../modules/cloudsql` ที่ pin ไว้กับ tag ใน repo จริง ไม่ปล่อยลอย คือวินัยเรื่อง versioning ของ Modules
 
-ทั้ง tree นี้ถูก ship ผ่าน CI/CD shape เดียวกับที่ผ่านมาใน module นี้เป๊ะ `terragrunt run --all plan` รันทุก pull request ที่แตะ `infra/` โพสต์ output ให้ review และ `terragrunt run --all apply` รันแค่หลัง merge เข้า main authenticate ผ่าน Workload Identity Federation ตัวเดียวกัน ไม่ใช่ key ที่ดาวน์โหลดมา ไม่มีอะไรตรงนี้เป็นกลไกใหม่เลย มันคือชิ้นส่วนเดียวกันจากทุก module ก่อนหน้า เอามาต่อกันเป็นระบบเดียวที่ deploy `vpc` แล้วตามด้วย `gke` กับ `cloudsql` ตามลำดับที่ `dependency` block บอกไว้ gate ด้วย plan ที่มีคนอ่านจริง ๆ
+ทั้ง tree นี้ถูก ship ผ่าน CI/CD shape เดียวกับที่ผ่านมาใน module นี้เป๊ะ `terragrunt run --all plan` รันทุก pull request ที่แตะ `infra/` โพสต์ output ให้ review และ `terragrunt run --all apply` รันแค่หลัง merge เข้า main authenticate ผ่าน Workload Identity Federation ตัวเดียวกัน ไม่ใช่ key ที่ดาวน์โหลดมา ไม่มีอะไรตรงนี้เป็นกลไกใหม่เลย ทั้งหมดคือชิ้นส่วนเดียวกันจากทุก module ก่อนหน้า เอามาต่อกันเป็นระบบเดียวที่ deploy `vpc` แล้วตามด้วย `gke` กับ `cloudsql` ตามลำดับที่ `dependency` block บอกไว้ gate ด้วย plan ที่มีคนอ่านจริง ๆ
 
 <Mermaid title="root.hcl บวกกับสาม unit ที่พึ่งพากัน ship ผ่าน CI pipeline ที่ gate ทั้ง plan และ apply" code={productionRepoDiagram} />
 
@@ -142,7 +142,7 @@ export const productionRepoDiagram = `flowchart TB
   apply --> cloudsql`;
 
 <Callout title="สรุปหนึ่งบรรทัด">
-ความพร้อมสำหรับ production คือ **checklist** ไม่ใช่การตัดสินใจข้อเดียว มี GCS backend ที่มี locking ในตัวตั้งแต่วันแรก, provider กับ module version ที่ pin ไว้, ทุก `plan` ถูก review ใน CI หา replacement ที่ไม่คาดคิด, secret ไม่อยู่ใน variable และ state เท่าที่ทำได้โดยมี IAM จำกัดสิทธิ์ state bucket แน่นหนา, `tflint`/scanner/policy-as-code ต่อเข้ากับ CI, `dependency` block ของ Terragrunt ขับลำดับ rollout แทนความจำของคน และ `terraform test` ครอบคลุม module ที่ไม่ trivial เอามารวมกันแล้วมันคือระบบเดียวที่เชื่อมกันหมด backend ที่ใช้ร่วมกันผ่าน **`root.hcl`**, หลาย unit ต่อกันด้วย `dependency` block, ship ผ่าน pipeline ที่รัน `terragrunt run --all plan` ทุก pull request และ `terragrunt run --all apply` แค่หลัง merge เท่านั้น ไม่ใช่กองข้อเท็จจริงแยกกัน
+ความพร้อมสำหรับ production คือ **checklist** ไม่ใช่การตัดสินใจข้อเดียว มี GCS backend ที่มี locking ในตัวตั้งแต่วันแรก, provider กับ module version ที่ pin ไว้, ทุก `plan` ถูก review ใน CI หา replacement ที่ไม่คาดคิด, secret ไม่อยู่ใน variable และ state เท่าที่ทำได้โดยมี IAM จำกัดสิทธิ์ state bucket แน่นหนา, `tflint`/scanner/policy-as-code ต่อเข้ากับ CI, `dependency` block ของ Terragrunt ขับลำดับ rollout แทนความจำของคน และ `terraform test` ครอบคลุม module ที่ไม่ trivial เอามารวมกันแล้วคือระบบเดียวที่เชื่อมกันหมด backend ที่ใช้ร่วมกันผ่าน **`root.hcl`**, หลาย unit ต่อกันด้วย `dependency` block, ship ผ่าน pipeline ที่รัน `terragrunt run --all plan` ทุก pull request และ `terragrunt run --all apply` แค่หลัง merge เท่านั้น ไม่ใช่กองข้อเท็จจริงแยกกัน
 </Callout>
 
 export const quizProductionChecklist = [
@@ -170,7 +170,7 @@ export const quizProductionChecklist = [
     q: 'ทำไม dependency block ของ Terragrunt ถึงสำคัญสำหรับการ rollout แบบหลาย unit แทนที่จะพึ่ง engineer apply unit ตามลำดับที่ถูกต้องด้วยมือ',
     options: [
       'dependency block เป็นแค่ของตกแต่งเฉย ๆ ไม่มีผลต่อลำดับ apply จริง',
-      'มันให้ unit หนึ่ง reference output จริงที่คำนวณแล้วของอีก unit ได้ตรง ๆ และขับลำดับ apply ให้อัตโนมัติ แทนที่จะพึ่งคนจำว่า vpc ต้อง apply ก่อน cloudsql',
+      'ทำให้ unit หนึ่ง reference output จริงที่คำนวณแล้วของอีก unit ได้ตรง ๆ และขับลำดับ apply ให้อัตโนมัติ แทนที่จะพึ่งคนจำว่า vpc ต้อง apply ก่อน cloudsql',
       'dependency block แทนที่ความจำเป็นของ remote backend ได้ทั้งหมด',
       'dependency block ทำงานได้แค่ภายในไฟล์ terragrunt.hcl เดียว ไม่ข้าม unit',
     ],

@@ -12,17 +12,17 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 ## ไอเดียในหนึ่งประโยค
 
-`dependency` block ทำให้ unit หนึ่งอ่าน output ของอีก unit ได้ แม้ทั้งสอง unit จะมี Terraform state แยกกันคนละก้อนเลย และ `mock_outputs` ทำให้ unit ที่พึ่งพานั้น `plan` ได้ก่อนที่ unit ที่มันพึ่งพาจะถูก apply จริง
+`dependency` block ทำให้ unit หนึ่งอ่าน output ของอีก unit ได้ แม้ทั้งสอง unit จะมี Terraform state แยกกันคนละก้อนเลย และ `mock_outputs` ทำให้ unit ที่พึ่งพานั้น `plan` ได้ก่อนที่จะ apply unit ที่พึ่งพาจริง
 
 ## ข้าม state boundary: ทำไม module composition ยังไม่พอ
 
-ใน module Modules คุณเคยเห็น output ของ Terraform module หนึ่งไหลตรงเข้าไปเป็น input ของอีก module หนึ่ง `network_id` ที่มาจาก `vpc` module ถูกส่งเป็น argument เข้า `compute` module ทั้งสองต่อกันอยู่ใน `main.tf` เดียวกัน apply พร้อมกันเป็น `terraform apply` ครั้งเดียวกับ state ไฟล์เดียว composition แบบนี้ทำงานได้เพราะทั้งสอง module อยู่ใน Terraform run เดียวกัน Terraform เห็น dependency graph ทั้งหมดและ resolve มันได้ในรอบเดียว
+ใน module Modules คุณเคยเห็น output ของ Terraform module หนึ่งไหลตรงเข้าไปเป็น input ของอีก module หนึ่ง `network_id` ที่มาจาก `vpc` module ถูกส่งเป็น argument เข้า `compute` module ทั้งสองต่อกันอยู่ใน `main.tf` เดียวกัน apply พร้อมกันเป็น `terraform apply` ครั้งเดียวกับ state ไฟล์เดียว composition แบบนี้ทำงานได้เพราะทั้งสอง module อยู่ใน Terraform run เดียวกัน Terraform เห็น dependency graph ทั้งหมดและ resolve ได้ในรอบเดียว
 
 Terragrunt unit ตั้งใจทำลายสมมติฐานนั้น unit `vpc` กับ unit `compute` มี `terragrunt.hcl` ของตัวเอง มี state ไฟล์ของตัวเอง และมี `terraform apply` อิสระของตัวเอง ไม่มีอะไรใน Terraform `module` block ธรรมดาที่เอื้อมข้าม boundary นี้ได้ เพราะในมุมมองของ Terraform run ของแต่ละ unit เอง resource ของอีก unit ไม่มีอยู่จริงเลย การเชื่อม network ของ unit `vpc` เข้ากับ unit `compute` จึงต้องใช้กลไกที่สร้างมาเพื่อช่องว่างนี้โดยเฉพาะ นั่นคือ `dependency` block
 
 ## dependency block: อ่าน output ของ unit อื่น
 
-`dependency` block เรียกชื่อ unit อื่นด้วย directory ของมัน แล้ว expose output ของ unit นั้นเป็นค่าที่ unit นี้ใช้ตรง ๆ ใน `inputs` ของตัวเองได้เลย
+`dependency` block เรียกชื่อ unit อื่นด้วย directory ของ unit นั้น แล้ว expose output ของ unit นั้นเป็นค่าที่ unit นี้ใช้ตรง ๆ ใน `inputs` ของตัวเองได้เลย
 
 ```hcl
 # compute/terragrunt.hcl
@@ -57,7 +57,7 @@ inputs = {
 
 ## ลำดับ apply: คำนวณอัตโนมัติจาก dependency block
 
-เพราะ `dependency` block เรียกชื่อ unit อื่นตรง ๆ Terragrunt จึงเห็น graph ทั้งหมดว่า unit ไหนพึ่งพา unit ไหน ทั่วทั้ง directory tree เวลาคุณรัน operation กับหลาย unit พร้อมกัน ซึ่งเป็นหัวข้อของบทถัดไป Terragrunt ใช้ graph นั้นคำนวณลำดับที่ถูกต้องเอง unit `vpc` ถูก apply ก่อน unit `compute` ที่อ่าน output ของมัน โดยไม่มีใครต้อง hard-code ลำดับนั้นหรือคอยจำว่าต้องรัน unit ไหนก่อนหลังเอง
+เพราะ `dependency` block เรียกชื่อ unit อื่นตรง ๆ Terragrunt จึงเห็น graph ทั้งหมดว่า unit ไหนพึ่งพา unit ไหน ทั่วทั้ง directory tree เวลาคุณรัน operation กับหลาย unit พร้อมกัน ที่เป็นหัวข้อของบทถัดไป Terragrunt ใช้ graph นั้นคำนวณลำดับที่ถูกต้องเอง unit `vpc` ถูก apply ก่อน unit `compute` ที่อ่าน output โดยไม่มีใครต้อง hard-code ลำดับนั้นหรือคอยจำว่าต้องรัน unit ไหนก่อนหลังเอง
 
 <Mermaid title="output ของ unit vpc ไหลเข้า dependency block และ inputs ของ unit compute" code={dependencyDiagram} />
 
@@ -67,7 +67,7 @@ export const dependencyDiagram = `flowchart LR
   mock["mock_outputs: network_id = mock-network-id"] -.->|used only for plan, before vpc is applied| dep`;
 
 <Callout title="สรุปหนึ่งบรรทัด">
-`dependency "vpc" { config_path = "../vpc" }` block คือวิธีที่ unit หนึ่งอ่าน output ของอีก unit เป็น `dependency.vpc.outputs.<name>` ข้าม state boundary ที่ module composition ธรรมดาของ Terraform ข้ามไม่ได้ แล้วส่งค่านั้นตรงเข้า `inputs` ของ unit ที่อ่านมัน `mock_outputs` ที่ scope ด้วย `mock_outputs_allowed_terraform_commands` ทำให้ `plan` บน unit ที่พึ่งพาสำเร็จได้ก่อนที่ unit ที่มันพึ่งพาจะถูก apply จริง ในขณะที่ `apply` จริงยังต้องการ output จริงอยู่ดี เพราะทุก `dependency` block เรียกชื่อ unit ที่มันพึ่งพาตรง ๆ Terragrunt จึงคำนวณลำดับ apply ที่ถูกต้องทั่วทั้ง tree ของ unit ได้เอง โดยไม่มีใครต้อง hard-code ลำดับนั้น
+`dependency "vpc" { config_path = "../vpc" }` block คือวิธีที่ unit หนึ่งอ่าน output ของอีก unit เป็น `dependency.vpc.outputs.<name>` ข้าม state boundary ที่ module composition ธรรมดาของ Terraform ข้ามไม่ได้ แล้วส่งค่านั้นตรงเข้า `inputs` ของ unit ที่อ่านค่า `mock_outputs` ที่ scope ด้วย `mock_outputs_allowed_terraform_commands` ทำให้ `plan` บน unit ที่พึ่งพาสำเร็จได้ก่อนที่จะ apply unit ที่พึ่งพาจริง ส่วน `apply` จริงยังต้องการ output จริงอยู่ดี เพราะทุก `dependency` block เรียกชื่อ unit ที่พึ่งพาตรง ๆ Terragrunt จึงคำนวณลำดับ apply ที่ถูกต้องทั่วทั้ง tree ของ unit ได้เอง โดยไม่มีใครต้อง hard-code ลำดับนั้น
 </Callout>
 
 export const quizDependency = [
@@ -85,7 +85,7 @@ export const quizDependency = [
     q: 'mock_outputs ใน dependency block มีไว้ทำอะไร',
     options: [
       'แทนที่ output จริงถาวรแม้หลัง apply แล้ว',
-      'ให้ค่า placeholder เพื่อให้ command อย่าง plan สำเร็จได้ก่อนที่ unit ที่พึ่งพาจะถูก apply จริง',
+      'ให้ค่า placeholder เพื่อให้ command อย่าง plan สำเร็จได้ก่อนที่จะ apply unit ที่พึ่งพาจริง',
       'ข้าม dependency block ไปทั้งหมดตอน apply',
       'generate ไฟล์ backend.tf ให้ dependency',
     ],
@@ -96,7 +96,7 @@ export const quizDependency = [
     options: [
       'apply unit ตามลำดับตัวอักษรของชื่อ directory เสมอ',
       'ต้องมีไฟล์ ordering แยกต่างหากที่ list ทุก unit เองด้วยมือ',
-      'สร้างลำดับจาก dependency block ที่แต่ละ unit ประกาศไว้ apply unit ที่ถูกพึ่งพาก่อน unit ที่อ่าน output ของมัน',
+      'สร้างลำดับจาก dependency block ที่แต่ละ unit ประกาศไว้ apply unit ที่ถูกพึ่งพาก่อน unit ที่อ่าน output นั้น',
       'apply ทุก unit พร้อมกันเป๊ะโดยไม่สนใจ dependency เลย',
     ],
     answer: 2,

@@ -16,7 +16,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 ## ประกาศ output block
 
-`output` block มีชื่อ, `value` expression, และเลือกใส่ `description` กับ `sensitive` ได้ หลัง `terraform apply` เสร็จ ทุก output ที่ประกาศไว้จะถูก print ออกมา และเรียกดูซ้ำได้ทีหลังโดยไม่ต้อง `apply` ใหม่
+`output` block มีชื่อ, `value` expression, และเลือกใส่ `description` กับ `sensitive` ได้ หลัง `terraform apply` เสร็จ ทุก output ที่ประกาศไว้จะ print ออกมา และเรียกดูซ้ำได้ทีหลังโดยไม่ต้อง `apply` ใหม่
 
 ```hcl
 resource "google_compute_instance" "web" {
@@ -64,11 +64,11 @@ terraform output instance_external_ip
 terraform output -json
 ```
 
-`terraform output -json` สำคัญกว่าที่ดูตอนแรก มันเปลี่ยน output ของเราให้เป็น structured data ที่ script อื่น, CI pipeline, หรือ wrapper tool อ่านต่อได้แน่นอน แทนที่จะไป parse ข้อความบน terminal ที่ format มาให้คนอ่าน `sensitive = true` บน `db_password` ทำงานเหมือนตอนอยู่บน `variable` เป๊ะ Terraform ซ่อนค่าใน `terraform output` และใน output ของ `apply` แต่ค่ายังถูกเขียนลง state file เป็น plain text อยู่ดี มันคือการป้องกันตอนแสดงผล ไม่ใช่ access control
+`terraform output -json` สำคัญกว่าที่ดูตอนแรก เพราะเปลี่ยน output ของเราให้เป็น structured data ที่ script อื่น, CI pipeline, หรือ wrapper tool อ่านต่อได้แน่นอน แทนที่จะไป parse ข้อความบน terminal ที่ format มาให้คนอ่าน `sensitive = true` บน `db_password` ทำงานเหมือนตอนอยู่บน `variable` เป๊ะ Terraform ซ่อนค่าใน `terraform output` และใน output ของ `apply` แต่ค่ายังถูกเขียนลง state file เป็น plain text อยู่ดี นี่คือการป้องกันตอนแสดงผล ไม่ใช่ access control
 
 ## locals — named value แบบที่สาม
 
-Terraform มี named value ที่ต่างกันสามแบบ และควรพูดให้ชัดว่าต่างกันตรงไหน `variable` ถูกตั้งค่าจากภายนอกโดยคนเรียก `output` ถูกเปิดเผยออกไปข้างนอกหลัง `apply` ส่วน `local` ไม่ใช่ทั้งสองแบบ มันคือ expression ที่มีชื่อ ถูกคำนวณครั้งเดียวภายใน configuration เพื่อไม่ต้องเขียน expression เดิมซ้ำใน resource block ห้าที่
+Terraform มี named value ที่ต่างกันสามแบบ และควรพูดให้ชัดว่าต่างกันตรงไหน `variable` ถูกตั้งค่าจากภายนอกโดยคนเรียก `output` ถูกเปิดเผยออกไปข้างนอกหลัง `apply` ส่วน `local` ไม่ใช่ทั้งสองแบบ แต่คือ expression ที่มีชื่อ ถูกคำนวณครั้งเดียวภายใน configuration เพื่อไม่ต้องเขียน expression เดิมซ้ำใน resource block ห้าที่
 
 ```hcl
 variable "environment" {
@@ -116,11 +116,11 @@ resource "google_storage_bucket" "assets" {
 }
 ```
 
-ถ้าไม่มี `local.name_prefix` กับ `local.common_labels` string interpolation `"${var.project_id}-${var.environment}"` เดิม กับ labels map เดิม ต้องพิมพ์ซ้ำในทุก resource ที่ต้องใช้ และถ้าต้องแก้ naming scheme ทีหลังก็ต้องไล่หาทุกจุดที่ copy ไว้ `locals` block ไม่ได้ให้ caller ตั้งค่าได้แบบ `variable` และไม่ได้มองเห็นจากภายนอก configuration แบบ `output` มันมีไว้แค่เก็บ expression ที่คำนวณแล้วให้อยู่จุดเดียว
+ถ้าไม่มี `local.name_prefix` กับ `local.common_labels` string interpolation `"${var.project_id}-${var.environment}"` เดิม กับ labels map เดิม ต้องพิมพ์ซ้ำในทุก resource ที่ต้องใช้ และถ้าต้องแก้ naming scheme ทีหลังก็ต้องไล่หาทุกจุดที่ copy ไว้ `locals` block ไม่ได้ให้ caller ตั้งค่าได้แบบ `variable` และไม่ได้มองเห็นจากภายนอก configuration แบบ `output` แต่มีไว้แค่เก็บ expression ที่คำนวณแล้วให้อยู่จุดเดียว
 
 ## output คือกลไกของการประกอบกัน
 
-ภายใน root configuration เดียว output ส่วนใหญ่เป็นแค่ข้อมูลไว้ดู เป็นวิธี print ค่าตอนจบของ `apply` หรือป้อนเข้า script ผ่าน `terraform output -json` ความสำคัญจริง ๆ ของมันจะเห็นชัดตอนเริ่มแยก infrastructure ออกเป็นชิ้นเล็ก ๆ ที่ manage แยกกัน
+ภายใน root configuration เดียว output ส่วนใหญ่เป็นแค่ข้อมูลไว้ดู เป็นวิธี print ค่าตอนจบของ `apply` หรือป้อนเข้า script ผ่าน `terraform output -json` ความสำคัญจริง ๆ จะเห็นชัดตอนเริ่มแยก infrastructure ออกเป็นชิ้นเล็ก ๆ ที่ manage แยกกัน
 
 เวลา Terraform module หนึ่งเรียกอีก module หนึ่ง module ที่เรียกจะอ่าน output ของ child module เพื่อส่งค่าเชื่อมกัน — `output "subnet_self_link"` ของ networking module กลายเป็น input ของ `variable "subnet"` ใน compute module บทเรื่อง Modules ในคอร์สนี้จะพูดถึงการประกอบกันแบบนี้ลึกกว่านี้ แนวคิดเดียวกันนี้เกิดขึ้นอีกทีในสเกลที่ใหญ่กว่าใน Terragrunt เช่นกัน Terragrunt unit ที่ apply แยกกันจะอ่าน output ของอีก unit หนึ่งผ่าน `dependency` block ทำให้ VPC ที่ deploy อยู่ใน directory หนึ่งส่งชื่อ network ให้ database ที่ deploy อยู่คนละ directory ได้ โดยไม่ต้องมี Terraform state ร่วมกันเลย output คือสิ่งที่ทำให้การประกอบทั้งสองแบบนี้เป็นไปได้ — ถ้าไม่มี output ที่ประกาศไว้ชัดเจนและ stable ก็ไม่มีอะไรให้ module หรือ unit ที่ consume อ่านได้
 
@@ -135,7 +135,7 @@ export const outputsLocalsDiagram = `flowchart LR
   o --> ext["Consumed by another module or a Terragrunt dependency block"]`;
 
 <Callout title="The one-line takeaway">
-**`output`** block เปิดเผยค่าหลัง `apply` — ดูได้ด้วย `terraform output`, `terraform output <name>`, หรืออ่านแบบ machine-readable ผ่าน `terraform output -json` และซ่อนจาก CLI display ได้ด้วย `sensitive = true` (ค่ายังลง state อยู่ดี) **`locals`** block คือ named value แบบที่สามใน Terraform ต่างจาก `variable` ตรงที่ caller ตั้งค่าเองไม่ได้ และต่างจาก `output` ตรงที่ไม่ได้เปิดเผยออกไปข้างนอก มันแค่คำนวณ expression ครั้งเดียวเพื่อไม่ต้องเขียนซ้ำในหลาย resource output สำคัญเกินขอบเขต root configuration เดียว เพราะมันคือกลไกที่ทำให้ module หนึ่งหรือ Terragrunt unit ที่ apply แยกกันหนึ่งส่งค่าเข้าไปอีกอันหนึ่งได้
+**`output`** block เปิดเผยค่าหลัง `apply` — ดูได้ด้วย `terraform output`, `terraform output <name>`, หรืออ่านแบบ machine-readable ผ่าน `terraform output -json` และซ่อนจาก CLI display ได้ด้วย `sensitive = true` (ค่ายังลง state อยู่ดี) **`locals`** block คือ named value แบบที่สามใน Terraform ต่างจาก `variable` ตรงที่ caller ตั้งค่าเองไม่ได้ และต่างจาก `output` ตรงที่ไม่ได้เปิดเผยออกไปข้างนอก แค่คำนวณ expression ครั้งเดียวเพื่อไม่ต้องเขียนซ้ำในหลาย resource output สำคัญเกินขอบเขต root configuration เดียว เพราะเป็นกลไกที่ทำให้ module หนึ่งหรือ Terragrunt unit ที่ apply แยกกันหนึ่งส่งค่าเข้าไปอีกอันหนึ่งได้
 </Callout>
 
 export const quizOutputsLocals = [

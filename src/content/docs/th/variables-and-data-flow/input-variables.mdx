@@ -73,9 +73,9 @@ variable "db_password" {
 }
 ```
 
-`object({...})` ควรพูดถึงแยกไว้ต่างหาก มันเป็น structure ที่มี type และรูปร่างตายตัว ทุก key ที่ list ไว้ต้อง required (เว้นแต่จะใส่ default ผ่าน `optional()`) และ Terraform ปฏิเสธค่าที่ caller ส่งมาผิดรูปร่างตั้งแต่ตอน plan ก่อนที่จะไปเรียก GCP API เลยด้วยซ้ำ
+`object({...})` ควรพูดถึงแยกไว้ต่างหาก เป็น structure ที่มี type และรูปร่างตายตัว ทุก key ที่ list ไว้ต้อง required (เว้นแต่จะใส่ default ผ่าน `optional()`) และ Terraform ปฏิเสธค่าที่ caller ส่งมาผิดรูปร่างตั้งแต่ตอน plan ก่อนที่จะไปเรียก GCP API เลยด้วยซ้ำ
 
-`sensitive = true` บน `db_password` มีผลแค่กับการ **แสดงผล** เท่านั้น Terraform จะซ่อนค่าใน output ของ `plan`/`apply` และใน CLI ให้เป็น `(sensitive value)` แต่มันไม่ได้เข้ารหัสหรือตัดค่าออกจาก state file — module เรื่อง state management พูดไปแล้วว่า state เก็บทุก attribute ของทุก resource ที่ manage อยู่เป็น plain text ในไฟล์ JSON รวมถึงค่าที่มาจาก sensitive variable ด้วย ให้มอง `sensitive = true` เป็นแค่การป้องกันตอนแสดงผลบน terminal กับ CI log ไม่ใช่ตัวแทนของ remote backend ที่ควบคุม access ได้ดีอยู่แล้ว
+`sensitive = true` บน `db_password` มีผลแค่กับการ **แสดงผล** เท่านั้น Terraform จะซ่อนค่าใน output ของ `plan`/`apply` และใน CLI ให้เป็น `(sensitive value)` แต่ไม่ได้เข้ารหัสหรือตัดค่าออกจาก state file — module เรื่อง state management พูดไปแล้วว่า state เก็บทุก attribute ของทุก resource ที่ manage อยู่เป็น plain text ในไฟล์ JSON รวมถึงค่าที่มาจาก sensitive variable ด้วย ให้มอง `sensitive = true` เป็นแค่การป้องกันตอนแสดงผลบน terminal กับ CI log ไม่ใช่ตัวแทนของ remote backend ที่ควบคุม access ได้ดีอยู่แล้ว
 
 ## ตรวจสอบ variable ด้วย validation block
 
@@ -103,7 +103,7 @@ variable "environment" {
 }
 ```
 
-ถ้าไม่มี `validation` block แรก การส่ง `zone = "not-a-real-zone"` จะผ่าน `terraform plan` ไปเฉย ๆ แล้วไปพังตอน Terraform เรียก Google provider จริง ๆ เพื่อสร้าง resource ใน zone นั้น — feedback loop ช้ากว่ามาก และ error message ก็เฉพาะเจาะจงน้อยกว่า "zone must look like a GCP zone" มาก `can()` ที่ wrap ไว้ทำหน้าที่แปลง error จาก `regex()` ให้กลายเป็น `false` แทนที่จะ error ตรง ๆ ซึ่งตรงกับสิ่งที่ `condition` expression ต้องการพอดี — มันต้อง evaluate ออกมาเป็น `true` หรือ `false` เสมอ ห้าม raise error
+ถ้าไม่มี `validation` block แรก การส่ง `zone = "not-a-real-zone"` จะผ่าน `terraform plan` ไปเฉย ๆ แล้วไปพังตอน Terraform เรียก Google provider จริง ๆ เพื่อสร้าง resource ใน zone นั้น — feedback loop ช้ากว่ามาก และ error message ก็เฉพาะเจาะจงน้อยกว่า "zone must look like a GCP zone" มาก `can()` ที่ wrap ไว้ทำหน้าที่แปลง error จาก `regex()` ให้กลายเป็น `false` แทนที่จะ error ตรง ๆ ซึ่งตรงกับสิ่งที่ `condition` expression ต้องการพอดี เพราะต้อง evaluate ออกมาเป็น `true` หรือ `false` เสมอ ห้าม raise error
 
 ## ตั้งค่า variable และใครชนะ
 
@@ -127,7 +127,7 @@ export TF_VAR_zone="us-east1-b"
 terraform apply
 ```
 
-ถ้า `zone` ถูกตั้งไว้ใน `terraform.tfvars`, ตั้งอีกทีใน `prod.auto.tfvars`, แล้วตั้งอีกทีผ่าน `-var` บน command line ค่าจาก `-var` จะชนะ Terraform ไม่ได้ merge ค่าแบบ scalar ข้ามแหล่งกัน มันเลือกแหล่งที่ priority สูงสุดที่มีค่าอยู่เท่านั้น collection type อย่าง map กับ object เป็นข้อยกเว้นที่ควรจำไว้สำหรับบทหลัง ๆ — เครื่องมือบางตัว merge ค่าที่ nested กันแทนที่จะ override ทั้งก้อน แต่สำหรับแหล่งข้อมูลปกติข้างบนนี้ ค่าที่ประกาศไว้ในแหล่งที่ priority สูงกว่าจะแทนที่ค่าจากแหล่งที่ priority ต่ำกว่าไปเลยสำหรับ variable ตัวนั้น
+ถ้า `zone` ถูกตั้งไว้ใน `terraform.tfvars`, ตั้งอีกทีใน `prod.auto.tfvars`, แล้วตั้งอีกทีผ่าน `-var` บน command line ค่าจาก `-var` จะชนะ Terraform ไม่ได้ merge ค่าแบบ scalar ข้ามแหล่งกัน แต่เลือกแหล่งที่ priority สูงสุดที่มีค่าอยู่เท่านั้น collection type อย่าง map กับ object เป็นข้อยกเว้นที่ควรจำไว้สำหรับบทหลัง ๆ — เครื่องมือบางตัว merge ค่าที่ nested กันแทนที่จะ override ทั้งก้อน แต่สำหรับแหล่งข้อมูลปกติข้างบนนี้ ค่าที่ประกาศไว้ในแหล่งที่ priority สูงกว่าจะแทนที่ค่าจากแหล่งที่ priority ต่ำกว่าไปเลยสำหรับ variable ตัวนั้น
 
 <Mermaid title="Multiple value sources resolve to one value per variable, by precedence" code={precedenceDiagram} />
 
@@ -169,7 +169,7 @@ export const quizInputVariables = [
     options: [
       'ลบค่าออกจาก state file ไปเลย',
       'ซ่อนค่าจาก output ของ plan และ apply บน CLI แต่ค่ายังถูกเก็บเป็น plain text ใน state',
-      'เข้ารหัสค่าทุกที่ที่มันปรากฏ รวมถึงใน state',
+      'เข้ารหัสค่าทุกที่ที่ปรากฏ รวมถึงใน state',
       'ห้ามนำค่านั้นไปใช้ใน resource argument ใด ๆ',
     ],
     answer: 1,

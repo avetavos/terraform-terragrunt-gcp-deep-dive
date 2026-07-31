@@ -12,13 +12,13 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 ## ไอเดียในหนึ่งประโยค
 
-ติดตั้ง Terraform ผ่าน version manager แทนที่จะ pin binary เดียวไว้ตายตัว เขียน GCP resource จริงตัวแรก แล้วแยกมันออกเป็นไฟล์หลายไฟล์ตามชื่อที่เป็นธรรมเนียม — ซึ่งจริง ๆ แล้ว Terraform ไม่ได้บังคับสักไฟล์เดียว
+ติดตั้ง Terraform ผ่าน version manager แทนที่จะ pin binary เดียวไว้ตายตัว เขียน GCP resource จริงตัวแรก แล้วแยกออกเป็นไฟล์หลายไฟล์ตามชื่อที่เป็นธรรมเนียม — ซึ่งจริง ๆ แล้ว Terraform ไม่ได้บังคับสักไฟล์เดียว
 
 ## ติดตั้ง Terraform (และทำไม version manager ดีกว่า binary เดียว)
 
-คุณดาวน์โหลด Terraform binary เดียวจาก HashiCorp มาวางไว้ใน `PATH` ได้ และมันก็ใช้งานได้ดีถ้าทดลองอยู่คนเดียวโปรเจกต์เดียว แต่พอต้องทำงานมากกว่าหนึ่งโปรเจกต์ วิธีนี้จะเริ่มมีปัญหา repository หนึ่งเขียนไว้กับ Terraform 1.5 อีกอันต้องการ feature ของ 1.9 ส่วนอีกอันย้ายไป OpenTofu แล้ว การคอยสลับ binary กลาง (global) ตัวเดียวให้ตรงกับโปรเจกต์ที่กำลังทำอยู่ตลอดเวลาเป็นงานที่น่าเบื่อและพลาดง่าย
+คุณดาวน์โหลด Terraform binary เดียวจาก HashiCorp มาวางไว้ใน `PATH` ได้ และก็ใช้งานได้ดีถ้าทดลองอยู่คนเดียวโปรเจกต์เดียว แต่พอต้องทำงานมากกว่าหนึ่งโปรเจกต์ วิธีนี้จะเริ่มมีปัญหา repository หนึ่งเขียนไว้กับ Terraform 1.5 อีกอันต้องการ feature ของ 1.9 ส่วนอีกอันย้ายไป OpenTofu แล้ว การคอยสลับ binary กลาง (global) ตัวเดียวให้ตรงกับโปรเจกต์ที่กำลังทำอยู่ตลอดเวลาเป็นงานที่น่าเบื่อและพลาดง่าย
 
-**version manager** แก้ปัญหานี้ด้วยการติดตั้งหลายเวอร์ชันเก็บไว้คู่กัน แล้วสลับใช้ทีละโปรเจกต์ โดยมักอิงจาก version file ที่ commit ไว้ใน repository **tenv** เป็นตัวเลือกที่ดีเพราะมันไม่ได้ผูกกับเครื่องมือตัวเดียว มันจัดการ Terraform, OpenTofu, Terragrunt และ Atmos ได้จาก CLI ตัวเดียว ซึ่งสำคัญมากเมื่อทีมของคุณใช้ Terragrunt คู่กับ Terraform (จะพูดถึงในคอร์สนี้ตอนหลัง)
+**version manager** แก้ปัญหานี้ด้วยการติดตั้งหลายเวอร์ชันเก็บไว้คู่กัน แล้วสลับใช้ทีละโปรเจกต์ โดยมักอิงจาก version file ที่ commit ไว้ใน repository **tenv** เป็นตัวเลือกที่ดีเพราะไม่ได้ผูกกับเครื่องมือตัวเดียว จัดการ Terraform, OpenTofu, Terragrunt และ Atmos ได้จาก CLI ตัวเดียว ซึ่งสำคัญมากเมื่อทีมของคุณใช้ Terragrunt คู่กับ Terraform (จะพูดถึงในคอร์สนี้ตอนหลัง)
 
 ```bash
 # install tenv (macOS, via Homebrew)
@@ -62,7 +62,7 @@ resource "google_storage_bucket" "reports" {
 }
 ```
 
-นี่คือ configuration ที่สมบูรณ์และ apply ได้ทันที ไม่ต้องมี VPC ไม่ต้องมี networking ไม่มีข้อกำหนดล่วงหน้าอะไรเลยนอกจาก GCP credentials ในเครื่อง (Application Default Credentials ตั้งค่าด้วย `gcloud auth application-default login`) `google_storage_bucket` เป็น resource แรกที่ดีด้วยเหตุผลนี้เป๊ะ ๆ เพราะมันไม่ต้องพึ่งอะไรที่ต้องมีอยู่ก่อนเลย
+นี่คือ configuration ที่สมบูรณ์และ apply ได้ทันที ไม่ต้องมี VPC ไม่ต้องมี networking ไม่มีข้อกำหนดล่วงหน้าอะไรเลยนอกจาก GCP credentials ในเครื่อง (Application Default Credentials ตั้งค่าด้วย `gcloud auth application-default login`) `google_storage_bucket` เป็น resource แรกที่ดีด้วยเหตุผลนี้เป๊ะ ๆ เพราะไม่ต้องพึ่งอะไรที่ต้องมีอยู่ก่อนเลย
 
 ## การจัดไฟล์ตามธรรมเนียม
 
@@ -112,7 +112,7 @@ output "bucket_self_link" {
 }
 ```
 
-ชื่อ `main.tf`, `variables.tf`, `outputs.tf`, `providers.tf` และ `versions.tf` เป็น **ธรรมเนียม ไม่ใช่ข้อบังคับของ Terraform** Terraform ไม่ได้สนใจชื่อไฟล์เลยแม้แต่น้อย มันโหลดทุกไฟล์ `.tf` ใน directory มารวมกันเป็น configuration เดียว และไม่สนว่าคุณจะตั้งชื่อไฟล์ว่า `main.tf`, `zzz.tf` หรือ `whatever.tf` resource ที่อยู่ใน `outputs.tf` กับ variable ที่มันอ้างอิงถึงใน `main.tf` ทำงานเหมือนกันเป๊ะกับตอนที่ทุกอย่างอยู่ในไฟล์เดียว Terraform สร้าง dependency graph แบบเดียวกันเสมอไม่ว่าจะแยกไฟล์แบบไหน การแยกตามหน้าที่ (providers, variables, resources, outputs) มีไว้เพื่อให้คนที่เปิด directory ขึ้นมารู้ว่าต้องไปดูตรงไหนเท่านั้น ไม่ใช่เพราะ Terraform ต้องการเส้นแบ่งนั้น
+ชื่อ `main.tf`, `variables.tf`, `outputs.tf`, `providers.tf` และ `versions.tf` เป็น **ธรรมเนียม ไม่ใช่ข้อบังคับของ Terraform** Terraform ไม่ได้สนใจชื่อไฟล์เลยแม้แต่น้อย แต่โหลดทุกไฟล์ `.tf` ใน directory มารวมกันเป็น configuration เดียว และไม่สนว่าคุณจะตั้งชื่อไฟล์ว่า `main.tf`, `zzz.tf` หรือ `whatever.tf` resource ที่อยู่ใน `outputs.tf` กับ variable ที่อ้างอิงถึงใน `main.tf` ทำงานเหมือนกันเป๊ะกับตอนที่ทุกอย่างอยู่ในไฟล์เดียว Terraform สร้าง dependency graph แบบเดียวกันเสมอไม่ว่าจะแยกไฟล์แบบไหน การแยกตามหน้าที่ (providers, variables, resources, outputs) มีไว้เพื่อให้คนที่เปิด directory ขึ้นมารู้ว่าต้องไปดูตรงไหนเท่านั้น ไม่ใช่เพราะ Terraform ต้องการเส้นแบ่งนั้น
 
 <Mermaid title="Terraform โหลดทุกไฟล์ .tf ใน directory มารวมเป็น configuration เดียว" code={installDiagram} />
 
@@ -134,13 +134,13 @@ export const installDiagram = `flowchart TB
 
 มีสองคำสั่งที่ควรรันก่อน commit ทุกครั้ง และรันบ่อยแค่ไหนก็ไม่มีต้นทุนอะไรเลย
 
-`terraform fmt` เขียนไฟล์ทับในที่เดิมให้เป็น formatting มาตรฐานของ Terraform เช่น indentation ที่สม่ำเสมอ เครื่องหมาย `=` ที่จัดตำแหน่งตรงกัน spacing ที่สม่ำเสมอ มันแก้แค่ style ไม่ได้แก้ logic
+`terraform fmt` เขียนไฟล์ทับในที่เดิมให้เป็น formatting มาตรฐานของ Terraform เช่น indentation ที่สม่ำเสมอ เครื่องหมาย `=` ที่จัดตำแหน่งตรงกัน spacing ที่สม่ำเสมอ แก้แค่ style ไม่ได้แก้ logic
 
 ```bash
 terraform fmt
 ```
 
-`terraform validate` ตรวจว่า configuration สอดคล้องกันเองภายใน เช่น HCL syntax ที่ถูกต้อง argument ที่ type ตรง และ variable ที่ถูกอ้างอิงถึงมีอยู่จริง มันจับ typo และความผิดพลาดเชิงโครงสร้างได้ตั้งแต่ก่อนที่จะติดต่อ GCP ด้วยซ้ำ
+`terraform validate` ตรวจว่า configuration สอดคล้องกันเองภายใน เช่น HCL syntax ที่ถูกต้อง argument ที่ type ตรง และ variable ที่ถูกอ้างอิงถึงมีอยู่จริง จับ typo และความผิดพลาดเชิงโครงสร้างได้ตั้งแต่ก่อนที่จะติดต่อ GCP ด้วยซ้ำ
 
 ```bash
 terraform validate
@@ -150,10 +150,10 @@ terraform validate
 Success! The configuration is valid.
 ```
 
-สิ่งที่ `validate` **ไม่ได้ทำ** คือตรวจสอบอะไรกับ GCP API จริง มันไม่รู้เลยว่าโปรเจกต์ของคุณชน service quota หรือยัง ชื่อ bucket ที่คุณเลือกถูกใช้ไปแล้วทั่วโลกหรือเปล่า หรือ service account ของคุณมีสิทธิ์สร้าง resource นั้นจริงไหม ทั้งหมดนี้จะโผล่มาให้เห็นตอนรัน `terraform plan` เท่านั้น ซึ่งเป็นคำสั่งแรกที่ติดต่อกับ GCP จริง ๆ configuration ที่ผ่าน `validate` ได้อย่างสมบูรณ์ก็ยังพังตอน `plan` หรือ `apply` ได้อยู่ดี
+สิ่งที่ `validate` **ไม่ได้ทำ** คือตรวจสอบอะไรกับ GCP API จริง validate ไม่รู้เลยว่าโปรเจกต์ของคุณชน service quota หรือยัง ชื่อ bucket ที่คุณเลือกถูกใช้ไปแล้วทั่วโลกหรือเปล่า หรือ service account ของคุณมีสิทธิ์สร้าง resource นั้นจริงไหม ทั้งหมดนี้จะโผล่มาให้เห็นตอนรัน `terraform plan` เท่านั้น เพราะเป็นคำสั่งแรกที่ติดต่อกับ GCP จริง ๆ configuration ที่ผ่าน `validate` ได้อย่างสมบูรณ์ก็ยังพังตอน `plan` หรือ `apply` ได้อยู่ดี
 
 <Callout title="สรุปหนึ่งบรรทัด">
-ติดตั้ง Terraform ผ่าน **version manager** อย่าง `tenv` (ซึ่งจัดการ OpenTofu กับ Terragrunt ได้ด้วย) แทนที่จะ pin binary เดียวไว้ตายตัว โปรเจกต์จริงขนาดเล็กที่สุดคือแค่ `provider` block บวก resource หนึ่งตัวอย่าง `google_storage_bucket`; การแยกไฟล์ `main.tf` / `variables.tf` / `outputs.tf` / `providers.tf` / `versions.tf` เป็น **ธรรมเนียมของมนุษย์** — Terraform โหลดทุกไฟล์ `.tf` ใน directory มารวมเป็น configuration เดียวไม่ว่าชื่อไฟล์จะเป็นอะไรก็ตาม; และ `terraform fmt` (จัด formatting มาตรฐาน) กับ `terraform validate` (ตรวจ syntax และความสอดคล้องภายใน) เป็นนิสัยวันแรก ๆ ที่ทำง่ายและคุ้มค่า แต่ `validate` ไม่เคยติดต่อกับ GCP API จริง ดังนั้นมันจับ quota ที่เต็ม ชื่อ bucket ที่ถูกใช้ไปแล้ว หรือสิทธิ์ที่ขาดหายไปไม่ได้ นั่นคือหน้าที่ของ `plan`
+ติดตั้ง Terraform ผ่าน **version manager** อย่าง `tenv` (ที่จัดการ OpenTofu กับ Terragrunt ได้ด้วย) แทนที่จะ pin binary เดียวไว้ตายตัว โปรเจกต์จริงขนาดเล็กที่สุดคือแค่ `provider` block บวก resource หนึ่งตัวอย่าง `google_storage_bucket`; การแยกไฟล์ `main.tf` / `variables.tf` / `outputs.tf` / `providers.tf` / `versions.tf` เป็น **ธรรมเนียมของมนุษย์** — Terraform โหลดทุกไฟล์ `.tf` ใน directory มารวมเป็น configuration เดียวไม่ว่าชื่อไฟล์จะเป็นอะไรก็ตาม; และ `terraform fmt` (จัด formatting มาตรฐาน) กับ `terraform validate` (ตรวจ syntax และความสอดคล้องภายใน) เป็นนิสัยวันแรก ๆ ที่ทำง่ายและคุ้มค่า แต่ `validate` ไม่เคยติดต่อกับ GCP API จริง ดังนั้นจึงจับ quota ที่เต็ม ชื่อ bucket ที่ถูกใช้ไปแล้ว หรือสิทธิ์ที่ขาดหายไปไม่ได้ นั่นคือหน้าที่ของ `plan`
 </Callout>
 
 export const quizInstall = [

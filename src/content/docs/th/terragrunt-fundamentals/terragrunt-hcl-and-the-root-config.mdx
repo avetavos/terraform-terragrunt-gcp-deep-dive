@@ -16,19 +16,19 @@ Terragrunt **unit** คือ infrastructure ที่ deploy ได้หนึ
 
 ## unit ของ Terragrunt คืออะไรกันแน่
 
-ใน module ก่อนหน้านี้ (Modules) คุณเห็นแล้วว่า Terraform **root module** ก็คือ directory ที่คุณรัน `terraform apply` ตรง ๆ Terragrunt เอาไอเดียเดียวกันนี้มาใช้ แล้วตั้งชื่อใหม่ให้มันว่า **unit** unit คือ directory ที่มี `terragrunt.hcl` ของตัวเอง ห่อ Terraform root module หนึ่งตัวไว้ข้างใน และมี state file แยกของตัวเอง unit ชื่อ `network`, unit ชื่อ `gke`, และ unit ชื่อ `cloud-sql` คือ unit อิสระสามตัว มี directory สามอัน มี `terragrunt.hcl` สามไฟล์ มี state สามไฟล์ ทั้งที่ถ้าอยู่ในโลกของ Terraform โปรเจกต์เดียว คุณอาจเผลอจัดการ resource ทั้งสามตัวจาก root module เดียวและ state เดียวไปเลย
+ใน module ก่อนหน้านี้ (Modules) คุณเห็นแล้วว่า Terraform **root module** ก็คือ directory ที่คุณรัน `terraform apply` ตรง ๆ Terragrunt เอาไอเดียเดียวกันนี้มาใช้ แล้วตั้งชื่อใหม่ว่า **unit** unit คือ directory ที่มี `terragrunt.hcl` ของตัวเอง ห่อ Terraform root module หนึ่งตัวไว้ข้างใน และมี state file แยกของตัวเอง unit ชื่อ `network`, unit ชื่อ `gke`, และ unit ชื่อ `cloud-sql` คือ unit อิสระสามตัว มี directory สามอัน มี `terragrunt.hcl` สามไฟล์ มี state สามไฟล์ ทั้งที่ถ้าอยู่ในโลกของ Terraform โปรเจกต์เดียว คุณอาจเผลอจัดการ resource ทั้งสามตัวจาก root module เดียวและ state เดียวไปเลย
 
 การแบ่ง infrastructure เป็น unit แบบนี้คือ trade-off ที่ตั้งใจทำ state ที่เล็กลงและ apply แยกอิสระจากกันแปลว่าความผิดพลาดใน unit หนึ่งไม่ทำให้ state ของอีก unit เสียหรือถูก lock ไปด้วย และ `plan` ของ `gke` ก็ไม่ต้อง evaluate ทุก resource ใน `network` กับ `cloud-sql` แค่เพื่อบอกว่าอะไรเปลี่ยนไป ต้นทุนที่ต้องแลกคือ unit เหล่านี้ต้องมีวิธี share config ที่ยังใช้ร่วมกันอยู่ ซึ่งนั่นคือหน้าที่ของ `root.hcl` พอดี
 
 ## root.hcl: config ที่ทุก unit ยืนอยู่บน
 
-ลองนึกภาพ directory layout ที่มี config ไฟล์เดียวอยู่บนสุดของ project หรือ environment tree แล้วมี `terragrunt.hcl` อยู่ในทุก unit directory ข้างใต้มัน ไฟล์บนสุดนี้เมื่อก่อนก็ตั้งชื่อว่า `terragrunt.hcl` เหมือนกัน เพราะ Terragrunt ไม่เคยบังคับชื่อเฉพาะให้มัน การตั้งชื่อแบบนั้นก็ยังใช้ได้อยู่ทุกวันนี้ และ repository กับ tutorial เก่า ๆ จำนวนมากก็ยังใช้แบบนั้น แต่มันกำกวมทันทีที่มีคนพูดว่า "ไปดู terragrunt.hcl" เพราะไม่รู้ว่าหมายถึงไฟล์ root ที่ share กันหรือ unit เฉพาะที่กำลังยืนอยู่
+ลองนึกภาพ directory layout ที่มี config ไฟล์เดียวอยู่บนสุดของ project หรือ environment tree แล้วมี `terragrunt.hcl` อยู่ในทุก unit directory ข้างใต้ ไฟล์บนสุดนี้เมื่อก่อนก็ตั้งชื่อว่า `terragrunt.hcl` เหมือนกัน เพราะ Terragrunt ไม่เคยบังคับชื่อเฉพาะไว้ การตั้งชื่อแบบนั้นก็ยังใช้ได้อยู่ทุกวันนี้ และ repository กับ tutorial เก่า ๆ จำนวนมากก็ยังใช้แบบนั้น แต่กำกวมทันทีที่มีคนพูดว่า "ไปดู terragrunt.hcl" เพราะไม่รู้ว่าหมายถึงไฟล์ root ที่ share กันหรือ unit เฉพาะที่กำลังยืนอยู่
 
 convention ที่แนะนำตอนนี้เปลี่ยนมาตั้งชื่อไฟล์ parent ที่ share กันนี้ว่า `root.hcl` แทน เพื่อตัดความกำกวมนั้นออกไปตรง ๆ `root.hcl` คือไฟล์เดียวที่ share กันบนสุดอย่างไม่ต้องเดา ส่วน `terragrunt.hcl` คือ config เฉพาะของ unit นั้น ๆ อย่างชัดเจน คอร์สนี้ใช้ `root.hcl` ตลอดทั้งคอร์ส
 
 ## remote_state กับ generate: backend เดียว ไม่ต้อง copy-paste ทุก unit
 
-ทุก unit ต้องการ Terraform backend บน GCP เกือบทั้งหมดคือ Google Cloud Storage (GCS) bucket สำหรับเก็บ state file การประกาศ backend ด้วยมือในทุก ๆ unit คือความซ้ำซ้อนแบบที่ Terragrunt เกิดมาเพื่อกำจัดพอดี แทนที่จะทำแบบนั้น `root.hcl` ประกาศมันครั้งเดียวด้วย `remote_state` block และ `generate` sub-block ข้างในบอก Terragrunt ให้เขียนไฟล์ `backend.tf` ลงไปในทุก unit ก่อนที่ Terraform จะรันที่นั่น
+ทุก unit ต้องการ Terraform backend บน GCP เกือบทั้งหมดคือ Google Cloud Storage (GCS) bucket สำหรับเก็บ state file การประกาศ backend ด้วยมือในทุก ๆ unit คือความซ้ำซ้อนแบบที่ Terragrunt เกิดมาเพื่อกำจัดพอดี แทนที่จะทำแบบนั้น `root.hcl` ประกาศไว้ครั้งเดียวด้วย `remote_state` block และ `generate` sub-block ข้างในบอก Terragrunt ให้เขียนไฟล์ `backend.tf` ลงไปในทุก unit ก่อนที่ Terraform จะรันที่นั่น
 
 ```hcl
 # root.hcl
@@ -49,7 +49,7 @@ remote_state {
 }
 ```
 
-`path_relative_to_include()` ให้ `prefix` ที่ unique เฉพาะของแต่ละ unit ภายใน bucket เดียวกัน โดยอิงจากตำแหน่งของ unit นั้นเทียบกับไฟล์ที่ include มันเข้ามา ทำให้ unit `network` กับ unit `gke` ไปลง state path คนละที่กันโดยอัตโนมัติ โดยไม่มี unit ไหนต้องเขียน path นั้นตรง ๆ เอง `if_exists = "overwrite_terragrunt"` บอก Terragrunt ว่า overwrite `backend.tf` ที่มัน generate ไว้จาก run ก่อนหน้าได้อย่างปลอดภัย ต่างจาก backend ของ cloud อื่นบางเจ้า GCS ไม่ต้องมี lock-table argument แยกต่างหากเลย เพราะ GCS จัดการ state locking ให้เองอยู่แล้ว จึงไม่มี setting แบบ `dynamodb_table` ให้ต้องตั้งตรงนี้
+`path_relative_to_include()` ให้ `prefix` ที่ unique เฉพาะของแต่ละ unit ภายใน bucket เดียวกัน โดยอิงจากตำแหน่งของ unit นั้นเทียบกับไฟล์ที่ include เข้ามา ทำให้ unit `network` กับ unit `gke` ไปลง state path คนละที่กันโดยอัตโนมัติ โดยไม่มี unit ไหนต้องเขียน path นั้นตรง ๆ เอง `if_exists = "overwrite_terragrunt"` บอก Terragrunt ว่า overwrite `backend.tf` ที่ generate ไว้จาก run ก่อนหน้าได้อย่างปลอดภัย ต่างจาก backend ของ cloud อื่นบางเจ้า GCS ไม่ต้องมี lock-table argument แยกต่างหากเลย เพราะ GCS จัดการ state locking ให้เองอยู่แล้ว จึงไม่มี setting แบบ `dynamodb_table` ให้ต้องตั้งตรงนี้
 
 top-level `generate` block ก็ทำงานแบบเดียวกันกับ provider configuration มักวางไว้ข้าง ๆ `remote_state` ใน `root.hcl` นี่แหละ
 
@@ -66,11 +66,11 @@ EOF
 }
 ```
 
-ทั้งสอง block ผลิตไฟล์ `.tf` ธรรมดา คือ `backend.tf` กับ `provider.tf` วางอยู่ข้าง ๆ โค้ด Terraform จริงที่ Terragrunt รัน Terraform เองไม่รู้เลยว่าไฟล์พวกนี้ถูก generate มา จากมุมมองของมันคือ config ที่บังเอิญมีอยู่แล้วเฉย ๆ
+ทั้งสอง block ผลิตไฟล์ `.tf` ธรรมดา คือ `backend.tf` กับ `provider.tf` วางอยู่ข้าง ๆ โค้ด Terraform จริงที่ Terragrunt รัน Terraform เองไม่รู้เลยว่าไฟล์พวกนี้ถูก generate มา จากมุมมองของ Terraform คือ config ที่บังเอิญมีอยู่แล้วเฉย ๆ
 
-## `source` ใน `terraform` block: ชี้ unit ไปหา module ของมัน
+## `source` ใน `terraform` block: ชี้ unit ไปหา module ของตัวเอง
 
-`remote_state` กับ provider `generate` block อยู่ใน `root.hcl` เพราะทุก unit ใช้ร่วมกัน สิ่งที่ต่างกันในแต่ละ unit คือ module Terraform ตัวไหนที่มันรันจริง ๆ ซึ่งอยู่ใน `terragrunt.hcl` ของ unit นั้นเอง ข้างใน `terraform` block
+`remote_state` กับ provider `generate` block อยู่ใน `root.hcl` เพราะทุก unit ใช้ร่วมกัน สิ่งที่ต่างกันในแต่ละ unit คือ module Terraform ตัวไหนที่ unit นั้นรันจริง ๆ ซึ่งอยู่ใน `terragrunt.hcl` ของ unit นั้นเอง ข้างใน `terraform` block
 
 ```hcl
 # network/terragrunt.hcl
@@ -104,7 +104,7 @@ export const unitsDiagram = `flowchart TD
   sql -.->|inherits generated backend.tf + provider.tf| root`;
 
 <Callout title="สรุปหนึ่งบรรทัด">
-Terragrunt **unit** คือ directory เดียวที่มี `terragrunt.hcl` และ state ของตัวเอง ห่อ Terraform module ไว้หนึ่งตัว ส่วน shared parent config อยู่ชั้นบนขึ้นไปหนึ่งชั้น ตอนนี้ตั้งชื่อตาม convention ว่า **`root.hcl`** (ไม่ใช่ `terragrunt.hcl`) เพื่อไม่ให้สับสนระหว่าง "ไฟล์ root ที่ share กัน" กับ "ไฟล์ของ unit นี้เอง" โดยเฉพาะ repo เก่าที่ยังเรียกมันว่า `terragrunt.hcl` ก็ยังใช้งานได้ปกติ `root.hcl` ประกาศ `remote_state` block พร้อม `generate` sub-block ทำให้ทุก unit ได้ GCS **backend.tf** ที่เหมือนกันทุกตัว มาจากที่เดียวกัน (ไม่ต้องมี lock-table setting แยก) และผ่าน `generate "provider"` block ระดับบนสุด ก็ได้ **provider.tf** ด้วย แทนที่จะต้อง copy-paste boilerplate นี้ลงทุก unit เอง ส่วน `terragrunt.hcl` ของแต่ละ unit ก็เหลือแค่ต้องมี `terraform { source = ... }` block ชี้ไปที่ module จริงที่มันควรรัน
+Terragrunt **unit** คือ directory เดียวที่มี `terragrunt.hcl` และ state ของตัวเอง ห่อ Terraform module ไว้หนึ่งตัว ส่วน shared parent config อยู่ชั้นบนขึ้นไปหนึ่งชั้น ตอนนี้ตั้งชื่อตาม convention ว่า **`root.hcl`** (ไม่ใช่ `terragrunt.hcl`) เพื่อไม่ให้สับสนระหว่าง "ไฟล์ root ที่ share กัน" กับ "ไฟล์ของ unit นี้เอง" โดยเฉพาะ repo เก่าที่ยังเรียกว่า `terragrunt.hcl` ก็ยังใช้งานได้ปกติ `root.hcl` ประกาศ `remote_state` block พร้อม `generate` sub-block ทำให้ทุก unit ได้ GCS **backend.tf** ที่เหมือนกันทุกตัว มาจากที่เดียวกัน (ไม่ต้องมี lock-table setting แยก) และผ่าน `generate "provider"` block ระดับบนสุด ก็ได้ **provider.tf** ด้วย แทนที่จะต้อง copy-paste boilerplate นี้ลงทุก unit เอง ส่วน `terragrunt.hcl` ของแต่ละ unit ก็เหลือแค่ต้องมี `terraform { source = ... }` block ชี้ไปที่ module จริงที่ควรรัน
 </Callout>
 
 export const quizRootConfig = [

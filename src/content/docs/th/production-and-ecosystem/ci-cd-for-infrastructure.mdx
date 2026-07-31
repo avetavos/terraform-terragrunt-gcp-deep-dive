@@ -19,7 +19,7 @@ pipeline สำหรับ infrastructure แบบมาตรฐานจะ�
 pattern ที่ทีมส่วนใหญ่มาลงตัวตรงกันคือเลียนแบบ CI/CD ของ application code แต่มีจุดต่างสำคัญตรงว่าแต่ละ stage ทำอะไรจริง ๆ
 
 - **Pull request เปิดหรือถูกอัปเดต** → รัน `terraform plan` (หรือ `terragrunt run --all plan` สำหรับ Terragrunt setup แบบหลาย unit) แล้วโพสต์ diff ที่ได้เป็น comment บน pull request ยังไม่มีอะไรใน GCP เปลี่ยนแปลง นี่คือ dry run ที่หน้าที่เดียวคือทำให้ reviewer เห็นการเปลี่ยนแปลงที่เสนอมาก่อนที่ใครจะ approve
-- **Merge เข้า main** → รัน `terraform apply` (หรือ `terragrunt run --all apply`) จาก pipeline เอง ไม่ใช่จาก laptop ของใครสักคน สำหรับ production โดยเฉพาะ step นี้มักถูก gate ด้วย manual approval คือต้องมี reviewer หรือทีมที่มีชื่อระบุมา approve run ใน CI system ก่อนที่ apply job จะเริ่มรันได้ ถึงแม้ plan จะถูก review ไปแล้วตอน pull request ก็ตาม
+- **Merge เข้า main** → รัน `terraform apply` (หรือ `terragrunt run --all apply`) จาก pipeline เอง ไม่ใช่จาก laptop ของใครสักคน สำหรับ production โดยเฉพาะ step นี้มักถูก gate ด้วย manual approval คือต้องมี reviewer หรือทีมที่มีชื่อระบุมา approve run ใน CI system ก่อนที่ apply job จะเริ่มรันได้ ถึงแม้จะ review plan ไปแล้วตอน pull request ก็ตาม
 
 ```yaml
 name: terraform
@@ -77,7 +77,7 @@ jobs:
 
 pull request ของ application code ถูก review เรื่อง logic, test, style — worst case คือ bug หลุดไปแล้วค่อย rollback แต่ infrastructure `apply` ทำสิ่งที่ code deploy ทำไม่ได้ คือทำลาย GCP resource ที่มี state จริงแล้วสร้างใหม่ตั้งแต่ต้น บางครั้งแค่เปลี่ยนโค้ดบรรทัดเดียว
 
-Terraform เรียกสิ่งนี้ว่า **forced replacement** argument บาง argument ของ resource บางตัวอัปเดตแบบ in-place ไม่ได้ เปลี่ยนมันแปลว่า provider ไม่มี API call แบบ "แก้ attribute นี้" มีแต่ "ทำลายแล้วสร้างใหม่" อย่าง `name` ของ Cloud SQL instance, `zone` ของ Compute Engine instance หรือ `name` ของ persistent disk ใน configuration บางแบบก็เข้าข่ายนี้ทั้งหมด พอเกิดแบบนี้ `terraform plan` จะติดเครื่องหมาย resource นั้นด้วย `-/+` แทนที่จะเป็น `~` แบบ in-place
+Terraform เรียกสิ่งนี้ว่า **forced replacement** argument บาง argument ของ resource บางตัวอัปเดตแบบ in-place ไม่ได้ เปลี่ยนค่าเหล่านั้นแปลว่า provider ไม่มี API call แบบ "แก้ attribute นี้" มีแต่ "ทำลายแล้วสร้างใหม่" อย่าง `name` ของ Cloud SQL instance, `zone` ของ Compute Engine instance หรือ `name` ของ persistent disk ใน configuration บางแบบก็เข้าข่ายนี้ทั้งหมด พอเกิดแบบนี้ `terraform plan` จะติดเครื่องหมาย resource นั้นด้วย `-/+` แทนที่จะเป็น `~` แบบ in-place
 
 ```bash
 # terraform plan output — this is the line to stop and read carefully
@@ -93,9 +93,9 @@ Terraform เรียกสิ่งนี้ว่า **forced replacement** a
 
 ## Credential แบบ short-lived ผ่าน Workload Identity Federation
 
-pipeline รุ่นเก่าเก็บ service account key JSON file ที่ดาวน์โหลดมาไว้เป็น CI secret แล้วชี้ `GOOGLE_APPLICATION_CREDENTIALS` ไปที่ไฟล์นั้นก่อนรันทุกครั้ง key นั้นใช้ได้ทั้ง `plan` และ `apply` เท่า ๆ กัน ซึ่งนั่นแหละคือปัญหา ถ้ามันหลุดออกไปสักครั้ง — จาก log ที่ตั้งค่าผิด, dependency ที่ถูกแฮ็ก, หรือ workflow file ที่ echo environment variable ออกมา — มันจะยังใช้งานได้ต่อไปจนกว่าจะมีใครไปเจอแล้วเพิกถอนเอง เพราะ key แบบนี้ไม่มี expiry ในตัว
+pipeline รุ่นเก่าเก็บ service account key JSON file ที่ดาวน์โหลดมาไว้เป็น CI secret แล้วชี้ `GOOGLE_APPLICATION_CREDENTIALS` ไปที่ไฟล์นั้นก่อนรันทุกครั้ง key นั้นใช้ได้ทั้ง `plan` และ `apply` เท่า ๆ กัน ซึ่งนั่นแหละคือปัญหา ถ้าหลุดออกไปสักครั้ง — จาก log ที่ตั้งค่าผิด, dependency ที่ถูกแฮ็ก, หรือ workflow file ที่ echo environment variable ออกมา — ก็จะยังใช้งานได้ต่อไปจนกว่าจะมีใครไปเจอแล้วเพิกถอนเอง เพราะ key แบบนี้ไม่มี expiry ในตัว
 
-current best practice คือแทนที่ key นั้นด้วย **Workload Identity Federation** Workload Identity Pool และ provider ที่ตั้งค่าไว้ใน GCP project จะ trust OIDC token issuer ของ GitHub และ attribute condition บน provider จะอนุญาตแค่ repository กับ branch ที่ระบุไว้เท่านั้นให้ใช้งานได้ `google-github-actions/auth` จะยื่น GitHub identity token แบบ short-lived ที่เซ็นด้วย cryptographic ของ workflow run นั้นให้ provider ตัวนั้น แล้ว provider จะแลกมันเป็น GCP credential แบบชั่วคราวที่ scope ให้ impersonate `service_account` ที่ระบุไว้ — ใช้ได้แค่ตลอดอายุของ job นั้นเท่านั้น ไม่มีอะไรเกินกว่านั้น
+current best practice คือแทนที่ key นั้นด้วย **Workload Identity Federation** Workload Identity Pool และ provider ที่ตั้งค่าไว้ใน GCP project จะ trust OIDC token issuer ของ GitHub และ attribute condition บน provider จะอนุญาตแค่ repository กับ branch ที่ระบุไว้เท่านั้นให้ใช้งานได้ `google-github-actions/auth` จะยื่น GitHub identity token แบบ short-lived ที่เซ็นด้วย cryptographic ของ workflow run นั้นให้ provider ตัวนั้น แล้ว provider จะแลกเป็น GCP credential แบบชั่วคราวที่ scope ให้ impersonate `service_account` ที่ระบุไว้ — ใช้ได้แค่ตลอดอายุของ job นั้นเท่านั้น ไม่มีอะไรเกินกว่านั้น
 
 ```yaml
 permissions:
@@ -159,10 +159,10 @@ export const quizCicdPipeline = [
   {
     q: '-/+ ข้าง resource ใน terraform plan output หมายความว่าอะไร',
     options: [
-      'resource นั้นจะถูก update in-place โดยไม่มี downtime',
+      'resource นั้นจะ update in-place โดยไม่มี downtime',
       'resource นั้นต้องถูกทำลายแล้วสร้างใหม่เพราะ argument ที่เปลี่ยนบังคับให้ replace แทนที่จะ update in-place',
       'Terraform ตัดสินใจไม่ได้ว่า resource เปลี่ยนหรือเปล่า',
-      'resource นั้นจะถูก import จาก infrastructure ที่มีอยู่แล้ว',
+      'resource นั้นจะ import จาก infrastructure ที่มีอยู่แล้ว',
     ],
     answer: 1,
   },
@@ -170,7 +170,7 @@ export const quizCicdPipeline = [
     q: 'ทำไม Workload Identity Federation ถึงดีกว่า service account key JSON file ที่ดาวน์โหลดมาเก็บเป็น CI secret',
     options: [
       'Workload Identity Federation ช้ากว่าแต่ปลอดภัยกว่า เลยใช้แค่กับ production',
-      'มันออก credential แบบ short-lived และ scope เฉพาะแต่ละ run โดยให้ CI system แลก identity token ที่ trust ได้เป็น access ชั่วคราวผ่านการ impersonate service account เลยไม่ต้องมี key file ให้ดาวน์โหลด เก็บ หรือหมุนเวียนใน CI อีกเลย',
+      'ออก credential แบบ short-lived และ scope เฉพาะแต่ละ run โดยให้ CI system แลก identity token ที่ trust ได้เป็น access ชั่วคราวผ่านการ impersonate service account เลยไม่ต้องมี key file ให้ดาวน์โหลด เก็บ หรือหมุนเวียนใน CI อีกเลย',
       'Workload Identity Federation ทำให้ไม่ต้องมี service account อีกต่อไป',
       'terraform apply ต้องมี service account key ที่ดาวน์โหลดมาถึงจะทำงานได้',
     ],

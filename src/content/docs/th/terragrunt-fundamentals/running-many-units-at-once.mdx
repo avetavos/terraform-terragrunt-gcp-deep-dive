@@ -1,6 +1,6 @@
 ---
 title: 'Running Many Units at Once'
-description: 'run --all command ปัจจุบัน scope มันด้วย --filter รันแบบ non-interactive ใน CI และใช้ before_hook กับ after_hook รอบ operation ของ unit'
+description: 'run --all command ปัจจุบัน scope ด้วย --filter รันแบบ non-interactive ใน CI และใช้ before_hook กับ after_hook รอบ operation ของ unit'
 sidebar:
   order: 4
 ---
@@ -16,14 +16,14 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 ## run --all: operate กับทุก unit พร้อมกัน
 
-apply unit `vpc` แล้วค่อย `compute` แล้วค่อย `database` ทีละตัวด้วยมือทำได้ แต่ไม่ scale เกินไปกว่า unit ไม่กี่ตัว แถมยังผลักภาระให้คุณต้องจำลำดับที่ถูกต้องเองอยู่ดี `run --all` ตัดปัญหานี้ทิ้งด้วยการชี้ Terragrunt ไปที่ directory แล้วสั่งให้มันรัน command ที่กำหนดกับทุก unit ข้างใต้นั้น
+apply unit `vpc` แล้วค่อย `compute` แล้วค่อย `database` ทีละตัวด้วยมือทำได้ แต่ไม่ scale เกินไปกว่า unit ไม่กี่ตัว แถมยังผลักภาระให้คุณต้องจำลำดับที่ถูกต้องเองอยู่ดี `run --all` ตัดปัญหานี้ทิ้งด้วยการชี้ Terragrunt ไปที่ directory แล้วสั่งให้รัน command ที่กำหนดกับทุก unit ข้างใต้นั้น
 
 ```bash
 terragrunt run --all plan
 terragrunt run --all apply
 ```
 
-นี่คือ syntax ของ command ปัจจุบัน คุ้มค่าที่จะพูดให้ชัดว่ามันมาแทนอะไร เพราะ content จำนวนมากบนอินเทอร์เน็ตยังสอน syntax เก่าอยู่ `terragrunt run-all plan` แบบไม่มีช่องว่างก่อน `--all` เป็น deprecated แล้ว ส่วน command เก่ากว่าคือ `terragrunt plan-all` กับ `terragrunt apply-all` ถูกเอาออกไปหมดแล้ว รันบน Terragrunt version ปัจจุบันไม่ได้เลย ถ้า tutorial, blog post, หรือ internal wiki ไหนยังโชว์ `plan-all` หรือ `apply-all` อยู่ ให้ถือว่านั่นคือสัญญาณว่า content นั้นเก่ากว่า CLI ปัจจุบัน และต้อง verify ส่วนที่เหลือก่อนเชื่อ
+นี่คือ syntax ของ command ปัจจุบัน คุ้มค่าที่จะพูดให้ชัดว่ามาแทนอะไร เพราะ content จำนวนมากบนอินเทอร์เน็ตยังสอน syntax เก่าอยู่ `terragrunt run-all plan` แบบไม่มีช่องว่างก่อน `--all` เป็น deprecated แล้ว ส่วน command เก่ากว่าคือ `terragrunt plan-all` กับ `terragrunt apply-all` ถูกเอาออกไปหมดแล้ว รันบน Terragrunt version ปัจจุบันไม่ได้เลย ถ้า tutorial, blog post, หรือ internal wiki ไหนยังโชว์ `plan-all` หรือ `apply-all` อยู่ ให้ถือว่านั่นคือสัญญาณว่า content นั้นเก่ากว่า CLI ปัจจุบัน และต้อง verify ส่วนที่เหลือก่อนเชื่อ
 
 ## scope ด้วย --filter และรันแบบ non-interactive ใน CI
 
@@ -33,7 +33,7 @@ terragrunt run --all apply
 terragrunt run --all --filter './project-a/**' -- plan
 ```
 
-`--filter` คือวิธี scope multi-unit run แบบรวมและเป็นปัจจุบัน มันมาแทน flag เก่าอย่าง `--queue-include-dir` กับ `--queue-exclude-dir` ซึ่งยังมีอยู่เป็น alias แต่ไม่ใช่วิธีที่แนะนำให้เขียนอีกต่อไป double dash ก่อน `plan` แยก flag ของ Terragrunt เองออกจาก command ที่จะรันกับแต่ละ unit ที่ match
+`--filter` คือวิธี scope multi-unit run แบบรวมและเป็นปัจจุบัน โดยมาแทน flag เก่าอย่าง `--queue-include-dir` กับ `--queue-exclude-dir` ที่ยังมีอยู่เป็น alias แต่ไม่ใช่วิธีที่แนะนำให้เขียนอีกต่อไป double dash ก่อน `plan` แยก flag ของ Terragrunt เองออกจาก command ที่จะรันกับแต่ละ unit ที่ match
 
 CI pipeline ต้องการ flag เพิ่มอีกตัวหนึ่ง ปกติ Terragrunt ถาม confirmation ก่อน operation บางอย่าง ซึ่งไม่มีความหมายใน pipeline run แบบ non-interactive `--non-interactive` ข้าม prompt เหล่านั้นไป มาแทน flag เก่าอย่าง `--terragrunt-non-interactive`
 
@@ -101,7 +101,7 @@ export const quizRunAll = [
     q: 'before_hook หรือ after_hook block ให้คุณทำอะไรได้',
     options: [
       'เปลี่ยนลำดับที่ unit ถูก apply ระหว่าง run --all',
-      'รัน shell command ตามใจที่ผูกกับ Terragrunt command เฉพาะบน unit นั้น ก่อนหรือหลังมันรัน',
+      'รัน shell command ตามใจที่ผูกกับ Terragrunt command เฉพาะบน unit นั้น ก่อนหรือหลัง command นั้นรัน',
       'แทนที่ dependency block สำหรับอ่าน output ของ unit อื่น',
       'generate mock_outputs ให้ dependency เองอัตโนมัติ',
     ],

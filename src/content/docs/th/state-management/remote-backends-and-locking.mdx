@@ -20,7 +20,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 - เพื่อนร่วมทีม A รัน `apply` แล้วสร้าง VPC network state file บน laptop ของเขารู้เรื่องนี้แล้ว
 - เพื่อนร่วมทีม B บน laptop คนละเครื่อง ไม่เคยเห็น state file นั้นมาก่อน พอรัน `plan` กับ state เก่าหรือ state ว่างบนเครื่องตัวเอง ก็จะพยายามสร้าง VPC network ซ้ำ หรือได้ plan ที่ไม่สมเหตุสมผลเทียบกับของจริงที่มีอยู่
-- CI/CD pipeline เจอปัญหาเดียวกันแต่หนักกว่า เพราะ pipeline runner คือ environment ใหม่ที่ใช้แล้วทิ้ง ไม่มี local state file อยู่เลย มันต้องการ state ฉบับ canonical ที่อ่านและเขียนได้ทุกครั้งที่รัน ไม่ใช่ copy ที่บังเอิญไปอยู่บน laptop ใครสักคน
+- CI/CD pipeline เจอปัญหาเดียวกันแต่หนักกว่า เพราะ pipeline runner คือ environment ใหม่ที่ใช้แล้วทิ้ง ไม่มี local state file อยู่เลย จึงต้องการ state ฉบับ canonical ที่อ่านและเขียนได้ทุกครั้งที่รัน ไม่ใช่ copy ที่บังเอิญไปอยู่บน laptop ใครสักคน
 
 ทางแก้คือย้าย state ออกจากเครื่องใดเครื่องหนึ่ง ไปไว้บน shared backend ที่ทั้งทีมและทุก CI run ชี้ไปที่เดียวกัน
 
@@ -37,17 +37,17 @@ terraform {
 }
 ```
 
-bucket ต้องมีอยู่แล้วก่อนที่จะชี้ backend ไปหามัน Terraform ไม่สร้าง bucket ให้ `bucket` คือชื่อ Cloud Storage bucket และ `prefix` คือ path ภายใน bucket นั้นที่ state object ของ configuration นี้จะถูกเก็บ ดังนั้น configuration ต่างกัน (หรือ Terragrunt unit ต่างกัน) มักใช้ `prefix` ต่างกันใน bucket เดียวกัน
+bucket ต้องมีอยู่แล้วก่อนที่จะชี้ backend ไปหา Terraform ไม่สร้าง bucket ให้ `bucket` คือชื่อ Cloud Storage bucket และ `prefix` คือ path ภายใน bucket นั้นที่ state object ของ configuration นี้จะถูกเก็บ ดังนั้น configuration ต่างกัน (หรือ Terragrunt unit ต่างกัน) มักใช้ `prefix` ต่างกันใน bucket เดียวกัน
 
-สังเกตว่าไม่มี argument สำหรับ locking ให้ตั้งเลย GCS backend มี **state locking built-in** มาให้ — มันเป็นส่วนหนึ่งของการทำงานของ backend เอง ไม่ใช่ feature ที่ต้องเปิดเอง กลไก object generation และ versioning ของ Cloud Storage เองคือสิ่งที่ Terraform ใช้อยู่เบื้องหลัง เพื่อให้แน่ใจว่ามีแค่การเขียน state object ตัวเดียวเท่านั้นที่สำเร็จในแต่ละครั้ง ทำให้สอง run พร้อมกันทำให้มัน corrupt ไม่ได้ ไม่มี lock table แยกต่างหากให้สร้าง ไม่มี argument เพิ่มให้เปิด และไม่มี GCP resource เพิ่มให้ต้องจ่ายเงินและคอย sync กับ state bucket นี่เรียบง่ายกว่าเรื่อง locking บน cloud อื่นบางเจ้าจริง ๆ ที่ในอดีตต้อง provision locking resource แยกต่างหากคู่กับ state bucket
+สังเกตว่าไม่มี argument สำหรับ locking ให้ตั้งเลย GCS backend มี **state locking built-in** มาให้ — เป็นส่วนหนึ่งของการทำงานของ backend เอง ไม่ใช่ feature ที่ต้องเปิดเอง กลไก object generation และ versioning ของ Cloud Storage เองคือสิ่งที่ Terraform ใช้อยู่เบื้องหลัง เพื่อให้แน่ใจว่ามีแค่การเขียน state object ตัวเดียวเท่านั้นที่สำเร็จในแต่ละครั้ง ทำให้สอง run พร้อมกันทำให้ state corrupt ไม่ได้ ไม่มี lock table แยกต่างหากให้สร้าง ไม่มี argument เพิ่มให้เปิด และไม่มี GCP resource เพิ่มให้ต้องจ่ายเงินและคอย sync กับ state bucket นี่เรียบง่ายกว่าเรื่อง locking บน cloud อื่นบางเจ้าจริง ๆ ที่ในอดีตต้อง provision locking resource แยกต่างหากคู่กับ state bucket
 
-การเปิด Object Versioning บน state bucket เองก็ยังคุ้มค่าที่จะทำ Versioning ไม่ใช่สิ่งที่ทำให้เกิด locking — locking เป็นอัตโนมัติและเปิดอยู่เสมอ — แต่มันให้ทางกู้คืนถ้า `apply` ที่พลาดไปเขียนทับ state ด้วยอะไรที่คุณไม่ต้องการ
+การเปิด Object Versioning บน state bucket เองก็ยังคุ้มค่าที่จะทำ Versioning ไม่ใช่สิ่งที่ทำให้เกิด locking — locking เป็นอัตโนมัติและเปิดอยู่เสมอ — แต่ให้ทางกู้คืนถ้า `apply` ที่พลาดไปเขียนทับ state ด้วยอะไรที่คุณไม่ต้องการ
 
 ## Locking ป้องกันอะไรจริง ๆ
 
 ลองนึกภาพว่าไม่มี locking สองคน หรือคนหนึ่งกับ CI run รัน `terraform apply` กับ state เดียวกันที่ backend เป็น GCS ในเวลาไล่เลี่ยกัน ทั้งคู่อ่าน state ปัจจุบัน ทั้งคู่คำนวณ plan และทั้งคู่เริ่มเขียนผลลัพธ์กลับไปที่ state object ตัวเดียวกัน ขึ้นอยู่กับ timing การเขียนครั้งที่สองอาจเขียนทับครั้งแรก ทำให้ change ที่ run แรกบันทึกไว้หายไปเงียบ ๆ ทั้ง ๆ ที่ infrastructure ของ run แรกถูกเปลี่ยนไปแล้วจริง หรือ state file อาจ corrupt กลางคันได้เลย
 
-lock เปลี่ยน race แบบนี้ให้กลายเป็นคิว `apply` ตัวแรกที่เริ่มจะได้ lock ไป ส่วน `apply` ตัวที่สองจะรอให้ lock ถูกปล่อย หรือ fail ทันทีด้วย error "state is locked" ที่ชัดเจน ขึ้นอยู่กับ flag ที่ใช้ ไม่ว่าทางไหน run ที่สองก็ไม่มีสิทธิ์เขียนทับ state ของ run แรกในระหว่างที่มันยังทำงานอยู่
+lock เปลี่ยน race แบบนี้ให้กลายเป็นคิว `apply` ตัวแรกที่เริ่มจะได้ lock ไป ส่วน `apply` ตัวที่สองจะรอให้ lock ถูกปล่อย หรือ fail ทันทีด้วย error "state is locked" ที่ชัดเจน ขึ้นอยู่กับ flag ที่ใช้ ไม่ว่าทางไหน run ที่สองก็ไม่มีสิทธิ์เขียนทับ state ของ run แรกในระหว่างที่ run แรกยังทำงานอยู่
 
 ```bash
 # A run that finds the state already locked fails fast with a clear message,

@@ -16,10 +16,10 @@ static analysis tool จับ pattern ที่รู้อยู่แล้�
 
 ## Static analysis ก่อน plan จะรันด้วยซ้ำ
 
-`terraform validate` เช็คแค่ว่า HCL ของคุณ syntax ถูกต้องและสอดคล้องกันภายใน — type ตรงกัน, required argument ครบ, reference resolve ได้ มันไม่รู้เลยว่า machine type แบบ `f1-micro` เป็นตัวเลือกที่สมเหตุสมผลไหม หรือ Cloud Storage bucket ควร public read ได้จริงเหรอ tool สองประเภทนี้มาเติมช่องว่างตรงนั้น และทั้งคู่รันเร็ว ก่อนที่จะมีการ plan หรือ apply อะไรเลย
+`terraform validate` เช็คแค่ว่า HCL ของคุณ syntax ถูกต้องและสอดคล้องกันภายใน — type ตรงกัน, required argument ครบ, reference resolve ได้ แต่ไม่รู้เลยว่า machine type แบบ `f1-micro` เป็นตัวเลือกที่สมเหตุสมผลไหม หรือ Cloud Storage bucket ควร public read ได้จริงเหรอ tool สองประเภทนี้มาเติมช่องว่างตรงนั้น และทั้งคู่รันเร็ว ก่อนที่จะมีการ plan หรือ apply อะไรเลย
 
-- **`tflint`** รู้จัก provider มันมี plugin rule set ให้ใช้ รวมถึง `tflint-ruleset-google` ที่จับ mistake ที่ `validate` มองไม่เห็น เพราะต้องรู้ว่า Google Cloud API จริง ๆ รับอะไรได้บ้าง เช่น machine type ที่ deprecated ไปแล้ว, ชื่อ region ที่ไม่ถูกต้อง, argument ที่ provider เลิกรองรับไปเงียบ ๆ
-- **security และ misconfiguration scanner** ในตระกูล `checkov`/ผู้สืบทอดของ `tfsec` จะ pattern-match ตัว HCL เทียบกับ configuration แย่ ๆ ที่รู้จักอยู่แล้ว เช่น Cloud Storage bucket ที่เปิด public read access, persistent disk ที่ไม่เข้ารหัส, firewall rule ที่เปิดให้ `0.0.0.0/0` เข้าถึง port ที่ sensitive `tfsec` เคยครอบคลุมเรื่องคล้าย ๆ กัน แล้ว check ของมันก็ถูกรวมเข้าไปใน Trivy ตั้งแต่นั้นมา ส่วน `checkov` ยังเป็นตัวเลือกที่ใช้กันแพร่หลายและ maintain อยู่ต่อเนื่องสำหรับ layer นี้
+- **`tflint`** รู้จัก provider มี plugin rule set ให้ใช้ รวมถึง `tflint-ruleset-google` ที่จับ mistake ที่ `validate` มองไม่เห็น เพราะต้องรู้ว่า Google Cloud API จริง ๆ รับอะไรได้บ้าง เช่น machine type ที่ deprecated ไปแล้ว, ชื่อ region ที่ไม่ถูกต้อง, argument ที่ provider เลิกรองรับไปเงียบ ๆ
+- **security และ misconfiguration scanner** ในตระกูล `checkov`/ผู้สืบทอดของ `tfsec` จะ pattern-match ตัว HCL เทียบกับ configuration แย่ ๆ ที่รู้จักอยู่แล้ว เช่น Cloud Storage bucket ที่เปิด public read access, persistent disk ที่ไม่เข้ารหัส, firewall rule ที่เปิดให้ `0.0.0.0/0` เข้าถึง port ที่ sensitive `tfsec` เคยครอบคลุมเรื่องคล้าย ๆ กัน แล้ว check เหล่านั้นก็ถูกรวมเข้าไปใน Trivy ตั้งแต่นั้นมา ส่วน `checkov` ยังเป็นตัวเลือกที่ใช้กันแพร่หลายและ maintain อยู่ต่อเนื่องสำหรับ layer นี้
 
 ```hcl
 # .tflint.hcl
@@ -48,16 +48,16 @@ checkov -d .
 #   File: /main.tf:5-8
 ```
 
-tool ทั้งสองตัวรันกับ raw configuration เท่านั้น ไม่ต้องมี GCP credential, ไม่ต้อง `plan`, ไม่ต้อง state นี่แหละคือเหตุผลที่มันควรอยู่เป็น gate แรกสุดใน pipeline มันถูก, เร็ว, และจับ mistake ทั้ง class ได้ก่อนที่ Terraform จะคุยกับ Google Cloud ด้วยซ้ำ
+tool ทั้งสองตัวรันกับ raw configuration เท่านั้น ไม่ต้องมี GCP credential, ไม่ต้อง `plan`, ไม่ต้อง state นี่แหละคือเหตุผลที่ควรอยู่เป็น gate แรกสุดใน pipeline เพราะถูก, เร็ว, และจับ mistake ทั้ง class ได้ก่อนที่ Terraform จะคุยกับ Google Cloud ด้วยซ้ำ
 
 ## Policy-as-code ตอน plan time: Sentinel กับ OPA คู่กับ conftest
 
-static analysis หยุดอยู่แค่ที่ตัวโค้ด มันตอบคำถามแบบ "plan นี้สร้าง instance `n2-standard-4` เกินห้าตัวใน production project ไหม" ไม่ได้ เพราะตัวเลขนั้นยังไม่มีอยู่จนกว่า plan จะถูกคำนวณออกมาจริง ๆ **policy-as-code** tool ปิดช่องว่างตรงนี้ด้วยการประเมิน machine-readable output ของ plan แทนที่จะดูที่ HCL
+static analysis หยุดอยู่แค่ที่ตัวโค้ด จึงตอบคำถามแบบ "plan นี้สร้าง instance `n2-standard-4` เกินห้าตัวใน production project ไหม" ไม่ได้ เพราะตัวเลขนั้นยังไม่มีอยู่จนกว่าจะคำนวณ plan ออกมาจริง ๆ **policy-as-code** tool ปิดช่องว่างตรงนี้ด้วยการประเมิน machine-readable output ของ plan แทนที่จะดูที่ HCL
 
-- **Sentinel** คือ policy engine ในตัวของ HCP Terraform มันผูกแน่นกับ HCP Terraform และ Terraform Enterprise run — policy ถูกผูกไว้กับ workspace หรือ organization แล้วถูกประเมินอัตโนมัติเป็นส่วนหนึ่งของทุก run ที่นั่น
-- **Open Policy Agent (OPA)** ที่ใช้ผ่าน `conftest` CLI คือทางเลือกโอเพนซอร์สที่ไม่ผูกกับ provider ไหนเป็นพิเศษ มันทำงานกับ CI system ไหนก็ได้ ไม่ว่าจะใช้ HCP Terraform อยู่หรือไม่ ด้วยการประเมิน JSON document ที่คุณส่งให้มัน
+- **Sentinel** คือ policy engine ในตัวของ HCP Terraform ผูกแน่นกับ HCP Terraform และ Terraform Enterprise run — policy ถูกผูกไว้กับ workspace หรือ organization แล้วถูกประเมินอัตโนมัติเป็นส่วนหนึ่งของทุก run ที่นั่น
+- **Open Policy Agent (OPA)** ที่ใช้ผ่าน `conftest` CLI คือทางเลือกโอเพนซอร์สที่ไม่ผูกกับ provider ไหนเป็นพิเศษ ทำงานกับ CI system ไหนก็ได้ ไม่ว่าจะใช้ HCP Terraform อยู่หรือไม่ ด้วยการประเมิน JSON document ที่คุณส่งเข้าไป
 
-ไอเดียร่วมของทั้งสองแบบคือเหมือนกัน มีคนเขียน policy ไว้ครั้งเดียว — "ห้าม Cloud Storage bucket ไหนอนุญาต public access", "ทุก resource ต้องมี label `cost-center`" — แล้วมันจะถูกประเมินอัตโนมัติกับทุก plan ตั้งแต่นั้นเป็นต้นไป บล็อก plan ที่ละเมิดไม่ให้ apply ได้เลย มันคือเวอร์ชันเชิงกลไกที่บังคับใช้เสมอของสิ่งที่ human reviewer ต้องคอยจำไปเช็คด้วยตาทุกครั้งไม่พลาดสักครั้ง
+ไอเดียร่วมของทั้งสองแบบคือเหมือนกัน มีคนเขียน policy ไว้ครั้งเดียว — "ห้าม Cloud Storage bucket ไหนอนุญาต public access", "ทุก resource ต้องมี label `cost-center`" — แล้วจะประเมินอัตโนมัติกับทุก plan ตั้งแต่นั้นเป็นต้นไป บล็อก plan ที่ละเมิดไม่ให้ apply ได้เลย นี่คือเวอร์ชันเชิงกลไกที่บังคับใช้เสมอของสิ่งที่ human reviewer ต้องคอยจำไปเช็คด้วยตาทุกครั้งไม่พลาดสักครั้ง
 
 ```bash
 terraform plan -out=plan.tfplan
@@ -80,9 +80,9 @@ deny[msg] {
 
 ## สองชั้นที่เสริมกัน ไม่ใช่ทำงานซ้ำกัน
 
-มันน่าจะดูเหมือน `tflint`/`checkov` กับ Sentinel/OPA ทำงานเดียวกันซ้ำสองรอบ แต่จริง ๆ แล้วมันเช็คคนละอย่างกันโดยพื้นฐาน
+น่าจะดูเหมือน `tflint`/`checkov` กับ Sentinel/OPA ทำงานเดียวกันซ้ำสองรอบ แต่จริง ๆ แล้วเช็คคนละอย่างกันโดยพื้นฐาน
 
-- static analysis เช็ค **ตัวโค้ดเอง** ไม่ขึ้นกับว่าตอนนี้กำลังเปลี่ยนแปลงอะไรอยู่ มันจะ flag Cloud Storage bucket ที่ public เหมือนกันไม่ว่า run นี้จะสร้าง bucket เดียวหรือร้อยตัว
+- static analysis เช็ค **ตัวโค้ดเอง** ไม่ขึ้นกับว่าตอนนี้กำลังเปลี่ยนแปลงอะไรอยู่ จึง flag Cloud Storage bucket ที่ public เหมือนกันไม่ว่า run นี้จะสร้าง bucket เดียวหรือร้อยตัว
 - policy-as-code เช็ค **การเปลี่ยนแปลงที่ plan ไว้จริง ๆ** และ reference ค่าที่คำนวณจริงซึ่งมีอยู่แค่ตอนที่ plan มีแล้วเท่านั้น เช่น instance count จริง, label value จริง, member list จริงที่ resolve ได้หลังจาก variable interpolation กับ module composition รันไปแล้ว กฎแบบ "บล็อก plan ไหนที่จะสร้าง instance `n2-standard-4` เกินห้าตัวใน production project" ไม่มีทางเทียบเท่าได้ที่ระดับ raw-HCL เลย เพราะไม่มีทางรู้จำนวน instance ได้โดยไม่คำนวณ plan ก่อน
 
 ทั้งสอง stage นี้อยู่ใน pipeline เดียวกัน เรียงต่อกัน static check ที่ถูกและเร็วมาก่อน จับ mistake ทั้ง class ได้ทันที policy evaluation กับ plan ที่คำนวณแล้วมาทีหลัง จับ violation เฉพาะสถานการณ์ที่โผล่มาได้แค่ตอนที่ Terraform รู้แน่ชัดแล้วว่ากำลังจะทำอะไร
@@ -106,7 +106,7 @@ export const quizPolicyAsCode = [
     options: [
       'ไม่มีอะไรเลย terraform validate เช็คทุกอย่างที่ tflint กับ checkov เช็คอยู่แล้ว',
       'ปัญหาที่ต้องรู้จัก provider หรือเน้น security เช่น machine type ที่ deprecated หรือ Cloud Storage bucket ที่ public read ได้ เพราะ validate เช็คแค่ syntax กับความสอดคล้องภายใน',
-      'ว่า resource จะถูก replace แทนที่จะ update in-place หรือเปล่า',
+      'ว่า resource จะ replace แทนที่จะ update in-place หรือเปล่า',
       'ว่า apply จะสำเร็จกับ GCP project จริงหรือเปล่า',
     ],
     answer: 1,

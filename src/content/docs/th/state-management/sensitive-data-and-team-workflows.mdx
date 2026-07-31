@@ -12,7 +12,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 ## ไอเดียในหนึ่งประโยค
 
-การตั้ง variable หรือ output เป็น `sensitive = true` แค่ซ่อนค่าของมันจาก CLI output แต่ค่านั้นยังถูกเก็บแบบ **plaintext** อยู่ใน state file ดังนั้นการป้องกัน state เองต่างหากคือปัญหาที่แยกออกไป และสำคัญกว่าด้วย
+การตั้ง variable หรือ output เป็น `sensitive = true` แค่ซ่อนค่านั้นจาก CLI output แต่ค่านั้นยังถูกเก็บแบบ **plaintext** อยู่ใน state file ดังนั้นการป้องกัน state เองต่างหากคือปัญหาที่แยกออกไป และสำคัญกว่าด้วย
 
 ## sensitive = true ทำอะไรจริง ๆ
 
@@ -30,16 +30,16 @@ output "db_password" {
 }
 ```
 
-พอตั้งแบบนี้แล้ว `terraform plan` และ `terraform apply` จะ print `(sensitive value)` แทนที่จะโชว์ password จริงใน terminal และมันถูก redact จาก CI log ในแบบเดียวกัน นี่เป็น feature ที่มีประโยชน์จริง — มันหยุดไม่ให้ secret ไปโผล่ใน build log ที่คนสิบกว่าคนอ่านได้ หรือขึ้นจอตอน pairing session
+พอตั้งแบบนี้แล้ว `terraform plan` และ `terraform apply` จะ print `(sensitive value)` แทนที่จะโชว์ password จริงใน terminal และค่านั้นถูก redact จาก CI log ในแบบเดียวกัน นี่เป็น feature ที่มีประโยชน์จริง เพราะหยุดไม่ให้ secret ไปโผล่ใน build log ที่คนสิบกว่าคนอ่านได้ หรือขึ้นจอตอน pairing session
 
-แต่มันก็เป็นสิ่งที่คนเข้าใจผิดบ่อยเหมือนกัน `sensitive = true` เป็น feature ระดับ **display-redaction** ไม่ใช่ feature ด้าน encryption ค่าจริงยังถูกเขียนลง `terraform.tfstate` แบบ plaintext เป๊ะ ๆ ตามที่คุยไว้ในบทแรกของ module นี้ ใครก็ตามที่อ่าน state file ดิบได้ ก็อ่าน password ได้เหมือนกัน ไม่ว่า resource หรือ variable กี่ตัวจะถูกตั้งเป็น sensitive ระหว่างทางก็ตาม
+แต่ก็เป็นสิ่งที่คนเข้าใจผิดบ่อยเหมือนกัน `sensitive = true` เป็น feature ระดับ **display-redaction** ไม่ใช่ feature ด้าน encryption ค่าจริงยังถูกเขียนลง `terraform.tfstate` แบบ plaintext เป๊ะ ๆ ตามที่คุยไว้ในบทแรกของ module นี้ ใครก็ตามที่อ่าน state file ดิบได้ ก็อ่าน password ได้เหมือนกัน ไม่ว่าจะตั้ง resource หรือ variable กี่ตัวเป็น sensitive ระหว่างทางก็ตาม
 
 ## ป้องกัน state file ให้ปลอดภัยจริง ๆ
 
 เพราะ redaction ไม่ได้ป้องกันไฟล์ตอน at rest การป้องกันจริงต้องเกิดที่ storage layer แทน
 
 - พึ่ง server-side encryption ของ Cloud Storage สำหรับ state bucket GCS เข้ารหัส object แบบ at rest ให้เป็น default อยู่แล้ว และคุณเพิ่ม customer-managed Cloud KMS key ทับเข้าไปได้อีกชั้นผ่าน argument `kms_encryption_key` ของ backend ถ้าองค์กรคุณต้องการ
-- จำกัดว่าใครอ่าน bucket ได้ด้วย IAM ให้แคบที่สุดเท่าที่ทำได้ ให้ `roles/storage.objectViewer` บน state bucket ตัวที่ระบุเจาะจง กับ principal ที่ระบุเจาะจงที่ต้องใช้จริง ๆ — service account ของ CI, ทีม platform เล็ก ๆ — แทนที่จะให้ access กว้าง ๆ ระดับ project ปฏิบัติกับ state file เหมือนเป็น secret เพราะในทางปฏิบัติแล้วมันก็คือ secret ตัวหนึ่ง
+- จำกัดว่าใครอ่าน bucket ได้ด้วย IAM ให้แคบที่สุดเท่าที่ทำได้ ให้ `roles/storage.objectViewer` บน state bucket ตัวที่ระบุเจาะจง กับ principal ที่ระบุเจาะจงที่ต้องใช้จริง ๆ — service account ของ CI, ทีม platform เล็ก ๆ — แทนที่จะให้ access กว้าง ๆ ระดับ project ปฏิบัติกับ state file เหมือนเป็น secret เพราะในทางปฏิบัติแล้วก็คือ secret ตัวหนึ่ง
 
 ถ้าเป็นไปได้ หลีกเลี่ยงการใส่ secret ที่อยู่ยาว ๆ ลงใน Terraform configuration หรือ state เลย แทนที่จะให้ variable เก็บ password ดิบ ๆ ให้ดึงค่านั้นมาตอน apply จาก secrets manager แทน
 
@@ -55,13 +55,13 @@ resource "google_sql_user" "app" {
 }
 ```
 
-วิธีนี้ไม่ได้ทำให้ค่านั้นหายไปจาก state ทั้งหมด — attribute ของ resource ที่ Terraform ตั้งไว้ก็ยังถูกบันทึกเหมือนเดิมที่มันทำมาตลอด สิ่งที่เปลี่ยนคือที่ที่ source of truth ระยะยาวของ secret นั้นอยู่ นั่นคือ Secret Manager ที่มี access policy, audit logging และเรื่อง rotation ของตัวเอง แทนที่จะเป็น Terraform variable ที่ต้องมีใครสักคนจำไว้ให้ pass เข้ามาอย่างปลอดภัยทุกครั้งที่รัน
+วิธีนี้ไม่ได้ทำให้ค่านั้นหายไปจาก state ทั้งหมด — attribute ของ resource ที่ Terraform ตั้งไว้ก็ยังถูกบันทึกเหมือนเดิมตลอดมา สิ่งที่เปลี่ยนคือที่ที่ source of truth ระยะยาวของ secret นั้นอยู่ นั่นคือ Secret Manager ที่มี access policy, audit logging และเรื่อง rotation ของตัวเอง แทนที่จะเป็น Terraform variable ที่ต้องมีใครสักคนจำไว้ให้ pass เข้ามาอย่างปลอดภัยทุกครั้งที่รัน
 
 ## จุดที่ shared backend เริ่มไม่พอแล้ว
 
-บทก่อนหน้าใน module นี้พา state ไปอยู่บน shared GCS backend ที่มี locking built-in มาให้ ซึ่งแก้ปัญหาทีมที่แย่ที่สุดไปแล้ว — local file ที่ต่างกันไปเรื่อย ๆ และการเขียนพร้อมกันที่ corrupt กัน แต่มันไม่ได้แก้ปัญหาว่าทีมที่กำลังโตควรทำงานร่วมกันยังไงให้ครบ ถ้าทุกคนยังรัน `terraform apply` จาก laptop ตัวเองเมื่อไหร่ก็ตามที่อยากรัน การ apply พร้อมกันก็แค่ต่อคิวกันหลัง lock แทนที่จะชนกัน และก็ยังไม่มีจุดตามธรรมชาติที่คนที่สอง review การเปลี่ยนแปลงก่อนที่มันจะมีผลจริงกับ infrastructure
+บทก่อนหน้าใน module นี้พา state ไปอยู่บน shared GCS backend ที่มี locking built-in มาให้ ซึ่งแก้ปัญหาทีมที่แย่ที่สุดไปแล้ว — local file ที่ต่างกันไปเรื่อย ๆ และการเขียนพร้อมกันที่ corrupt กัน แต่ยังไม่ได้แก้ปัญหาว่าทีมที่กำลังโตควรทำงานร่วมกันยังไงให้ครบ ถ้าทุกคนยังรัน `terraform apply` จาก laptop ตัวเองเมื่อไหร่ก็ตามที่อยากรัน การ apply พร้อมกันก็แค่ต่อคิวกันหลัง lock แทนที่จะชนกัน และก็ยังไม่มีจุดตามธรรมชาติที่คนที่สอง review การเปลี่ยนแปลงก่อนที่จะมีผลจริงกับ infrastructure
 
-ช่องว่างนั้น — ที่ที่ review ได้ audit ได้ สำหรับให้การเปลี่ยนแปลงถูก approve ก่อน `apply` จะรันกับ shared state — คือสิ่งที่ CI/CD สำหรับ infrastructure มาปิดช่องว่างนี้พอดี และเรื่องนี้จะถูกพูดถึงในบทหลัง ๆ ของคอร์สนี้
+ช่องว่างนั้น — ที่ที่ review ได้ audit ได้ สำหรับให้การเปลี่ยนแปลงถูก approve ก่อน `apply` จะรันกับ shared state — คือสิ่งที่ CI/CD สำหรับ infrastructure มาปิดช่องว่างนี้พอดี และเรื่องนี้จะพูดถึงในบทหลัง ๆ ของคอร์สนี้
 
 <Mermaid title="A sensitive variable still lands in state as plaintext, while a data source pulls a secret at apply time instead of storing it as a variable" code={sensitiveDataDiagram} />
 
@@ -72,17 +72,17 @@ export const sensitiveDataDiagram = `flowchart LR
   resource --> state`;
 
 <Callout title="สรุปหนึ่งบรรทัด">
-`sensitive = true` แค่ redact ค่าจาก **CLI output และ log** เท่านั้น — ค่านั้นยังถูกเขียนลง `terraform.tfstate` แบบ **plaintext** ดังนั้นมันไม่ใช่ตัวแทนของการป้องกัน state file เอง การป้องกันจริงคือพึ่ง GCS server-side encryption แบบ at rest และจำกัด IAM role อย่าง `roles/storage.objectViewer` ให้แคบ ให้แค่ principal ที่ต้องอ่าน state bucket จริง ๆ สำหรับ credential ที่อยู่ยาว ให้เลือกดึงค่าจาก service อย่าง Secret Manager ผ่าน `data` source ตอน apply แทนการเก็บมันเป็น Terraform variable เพราะ source of truth ของ secret จะไปอยู่ในระบบที่ออกแบบมาเพื่อ access control และ rotation แทนที่จะอยู่ใน state
+`sensitive = true` แค่ redact ค่าจาก **CLI output และ log** เท่านั้น — ค่านั้นยังถูกเขียนลง `terraform.tfstate` แบบ **plaintext** ดังนั้นจึงไม่ใช่ตัวแทนของการป้องกัน state file เอง การป้องกันจริงคือพึ่ง GCS server-side encryption แบบ at rest และจำกัด IAM role อย่าง `roles/storage.objectViewer` ให้แคบ ให้แค่ principal ที่ต้องอ่าน state bucket จริง ๆ สำหรับ credential ที่อยู่ยาว ให้เลือกดึงค่าจาก service อย่าง Secret Manager ผ่าน `data` source ตอน apply แทนการเก็บเป็น Terraform variable เพราะ source of truth ของ secret จะไปอยู่ในระบบที่ออกแบบมาเพื่อ access control และ rotation แทนที่จะอยู่ใน state
 </Callout>
 
 export const quizSensitive = [
   {
     q: 'การตั้ง variable เป็น sensitive = true ป้องกันอะไรได้จริง',
     options: [
-      'มันเข้ารหัสค่าใน terraform.tfstate ทำให้อ่านไม่ได้แม้จะเข้าถึงไฟล์ได้',
-      'มัน redact ค่าจาก CLI output อย่าง plan และ apply log แต่ค่านั้นยังถูกเขียนลง state แบบ plaintext',
-      'มันทำให้ค่าไม่ถูกเก็บลง state เลย',
-      'มันหมุนเวียนเปลี่ยนค่าให้อัตโนมัติตามตารางเวลา',
+      'เข้ารหัสค่าใน terraform.tfstate ทำให้อ่านไม่ได้แม้จะเข้าถึงไฟล์ได้',
+      'redact ค่าจาก CLI output อย่าง plan และ apply log แต่ค่านั้นยังถูกเขียนลง state แบบ plaintext',
+      'ทำให้ค่าไม่ถูกเก็บลง state เลย',
+      'หมุนเวียนเปลี่ยนค่าให้อัตโนมัติตามตารางเวลา',
     ],
     answer: 1,
   },
@@ -102,7 +102,7 @@ export const quizSensitive = [
       'เพราะ data source ไม่เคยถูกเขียนลง state file เลย',
       'เพราะ secret นั้นจะไปอยู่ในระบบที่มี access control, audit logging และ rotation ของตัวเอง แทนที่จะพึ่งให้ใครสักคน pass variable เข้ามาอย่างปลอดภัยทุกครั้งที่รัน',
       'เพราะ Terraform variable เก็บค่าแบบ string ไม่ได้',
-      'เพราะ data source รันก่อนที่ GCS backend จะถูก config เสียอีก',
+      'เพราะ data source รันก่อนที่จะ config GCS backend เสียอีก',
     ],
     answer: 1,
   },
@@ -111,7 +111,7 @@ export const quizSensitive = [
     options: [
       'ไม่มีช่องว่างเหลือแล้ว shared backend ที่มี locking แก้ team workflow ได้ครบหมด',
       'locking เองจะหยุดทำงานทันทีที่ทีมมีคนเกินสองคน',
-      'ยังไม่มีขั้นตอน review ตามธรรมชาติก่อนการเปลี่ยนแปลงจะถูก apply กับ shared state และการที่ทุกคน apply จาก laptop ตัวเองก็ยังขยายสเกลได้ไม่ดี',
+      'ยังไม่มีขั้นตอน review ตามธรรมชาติก่อนจะ apply การเปลี่ยนแปลงกับ shared state และการที่ทุกคน apply จาก laptop ตัวเองก็ยังขยายสเกลได้ไม่ดี',
       'GCS backend ใช้ร่วมกันได้แค่วิศวกรคนเดียวในแต่ละครั้งเท่านั้น',
     ],
     answer: 2,

@@ -16,22 +16,22 @@ Infrastructure as Code คือการอธิบาย cloud resource เ�
 
 ## ปัญหาของ ClickOps
 
-ลองนึกภาพ engineer คนหนึ่งเปิด Google Cloud console แล้วสร้าง VPC network, subnet สองสามอัน, Compute Engine VM และ firewall rule ด้วยมือ มันก็ใช้งานได้ ผ่านไปสามอาทิตย์ อีกคนเปิด console แล้วแก้ firewall rule เพื่อปลด block การ deploy โดยไม่บอกใคร อีกเดือนถัดมามีคนลบ Cloud Storage bucket ที่ดูเหมือนถูกทิ้งไว้เฉย ๆ — แต่จริง ๆ มันไม่ได้ถูกทิ้งไว้เฉย ๆ
+ลองนึกภาพ engineer คนหนึ่งเปิด Google Cloud console แล้วสร้าง VPC network, subnet สองสามอัน, Compute Engine VM และ firewall rule ด้วยมือ ทุกอย่างก็ใช้งานได้ ผ่านไปสามอาทิตย์ อีกคนเปิด console แล้วแก้ firewall rule เพื่อปลด block การ deploy โดยไม่บอกใคร อีกเดือนถัดมามีคนลบ Cloud Storage bucket ที่ดูเหมือนถูกทิ้งไว้เฉย ๆ — แต่จริง ๆ ไม่ได้ถูกทิ้งไว้เฉย ๆ
 
-รูปแบบนี้มีชื่อเรียก มักพูดพร้อมสีหน้าเบ้ ๆ ว่า **ClickOps** จุดพังไม่ได้อยู่ที่คลิกไหนคลิกหนึ่งผิด แต่อยู่ที่ลำดับการคลิกทั้งหมดมันเป็นแบบนี้
+รูปแบบนี้มีชื่อเรียก มักพูดพร้อมสีหน้าเบ้ ๆ ว่า **ClickOps** จุดพังไม่ได้อยู่ที่คลิกไหนคลิกหนึ่งผิด แต่อยู่ที่ลำดับการคลิกทั้งหมดเป็นแบบนี้
 
 - **Unrepeatable** ไม่มีใคร spin environment เดียวกันขึ้นมาใหม่จากศูนย์ได้ เพราะ "คำสั่ง" คือ muscle memory ของคนคนหนึ่ง
-- **Undocumented** console แสดง state ปัจจุบัน แต่ไม่บอกว่า *ทำไม* มันถึงเป็นแบบนี้ หรือใครเป็นคนเปลี่ยน
+- **Undocumented** console แสดง state ปัจจุบัน แต่ไม่บอกว่า *ทำไม* จึงเป็นแบบนี้ หรือใครเป็นคนเปลี่ยน
 - **Drift-prone** ทันทีที่มีสองคนเปลี่ยน project เดียวกันได้อย่างอิสระ state จริงกับภาพในหัวของแต่ละคนก็เริ่มเพี้ยนออกจากกันไปเรื่อย ๆ โดยไม่มีใครรู้ตัว
 
-ไม่มีใครตอบได้ว่า "ตอนนี้ deploy อะไรอยู่จริง ๆ และทำไมถึงเป็นแบบนั้น" แค่อ่านอะไรสักอย่าง เพราะ console เองคือ source of truth เดียว และมันไม่มีความจำ ไม่มี review process ไม่มี diff ให้ดู
+ไม่มีใครตอบได้ว่า "ตอนนี้ deploy อะไรอยู่จริง ๆ และทำไมถึงเป็นแบบนั้น" แค่อ่านอะไรสักอย่าง เพราะ console เองคือ source of truth เดียว และไม่มีความจำ ไม่มี review process ไม่มี diff ให้ดู
 
 ## Declarative เทียบกับ imperative
 
 Infrastructure as Code (IaC) แก้ปัญหานี้ด้วยการทำให้ infrastructure ที่ต้องการเป็นไฟล์ commit เข้า git, review ผ่าน pull request เหมือนโค้ดทั่วไป และมีประวัติให้ `git blame` ย้อนดูได้ แต่เครื่องมือ IaC ไม่ได้ทำงานแบบเดียวกันหมด ความต่างตรงนี้สำคัญ
 
 - **Declarative** IaC คุณอธิบาย end state ที่ต้องการ แล้วปล่อยให้เครื่องมือคิดเองว่าจะไปถึงยังไง Terraform เป็นแบบ declarative `resource` block บอกว่า "ควรมี storage bucket ชื่อนี้ property แบบนี้" แล้ว Terraform คิดเองว่านั่นแปลว่าต้องสร้างใหม่ อัปเดต หรือปล่อยไว้เฉย ๆ
-- **Imperative** IaC คุณเขียน script ของขั้นตอนตามลำดับ "สร้าง VPC network ก่อน แล้วสร้าง subnet ข้างใน แล้ว launch instance ใน subnet นั้น" script อธิบาย *วิธีทำ* และเป็นหน้าที่คุณเองที่ต้องคอยดูให้มันถูกต้องตลอดเวลาที่อะไร ๆ เปลี่ยนไป รันซ้ำสองรอบอาจพังได้ถ้าแต่ละขั้นตอนไม่ได้ถูกเขียนให้รันซ้ำได้อย่างปลอดภัย
+- **Imperative** IaC คุณเขียน script ของขั้นตอนตามลำดับ "สร้าง VPC network ก่อน แล้วสร้าง subnet ข้างใน แล้ว launch instance ใน subnet นั้น" script อธิบาย *วิธีทำ* และเป็นหน้าที่คุณเองที่ต้องคอยดูให้ถูกต้องตลอดเวลาที่อะไร ๆ เปลี่ยนไป รันซ้ำสองรอบอาจพังได้ถ้าแต่ละขั้นตอนไม่ได้ถูกเขียนให้รันซ้ำได้อย่างปลอดภัย
 
 ```hcl
 # Declarative: describe the desired end state.
@@ -49,13 +49,13 @@ resource "google_storage_bucket" "reports" {
 gcloud storage buckets create gs://acme-monthly-reports --location=US
 ```
 
-สังเกตว่าฝั่ง declarative ไม่มีคำว่า *create* เลยสักคำ กริยานั้นถูกตัดสินใจโดย Terraform ตอน plan จากสิ่งที่มันเจอจริง ๆ
+สังเกตว่าฝั่ง declarative ไม่มีคำว่า *create* เลยสักคำ กริยานั้นถูกตัดสินใจโดย Terraform ตอน plan จากสิ่งที่เจอจริง ๆ
 
 ## Terraform reconcile state ยังไง
 
 loop หลักของ Terraform เป็นการเทียบสามทางแบบนี้เสมอ
 
-1. อ่าน **real-world state ปัจจุบัน** ของ resource ที่มันจัดการอยู่ (มันเก็บ record ตรงนี้ไว้ใน state file)
+1. อ่าน **real-world state ปัจจุบัน** ของ resource ที่จัดการอยู่ (Terraform เก็บ record ตรงนี้ไว้ใน state file)
 2. อ่าน **configuration ที่ประกาศไว้** คือ HCL ที่อธิบายสิ่งที่คุณต้องการ
 3. คำนวณ **plan** คือชุดของ create, update, destroy ที่น้อยที่สุดที่จำเป็น เพื่อทำให้ของจริงตรงกับ configuration
 
@@ -71,15 +71,15 @@ export const iacDiagram = `flowchart LR
 
 ## ตำแหน่งของ Terraform
 
-Terraform ไม่ใช่เครื่องมือ IaC ตัวเดียวในตลาด และควรรู้ไว้ว่ามันไม่ใช่อะไร
+Terraform ไม่ใช่เครื่องมือ IaC ตัวเดียวในตลาด และควรรู้ไว้ว่า Terraform ไม่ใช่อะไร
 
-- **Google Cloud Deployment Manager** เครื่องมือ IaC แบบ declarative ดั้งเดิมของ GCP ใช้ YAML template (ต่อยอดด้วย Python หรือ Jinja2 ได้) แต่ใช้ได้แค่กับ GCP ไม่มีทางเทียบเท่าที่จะจัดการ AWS account หรือ Datadog monitor ด้วย template เดียวกัน และตอนนี้ Google ผลักดันโปรเจกต์ใหม่ ๆ ไปทาง **Infrastructure Manager** ซึ่งเป็น managed service ที่รัน Terraform configuration ตรง ๆ แทนที่จะเป็นภาษา template แยกต่างหาก
+- **Google Cloud Deployment Manager** เครื่องมือ IaC แบบ declarative ดั้งเดิมของ GCP ใช้ YAML template (ต่อยอดด้วย Python หรือ Jinja2 ได้) แต่ใช้ได้แค่กับ GCP ไม่มีทางเทียบเท่าที่จะจัดการ AWS account หรือ Datadog monitor ด้วย template เดียวกัน และตอนนี้ Google ผลักดันโปรเจกต์ใหม่ ๆ ไปทาง **Infrastructure Manager** ที่เป็น managed service ที่รัน Terraform configuration ตรง ๆ แทนที่จะเป็นภาษา template แยกต่างหาก
 - **Pulumi** เป็น provider-based และ state-tracked เหมือนกัน แต่คุณเขียนภาษาโปรแกรมมิ่งจริง ๆ (TypeScript, Python, Go) แทน HCL syntax แบบ declarative แลก learning curve ที่เล็กกว่ากับความยืดหยุ่นเต็มรูปแบบ (พร้อมความซับซ้อนเต็มรูปแบบ) ของภาษา general-purpose
-- **Ansible** เป็นเครื่องมือ **configuration management** เป็นหลัก มัน login เข้าเครื่องที่มีอยู่แล้วรัน task ใส่มัน (ติดตั้ง package, แก้ config file, restart service) playbook ของมันในทางปฏิบัติค่อนไปทาง imperative มากกว่า คือ task เรียงลำดับรันจากบนลงล่าง และไม่มี state file ในตัวคอยบันทึกว่ามันสร้างอะไรไว้บ้าง
+- **Ansible** เป็นเครื่องมือ **configuration management** เป็นหลัก Ansible login เข้าเครื่องที่มีอยู่แล้วรัน task ใส่ (ติดตั้ง package, แก้ config file, restart service) playbook ในทางปฏิบัติค่อนไปทาง imperative มากกว่า คือ task เรียงลำดับรันจากบนลงล่าง และไม่มี state file ในตัวคอยบันทึกว่าสร้างอะไรไว้บ้าง
 
 Terraform เจาะกลุ่ม **declarative, provider-based, state-tracked infrastructure provisioning** ด้วย plugin model (**provider**) ที่ทำให้ workflow และ HCL syntax เดียวกันไปจัดการ GCP, AWS, Azure, Kubernetes, Datadog และระบบอื่นอีกหลายร้อยตัวได้ พร้อม state file ที่บันทึกไว้ชัดเจนว่า Terraform รับผิดชอบอะไรบ้าง
 
-อีกชื่อหนึ่งที่ควรรู้จักคือ **OpenTofu** หลังจาก Terraform เปลี่ยน license ในปี 2023 กลุ่ม contributor และบริษัทต่าง ๆ ได้ fork release เวอร์ชันโอเพนซอร์สล่าสุดออกมาเป็น OpenTofu ซึ่งตอนนี้ดูแลโดย Linux Foundation มันเป็น alternative แบบโอเพนซอร์สที่ compatible กัน — HCL syntax, provider และ workflow ที่เรียนในคอร์สนี้ใช้กับมันได้ตรง ๆ
+อีกชื่อหนึ่งที่ควรรู้จักคือ **OpenTofu** หลังจาก Terraform เปลี่ยน license ในปี 2023 กลุ่ม contributor และบริษัทต่าง ๆ ได้ fork release เวอร์ชันโอเพนซอร์สล่าสุดออกมาเป็น OpenTofu ซึ่งตอนนี้ดูแลโดย Linux Foundation OpenTofu เป็น alternative แบบโอเพนซอร์สที่ compatible กัน — HCL syntax, provider และ workflow ที่เรียนในคอร์สนี้ใช้กับ OpenTofu ได้ตรง ๆ
 
 <Callout title="สรุปหนึ่งบรรทัด">
 Infrastructure as Code แทนที่การคลิกผ่าน console แบบทำซ้ำไม่ได้และไม่มีเอกสารด้วยไฟล์ text แบบ **declarative** ใน version control คุณอธิบาย *สิ่งที่ต้องการ* Terraform อ่าน real GCP state, diff กับ configuration ของคุณ แล้วคำนวณ **plan ที่น้อยที่สุด** ของ create, update, destroy — ต่างจากเครื่องมือแบบ imperative (script ของขั้นตอนเรียงลำดับ) หรือเครื่องมือ configuration-management อย่าง Ansible; **OpenTofu** คือ fork โอเพนซอร์สที่ compatible กันซึ่งควรรู้จักไว้
@@ -92,7 +92,7 @@ export const quizIac = [
       'console ช้าเกินไปสำหรับการเปลี่ยนแปลงเล็ก ๆ',
       'การเปลี่ยนแปลงทำซ้ำไม่ได้ ไม่มีเอกสาร และ drift ไปเรื่อย ๆ โดยไม่มีใครรู้ตัว ไม่มีใครบอกได้ว่า deploy อะไรอยู่และทำไมแค่อ่านอะไรสักอย่าง',
       'console สร้าง Compute Engine instance ไม่ได้',
-      'มันแพงกว่าการใช้ CLI',
+      'แพงกว่าการใช้ CLI',
     ],
     answer: 1,
   },
@@ -100,7 +100,7 @@ export const quizIac = [
     q: 'ความต่างระหว่าง declarative กับ imperative Infrastructure as Code คืออะไร',
     options: [
       'declarative IaC อธิบาย end state ที่ต้องการแล้วปล่อยให้เครื่องมือคิดเองว่าจะไปถึงยังไง ส่วน imperative IaC เป็น script ของขั้นตอนเรียงลำดับที่คุณต้องคอยดูให้ถูกต้องเอง',
-      'มันคือชื่อสองชื่อของสิ่งเดียวกัน',
+      'เป็นชื่อสองชื่อของสิ่งเดียวกัน',
       'imperative IaC เก็บใน version control ไม่ได้',
       'declarative IaC ใช้ได้กับ GCP เท่านั้น',
     ],
@@ -109,7 +109,7 @@ export const quizIac = [
   {
     q: 'Terraform คำนวณอะไรระหว่าง configuration ที่ต้องการกับ state จริงของ infrastructure',
     options: [
-      'มันทุบทุกอย่างทิ้งแล้วสร้างใหม่ทั้งหมดเสมอ',
+      'ทุบทุกอย่างทิ้งแล้วสร้างใหม่ทั้งหมดเสมอ',
       'plan คือชุดของ create, update, destroy ที่น้อยที่สุดที่จำเป็นในการทำให้ state จริงตรงกับ configuration ที่ประกาศไว้',
       'สำรอง state ปัจจุบันไว้เท่านั้น',
       'script แบบ imperative เต็มรูปแบบให้คนรันเอง',

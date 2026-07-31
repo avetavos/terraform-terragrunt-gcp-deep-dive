@@ -25,7 +25,7 @@ Terraform เปล่า ๆ เองไม่มี primitive ตัวเด
 
 ## Terragrunt คืออะไรจริง ๆ
 
-Terragrunt คือ thin wrapper และ orchestrator ที่นั่งอยู่บน binary `terraform` (หรือ `tofu`) ตัวจริง มันไม่ได้เพิ่ม resource syntax ใหม่ และไม่ได้ compile ไปเป็นภาษา infrastructure-as-code แบบอื่น โค้ด `.tf` ของ module ที่คุณเขียนอยู่แล้ว รวมถึงทุกอย่างใน directory `modules/app` จากบทที่แล้ว ยังคงเหมือนเดิมทุกประการและยังเป็น Terraform ธรรมดา ทุกคำสั่งของ Terragrunt สุดท้ายแล้ว shell out ไปเรียกคำสั่ง `terraform` (หรือ `tofu`) ตัวจริงข้างใต้
+Terragrunt คือ thin wrapper และ orchestrator ที่นั่งอยู่บน binary `terraform` (หรือ `tofu`) ตัวจริง ไม่ได้เพิ่ม resource syntax ใหม่ และไม่ได้ compile ไปเป็นภาษา infrastructure-as-code แบบอื่น โค้ด `.tf` ของ module ที่คุณเขียนอยู่แล้ว รวมถึงทุกอย่างใน directory `modules/app` จากบทที่แล้ว ยังคงเหมือนเดิมทุกประการและยังเป็น Terraform ธรรมดา ทุกคำสั่งของ Terragrunt สุดท้ายแล้ว shell out ไปเรียกคำสั่ง `terraform` (หรือ `tofu`) ตัวจริงข้างใต้
 
 ```bash
 # What you type
@@ -35,22 +35,22 @@ terragrunt apply
 terraform apply
 ```
 
-สิ่งที่ Terragrunt เพิ่มเข้ามาคือ layer ที่จัดการ boilerplate ที่ซ้ำซ้อนซึ่งคุณเพิ่งเห็นมันกองสูงขึ้นรอบ ๆ การเรียก Terraform หนึ่งครั้งต่อ environment
+สิ่งที่ Terragrunt เพิ่มเข้ามาคือ layer ที่จัดการ boilerplate ที่ซ้ำซ้อนที่คุณเพิ่งเห็นกองสูงขึ้นรอบ ๆ การเรียก Terraform หนึ่งครั้งต่อ environment
 
 - **generate backend configuration** จากคำนิยามศูนย์กลางเดียว แทนที่จะ copy-paste block `backend "gcs" { ... }` เดียวกันเข้าไปในทุก environment directory
 - **generate provider configuration** แบบเดียวกัน จากที่เดียว แทนที่จะมี block `provider "google" { ... }` ที่แทบเหมือนกันต่อ environment
 - **ส่ง input variable ของแต่ละ environment** เข้าไปใน shared module ทำให้ `dev`, `staging`, `prod` ยังเรียก source `modules/app` เดียวกันด้วยค่าที่ต่างกัน โดยไม่ต้องต่อสาย `module` block แยกมือต่อ environment
 - **เข้าใจลำดับ dependency** เมื่อ infrastructure ถูกแบ่งเป็นหลาย unit ที่ apply แยกกันเป็นอิสระ เช่น unit `network` ที่ unit `gke` ต้องพึ่งพา ทำให้ Terragrunt คิดออกว่า `network` ต้อง apply ก่อน `gke` แทนที่คุณต้อง track ลำดับนั้นเองด้วยมือข้าม `terraform apply` ที่รันแยกกัน
 
-จุดสุดท้ายนี้สำคัญเป็นพิเศษ เพราะ directory-per-environment แบ่ง infrastructure เป็น state file ที่แยกกันจริงต่อ environment (และตามที่ module ถัดไปจะพูดถึง มักแยกต่อ component ด้วย) Terraform configuration เดียวมี dependency graph ภายในของตัวเองระหว่าง resource ใน state file เดียว แต่มันไม่มี concept ของการเรียงลำดับข้าม configuration ที่แยกกันทั้งหมดและการเรียก `terraform apply` แยกกันในตัวมันเอง การเรียงลำดับข้าม configuration แบบนี้แหละคือปัญหาที่ Terragrunt ถูกสร้างมาเพื่อแก้ ซ้อนอยู่บน graph ของ Terraform เอง ไม่ใช่แทนที่มัน
+จุดสุดท้ายนี้สำคัญเป็นพิเศษ เพราะ directory-per-environment แบ่ง infrastructure เป็น state file ที่แยกกันจริงต่อ environment (และตามที่ module ถัดไปจะพูดถึง มักแยกต่อ component ด้วย) Terraform configuration เดียวมี dependency graph ภายในของตัวเองระหว่าง resource ใน state file เดียว แต่ไม่มี concept ของการเรียงลำดับข้าม configuration ที่แยกกันทั้งหมดและการเรียก `terraform apply` แยกกันเลย การเรียงลำดับข้าม configuration แบบนี้แหละคือปัญหาที่ Terragrunt ถูกสร้างมาเพื่อแก้ ซ้อนอยู่บน graph ของ Terraform เอง ไม่ใช่มาแทนที่
 
 ## Terragrunt ไม่ใช่อะไร
 
-คุ้มค่าที่จะพูดให้แม่นยำตรง boundary นี้ เพราะมันพูดเกินจริงเกี่ยวกับสิ่งที่ Terragrunt ทำได้ง่ายมาก
+คุ้มค่าที่จะพูดให้แม่นยำตรง boundary นี้ เพราะพูดเกินจริงเกี่ยวกับสิ่งที่ Terragrunt ทำได้ง่ายมาก
 
-- Terragrunt **ไม่ใช่** fork ของ Terraform และ **ไม่ใช่** ตัวแทนที่มัน การ plan และ apply resource จริง ๆ ยังทำโดย `terraform` หรือ `tofu` ทั้งหมด
+- Terragrunt **ไม่ใช่** fork ของ Terraform และ **ไม่ใช่** ตัวแทนของ Terraform การ plan และ apply resource จริง ๆ ยังทำโดย `terraform` หรือ `tofu` ทั้งหมด
 - Terragrunt **ไม่ใช่** ภาษา configuration ใหม่สำหรับอธิบาย GCP resource resource `google_compute_instance` ถูก define แบบเดียวกันเป๊ะไม่ว่าจะมี Terragrunt เกี่ยวข้องหรือไม่
-- Terragrunt ทำให้การเปลี่ยนแปลง Terraform ที่ไม่ปลอดภัยกลายเป็นปลอดภัยเองไม่ได้ มันเอา boilerplate ที่ copy-paste ออกไปและจัดลำดับให้ แต่ logic ของ infrastructure จริง ๆ และความถูกต้องของมันยังเป็นความรับผิดชอบของโค้ด module `.tf` ของคุณทั้งหมด
+- Terragrunt ทำให้การเปลี่ยนแปลง Terraform ที่ไม่ปลอดภัยกลายเป็นปลอดภัยเองไม่ได้ Terragrunt เอา boilerplate ที่ copy-paste ออกไปและจัดลำดับให้ แต่ logic ของ infrastructure จริง ๆ และความถูกต้องยังเป็นความรับผิดชอบของโค้ด module `.tf` ของคุณทั้งหมด
 
 module ถัดไปเริ่มต่อจากตรงนี้เป๊ะ ด้วย building block จริงของ Terragrunt คือ `root.hcl`, `remote_state`, `generate`, และ `terragrunt.hcl` ของแต่ละ unit ที่เปลี่ยนตำแหน่งนี้ให้กลายเป็น setup ที่ใช้งานได้จริง
 
@@ -63,7 +63,7 @@ export const terragruntGapDiagram = `flowchart TD
   terragrunt -->|shells out to| terraformBinary["Real terraform / tofu binary"]`;
 
 <Callout title="สรุปหนึ่งบรรทัด">
-Terraform workspace แก้ **DRY** reuse ได้ดีแต่ **isolation** ยังอ่อน เพราะทุก workspace ยังใช้ backend เดียวและ GCP project เดียวร่วมกัน directory-per-environment แก้ isolation ได้ด้วย GCP project ที่แยกกันจริง แต่ดึง boilerplate ของ backend, provider, และ module-source ที่ซ้ำซ้อนกลับมาในทุก environment directory Terraform เปล่า ๆ ไม่มี primitive ตัวเดียวที่ให้ทั้งสองอย่างพร้อมกัน **Terragrunt** ปิดช่องว่างนั้นในฐานะ thin wrapper และ orchestrator รอบ binary `terraform`/`tofu` ตัวจริง มันไม่เพิ่ม resource syntax ใหม่และโค้ด module `.tf` ของคุณไม่เปลี่ยน แต่มัน generate backend กับ provider configuration จากคำนิยามศูนย์กลางเดียว ส่ง input ของแต่ละ environment เข้า shared module และเข้าใจลำดับ dependency ข้าม unit ที่ apply แยกกันเป็นอิสระ ซึ่งเป็น layer ที่ dependency graph ของ Terraform configuration เดียวเองไม่ครอบคลุม
+Terraform workspace แก้ **DRY** reuse ได้ดีแต่ **isolation** ยังอ่อน เพราะทุก workspace ยังใช้ backend เดียวและ GCP project เดียวร่วมกัน directory-per-environment แก้ isolation ได้ด้วย GCP project ที่แยกกันจริง แต่ดึง boilerplate ของ backend, provider, และ module-source ที่ซ้ำซ้อนกลับมาในทุก environment directory Terraform เปล่า ๆ ไม่มี primitive ตัวเดียวที่ให้ทั้งสองอย่างพร้อมกัน **Terragrunt** ปิดช่องว่างนั้นในฐานะ thin wrapper และ orchestrator รอบ binary `terraform`/`tofu` ตัวจริง ไม่เพิ่ม resource syntax ใหม่และโค้ด module `.tf` ของคุณไม่เปลี่ยน แต่ generate backend กับ provider configuration จากคำนิยามศูนย์กลางเดียว ส่ง input ของแต่ละ environment เข้า shared module และเข้าใจลำดับ dependency ข้าม unit ที่ apply แยกกันเป็นอิสระ ซึ่งอยู่นอก layer ที่ dependency graph ของ Terraform configuration เดียวเองไม่ครอบคลุม
 </Callout>
 
 export const quizWhyTerragrunt = [
