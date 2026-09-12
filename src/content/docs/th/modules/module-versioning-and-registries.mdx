@@ -33,7 +33,7 @@ module "vpc" {
 ```hcl
 module "vpc" {
   source  = "terraform-google-modules/network/google"
-  version = "~> 9.0"
+  version = "~> 18.0"
 
   project_id   = var.project_id
   network_name = "app-network"
@@ -42,9 +42,9 @@ module "vpc" {
 
 ## pessimistic constraint operator: ~>
 
-`~>` เรียกว่า pessimistic constraint operator ความหมายคืออนุญาตให้ upgrade ได้ แต่เฉพาะ upgrade ที่ไม่น่าจะทำให้อะไรพัง `version = "~> 9.0"` อนุญาตให้ Terraform resolve release ในสาย `9.x` ตัวไหนก็ได้ — `9.1.0`, `9.4.2`, `9.12.0` — เพราะตาม semantic versioning ตัวเหล่านี้ควร backward compatible กัน แต่บล็อก `10.0.0` เอาไว้เด็ดขาด เพราะ major version bump คือจุดที่คนเขียน module ได้รับอนุญาตให้ใส่ breaking change เข้ามา
+`~>` เรียกว่า pessimistic constraint operator ความหมายคืออนุญาตให้ upgrade ได้ แต่เฉพาะ upgrade ที่ไม่น่าจะทำให้อะไรพัง `version = "~> 18.0"` อนุญาตให้ Terraform resolve release ในสาย `18.x` ตัวไหนก็ได้ — `18.1.0`, `18.4.2`, `18.12.0` — เพราะตาม semantic versioning ตัวเหล่านี้ควร backward compatible กัน แต่บล็อก `19.0.0` เอาไว้เด็ดขาด เพราะ major version bump คือจุดที่คนเขียน module ได้รับอนุญาตให้ใส่ breaking change เข้ามา
 
-operator ตัวเดียวกันนี้ใช้ได้ละเอียดกว่านั้นอีกระดับ `version = "~> 9.2.0"` อนุญาต patch release อย่าง `9.2.1` กับ `9.2.7` แต่บล็อก `9.3.0` — มีประโยชน์ตอนที่คุณอยากกัน minor version bump ไว้ก่อนจนกว่าจะได้ review ก่อน `~> 9.0` ที่อนุญาตทั้งสาย `9.x` คือ default ทั่วไปของทีมส่วนใหญ่ ส่วนรูปแบบที่แคบกว่าอย่าง `~> 9.2.0` เหมาะกับ module ที่เคยโดน minor version เปลี่ยน behavior มาก่อน
+operator ตัวเดียวกันนี้ใช้ได้ละเอียดกว่านั้นอีกระดับ `version = "~> 18.2.0"` อนุญาต patch release อย่าง `18.2.1` กับ `18.2.7` แต่บล็อก `18.3.0` — มีประโยชน์ตอนที่คุณอยากกัน minor version bump ไว้ก่อนจนกว่าจะได้ review ก่อน `~> 18.0` ที่อนุญาตทั้งสาย `18.x` คือ default ทั่วไปของทีมส่วนใหญ่ ส่วนรูปแบบที่แคบกว่าอย่าง `~> 18.2.0` เหมาะกับ module ที่เคยโดน minor version เปลี่ยน behavior มาก่อน
 
 การ upgrade ข้ามขอบเขตที่ถูกบล็อกไว้ก็ยังทำได้ในคำสั่งเดียวเมื่อคุณพร้อม — แก้ `version` constraint ใน `.tf` file แล้วรัน `terraform init -upgrade` — constraint แค่ทำให้แน่ใจว่า upgrade นั้นเป็นสิ่งที่คนตัดสินใจทำเอง ไม่ใช่สิ่งที่เกิดขึ้นเงียบ ๆ ตอน `init` ครั้งถัดไป
 
@@ -65,19 +65,19 @@ module "internal_service" {
 <Mermaid title="Module source pinned to a version tag compared with an unpinned source" code={moduleVersioningDiagram} />
 
 export const moduleVersioningDiagram = `flowchart LR
-  subgraph pinned["Pinned: version = ~> 9.0"]
-    p1["terraform init today"] --> p2["Resolves 9.4.2 (latest 9.x)"]
+  subgraph pinned["Pinned: version = ~> 18.0"]
+    p1["terraform init today"] --> p2["Resolves 18.4.2 (latest 18.x)"]
     p2 --> p3["terraform init -upgrade later"]
-    p3 --> p4["Still resolves within 9.x, blocks 10.0.0"]
+    p3 --> p4["Still resolves within 18.x, blocks 19.0.0"]
   end
   subgraph unpinned["Unpinned: no version constraint"]
-    u1["terraform init today"] --> u2["Resolves 9.4.2 (latest overall)"]
+    u1["terraform init today"] --> u2["Resolves 18.4.2 (latest overall)"]
     u2 --> u3["terraform init tomorrow"]
-    u3 --> u4["Silently resolves 10.0.0 with breaking changes"]
+    u3 --> u4["Silently resolves 19.0.0 with breaking changes"]
   end`;
 
 <Callout title="The one-line takeaway">
-module **`version`** constraint สำคัญด้วยเหตุผลเดียวกับที่ provider version constraint สำคัญ — ถ้าไม่มี `terraform init` หรือ `init -upgrade` ธรรมดา ๆ ครั้งหนึ่งอาจ resolve Registry หรือ Git-tagged module release ใหม่ที่มี breaking change ที่ไม่มีใคร review มาก่อนโดยเงียบ ๆ **pessimistic constraint operator** อย่าง `~> 9.0` อนุญาตให้ resolve release ในสาย `9.x` ตัวไหนก็ได้ แต่บล็อก major bump `10.0.0` ทำให้การ upgrade เป็นการตัดสินใจที่จงใจแทนที่จะเป็นอุบัติเหตุ module ที่เฉพาะเจาะจงกับองค์กรหนึ่งควรอยู่หลัง **private Git source** หรือ **private registry** แทนที่จะเป็น public Registry และ module ที่คุณ publish สู่สาธารณะต้องอยู่ใน repository ที่ชื่อ `terraform-<PROVIDER>-<NAME>` เพื่อให้ Registry ดึงเข้ามาได้ถูกต้อง
+module **`version`** constraint สำคัญด้วยเหตุผลเดียวกับที่ provider version constraint สำคัญ — ถ้าไม่มี `terraform init` หรือ `init -upgrade` ธรรมดา ๆ ครั้งหนึ่งอาจ resolve Registry หรือ Git-tagged module release ใหม่ที่มี breaking change ที่ไม่มีใคร review มาก่อนโดยเงียบ ๆ **pessimistic constraint operator** อย่าง `~> 18.0` อนุญาตให้ resolve release ในสาย `18.x` ตัวไหนก็ได้ แต่บล็อก major bump `19.0.0` ทำให้การ upgrade เป็นการตัดสินใจที่จงใจแทนที่จะเป็นอุบัติเหตุ module ที่เฉพาะเจาะจงกับองค์กรหนึ่งควรอยู่หลัง **private Git source** หรือ **private registry** แทนที่จะเป็น public Registry และ module ที่คุณ publish สู่สาธารณะต้องอยู่ใน repository ที่ชื่อ `terraform-<PROVIDER>-<NAME>` เพื่อให้ Registry ดึงเข้ามาได้ถูกต้อง
 </Callout>
 
 export const quizModuleVersioning = [
@@ -92,11 +92,11 @@ export const quizModuleVersioning = [
     answer: 1,
   },
   {
-    q: 'constraint version = ~> 9.0 อนุญาตอะไรและบล็อกอะไร',
+    q: 'constraint version = ~> 18.0 อนุญาตอะไรและบล็อกอะไร',
     options: [
-      'อนุญาต release ในสาย 9.x ทั้งหมดและบล็อก 10.0.0',
-      'อนุญาตเฉพาะ version 9.0 เป๊ะ ๆ และบล็อก release อื่นทุกตัว',
-      'อนุญาต major version ในอนาคตทั้งหมดและบล็อกแค่ 9.0 เท่านั้น',
+      'อนุญาต release ในสาย 18.x ทั้งหมดและบล็อก 19.0.0',
+      'อนุญาตเฉพาะ version 18.0 เป๊ะ ๆ และบล็อก release อื่นทุกตัว',
+      'อนุญาต major version ในอนาคตทั้งหมดและบล็อกแค่ 18.0 เท่านั้น',
       'ไม่มีผลต่อ version ที่ Terraform resolve เลย',
     ],
     answer: 0,

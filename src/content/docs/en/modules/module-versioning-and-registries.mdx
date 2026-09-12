@@ -33,7 +33,7 @@ Pinning a `version` turns that into a deliberate, reviewable decision instead of
 ```hcl
 module "vpc" {
   source  = "terraform-google-modules/network/google"
-  version = "~> 9.0"
+  version = "~> 18.0"
 
   project_id   = var.project_id
   network_name = "app-network"
@@ -42,9 +42,9 @@ module "vpc" {
 
 ## The pessimistic constraint operator: ~>
 
-The `~>` operator is called the pessimistic constraint operator, and it means allow upgrades, but only ones unlikely to break anything. `version = "~> 9.0"` allows Terraform to resolve any `9.x` release — `9.1.0`, `9.4.2`, `9.12.0` — since those are supposed to be backward compatible under semantic versioning, but it blocks `10.0.0` outright, because a major version bump is exactly where a module's author is allowed to introduce breaking changes.
+The `~>` operator is called the pessimistic constraint operator, and it means allow upgrades, but only ones unlikely to break anything. `version = "~> 18.0"` allows Terraform to resolve any `18.x` release — `18.1.0`, `18.4.2`, `18.12.0` — since those are supposed to be backward compatible under semantic versioning, but it blocks `19.0.0` outright, because a major version bump is exactly where a module's author is allowed to introduce breaking changes.
 
-The same operator works one segment more precisely too: `version = "~> 9.2.0"` allows patch releases like `9.2.1` and `9.2.7`, but blocks `9.3.0` — useful when you want to hold even minor-version bumps until you have reviewed them. `~> 9.0`, allowing the whole `9.x` line, is the common default for most teams; the tighter `~> 9.2.0` form is for modules where you have been burned by minor-version behavior changes before.
+The same operator works one segment more precisely too: `version = "~> 18.2.0"` allows patch releases like `18.2.1` and `18.2.7`, but blocks `18.3.0` — useful when you want to hold even minor-version bumps until you have reviewed them. `~> 18.0`, allowing the whole `18.x` line, is the common default for most teams; the tighter `~> 18.2.0` form is for modules where you have been burned by minor-version behavior changes before.
 
 Upgrading past a blocked boundary is still one command away when you are ready — bump the `version` constraint in your `.tf` file, then run `terraform init -upgrade` — the constraint just makes sure that upgrade is something a person decided to do, not something that happened silently on the next `init`.
 
@@ -65,19 +65,19 @@ If you do want to publish a module of your own to the public Terraform Registry,
 <Mermaid title="Module source pinned to a version tag compared with an unpinned source" code={moduleVersioningDiagram} />
 
 export const moduleVersioningDiagram = `flowchart LR
-  subgraph pinned["Pinned: version = ~> 9.0"]
-    p1["terraform init today"] --> p2["Resolves 9.4.2 (latest 9.x)"]
+  subgraph pinned["Pinned: version = ~> 18.0"]
+    p1["terraform init today"] --> p2["Resolves 18.4.2 (latest 18.x)"]
     p2 --> p3["terraform init -upgrade later"]
-    p3 --> p4["Still resolves within 9.x, blocks 10.0.0"]
+    p3 --> p4["Still resolves within 18.x, blocks 19.0.0"]
   end
   subgraph unpinned["Unpinned: no version constraint"]
-    u1["terraform init today"] --> u2["Resolves 9.4.2 (latest overall)"]
+    u1["terraform init today"] --> u2["Resolves 18.4.2 (latest overall)"]
     u2 --> u3["terraform init tomorrow"]
-    u3 --> u4["Silently resolves 10.0.0 with breaking changes"]
+    u3 --> u4["Silently resolves 19.0.0 with breaking changes"]
   end`;
 
 <Callout title="The one-line takeaway">
-A module's **`version`** constraint matters for the same reason a provider version constraint does: without one, a routine `terraform init` or `init -upgrade` can silently resolve a newer Registry or Git-tagged module release with breaking changes nobody reviewed. The **pessimistic constraint operator**, `~> 9.0`, allows any `9.x` release but blocks the `10.0.0` major bump, making upgrades a deliberate decision instead of an accident. Modules specific to one organization belong behind a **private Git source** or **private registry** instead of the public one, and a module you do publish publicly must live in a repository named `terraform-<PROVIDER>-<NAME>` for the Registry to pick it up correctly.
+A module's **`version`** constraint matters for the same reason a provider version constraint does: without one, a routine `terraform init` or `init -upgrade` can silently resolve a newer Registry or Git-tagged module release with breaking changes nobody reviewed. The **pessimistic constraint operator**, `~> 18.0`, allows any `18.x` release but blocks the `19.0.0` major bump, making upgrades a deliberate decision instead of an accident. Modules specific to one organization belong behind a **private Git source** or **private registry** instead of the public one, and a module you do publish publicly must live in a repository named `terraform-<PROVIDER>-<NAME>` for the Registry to pick it up correctly.
 </Callout>
 
 export const quizModuleVersioning = [
@@ -92,11 +92,11 @@ export const quizModuleVersioning = [
     answer: 1,
   },
   {
-    q: 'What does the constraint version = ~> 9.0 allow and what does it block',
+    q: 'What does the constraint version = ~> 18.0 allow and what does it block',
     options: [
-      'It allows any 9.x release and blocks 10.0.0',
-      'It allows only exactly version 9.0 and blocks every other release',
-      'It allows every future major version and blocks only 9.0 itself',
+      'It allows any 18.x release and blocks 19.0.0',
+      'It allows only exactly version 18.0 and blocks every other release',
+      'It allows every future major version and blocks only 18.0 itself',
       'It has no effect on which version Terraform resolves',
     ],
     answer: 0,

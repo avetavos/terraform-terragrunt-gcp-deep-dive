@@ -71,6 +71,22 @@ terraform state rm google_compute_instance.web
 
 `terraform state mv` changes only the address Terraform uses to refer to a resource in state — useful when you restructure a configuration into modules and do not want Terraform to think it needs to destroy the old address and create a new one. `terraform state rm` is the direct opposite of `import`: it deletes a resource's entry from state so Terraform no longer manages it, but it has zero effect on the real GCP object, which keeps running exactly as it was, now simply unmanaged.
 
+### The declarative version: the removed block
+
+`terraform state rm` carries the same drawback the plain `terraform import` command does — it is an immediate, unreviewed CLI side effect with no plan step in front of it. Terraform 1.7 added the declarative counterpart, the `removed` block, which is to `state rm` what the `import` block is to `terraform import`:
+
+```hcl
+removed {
+  from = google_compute_instance.web
+
+  lifecycle {
+    destroy = false
+  }
+}
+```
+
+Delete the `resource` block from your configuration, add this `removed` block in its place, and the next `terraform plan` shows the removal for review before anything happens. The `lifecycle` argument is the part that matters: `destroy = false` tells Terraform to forget the resource while leaving the real instance running, exactly like `state rm`. The default is `destroy = true`, which forgets the resource **and** destroys it — so omitting that `lifecycle` block silently turns a hand-off into a deletion. Once the apply succeeds you can delete the `removed` block as well; it has done its job.
+
 <Mermaid title="A manually changed resource surfaces as drift on plan, while an existing untracked resource is brought in with import" code={driftImportDiagram} />
 
 export const driftImportDiagram = `flowchart LR

@@ -71,6 +71,22 @@ terraform state rm google_compute_instance.web
 
 `terraform state mv` เปลี่ยนแค่ address ที่ Terraform ใช้อ้างอิง resource ใน state — มีประโยชน์ตอน restructure configuration เข้า module แล้วไม่อยากให้ Terraform คิดว่าต้อง destroy address เก่าแล้วสร้างใหม่ `terraform state rm` ตรงข้ามกับ `import` เลย โดยลบ entry ของ resource ออกจาก state ทำให้ Terraform เลิกจัดการ แต่ไม่มีผลอะไรกับ GCP object จริงเลย object นั้นยังรันต่อไปเหมือนเดิมทุกอย่าง แค่ตอนนี้ไม่มีใครจัดการแล้ว
 
+### เวอร์ชัน declarative: removed block
+
+`terraform state rm` มีข้อเสียแบบเดียวกับคำสั่ง `terraform import` ธรรมดา คือมันเป็น side effect ของ CLI ที่เกิดขึ้นทันทีโดยไม่มีใครรีวิว ไม่มีขั้น plan มาคั่น Terraform 1.7 เลยเพิ่มคู่หูแบบ declarative เข้ามาคือ `removed` block ซึ่งเทียบกับ `state rm` ได้เหมือนที่ `import` block เทียบกับ `terraform import`
+
+```hcl
+removed {
+  from = google_compute_instance.web
+
+  lifecycle {
+    destroy = false
+  }
+}
+```
+
+ลบ `resource` block ออกจาก configuration แล้วใส่ `removed` block นี้แทนที่ พอรัน `terraform plan` ครั้งถัดไปมันจะแสดงการลบออกให้รีวิวก่อนที่อะไรจะเกิดขึ้นจริง argument `lifecycle` คือส่วนที่สำคัญที่สุด `destroy = false` บอก Terraform ให้ลืม resource นั้นไปโดยที่ instance จริงยังรันอยู่ เหมือน `state rm` เป๊ะ ๆ ค่า default คือ `destroy = true` ซึ่งแปลว่าลืม **และ** ทำลายทิ้งด้วย การลืมใส่ `lifecycle` block จึงเปลี่ยนการส่งมอบงานให้กลายเป็นการลบทิ้งแบบเงียบ ๆ พอ apply สำเร็จแล้วลบ `removed` block ทิ้งได้เลย เพราะมันทำงานของมันเสร็จแล้ว
+
 <Mermaid title="A manually changed resource surfaces as drift on plan, while an existing untracked resource is brought in with import" code={driftImportDiagram} />
 
 export const driftImportDiagram = `flowchart LR
