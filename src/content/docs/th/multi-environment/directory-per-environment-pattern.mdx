@@ -44,9 +44,9 @@ provider "google" {
 }
 
 module "app" {
-  source        = "../../modules/app"
-  environment   = "dev"
-  machine_type  = "e2-small"
+  source         = "../../modules/app"
+  environment    = "dev"
+  machine_type   = "e2-small"
   instance_count = 1
 }
 ```
@@ -66,9 +66,9 @@ provider "google" {
 }
 
 module "app" {
-  source        = "../../modules/app"
-  environment   = "staging"
-  machine_type  = "e2-medium"
+  source         = "../../modules/app"
+  environment    = "staging"
+  machine_type   = "e2-medium"
   instance_count = 2
 }
 ```
@@ -88,9 +88,9 @@ provider "google" {
 }
 
 module "app" {
-  source        = "../../modules/app"
-  environment   = "prod"
-  machine_type  = "e2-standard-4"
+  source         = "../../modules/app"
+  environment    = "prod"
+  machine_type   = "e2-standard-4"
   instance_count = 5
 }
 ```

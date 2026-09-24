@@ -9,7 +9,7 @@ import Callout from '../../../../components/Callout.astro';
 
 **Terraform** คือเครื่องมือ infrastructure as code แบบ declarative คุณอธิบาย resource บน cloud ที่ต้องการเป็น HCL แล้ว Terraform จะหาวิธีทำให้ของจริงตรงกับที่อธิบายไว้ — สร้าง แก้ไข หรือลบ resource ตามที่จำเป็น คอร์สนี้เขียนขึ้น**สำหรับ developer** — คนที่เขียนและ review การเปลี่ยนแปลง Terraform, จัดการ state ร่วมกับทีม และต้องทำให้การเปลี่ยนแปลง infrastructure ปลอดภัยบน production
 
-ทุกตัวอย่างในคอร์สนี้ใช้ **Google Cloud (GCP)** เป็นเป้าหมาย ด้วย resource type จริง (`google_compute_instance`, `google_storage_bucket`, `google_service_account` และอื่น ๆ) และ remote backend แบบ GCS จริง — HCL syntax, state model และแนวคิดของ Terragrunt ที่คุณเรียนไปใช้ได้ตรงกับ provider อื่นเช่นกัน เปลี่ยนแค่ชื่อ resource type กับ backend configuration เท่านั้น ส่วนที่ tutorial เก่ามักสอนผิด — เช่นคำสั่ง `run --all` ของ Terragrunt ที่มาแทน `run-all`/`plan-all` ที่เลิกใช้แล้ว — คอร์สนี้สอนรูปแบบที่ถูกต้องและเป็นปัจจุบัน พร้อมบอกตรง ๆ ว่าอันไหนเปลี่ยนไป
+ทุกตัวอย่างในคอร์สนี้ใช้ **Google Cloud (GCP)** เป็นเป้าหมาย ด้วย resource type จริง (`google_compute_instance`, `google_storage_bucket`, `google_service_account` และอื่น ๆ) และ remote backend แบบ GCS จริง — HCL syntax, state model และแนวคิดของ Terragrunt ที่คุณเรียนไปใช้ได้ตรงกับ provider อื่นเช่นกัน เปลี่ยนแค่ชื่อ resource type กับ backend configuration เท่านั้น ส่วนที่ tutorial เก่ามักสอนผิด — เช่นคำสั่ง `run --all` ของ Terragrunt ที่มาแทน `run-all`/`plan-all` ที่ถูกเอาออกไปแล้ว — คอร์สนี้สอนรูปแบบที่ถูกต้องและเป็นปัจจุบัน พร้อมบอกตรง ๆ ว่าอันไหนเปลี่ยนไป
 
 ## สิ่งที่คอร์สนี้ครอบคลุม
 

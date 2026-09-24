@@ -50,11 +50,11 @@ Upgrading past a blocked boundary is still one command away when you are ready �
 
 ## Private sources and publishing your own module
 
-Not every module belongs on the public Registry. A module that encodes one company's specific security policies, naming conventions, or internal service wiring has no reason to be public, and probably should not be. Terraform supports the same `source` mechanics for these cases — a private Git repository (often over SSH, so `init` can authenticate with existing credentials) or a private module registry, such as Terraform Cloud's private registry or an internally hosted one:
+Not every module belongs on the public Registry. A module that encodes one company's specific security policies, naming conventions, or internal service wiring has no reason to be public, and probably should not be. Terraform supports the same `source` mechanics for these cases — a private Git repository (often over SSH, so `init` can authenticate with existing credentials) or a private module registry, such as HCP Terraform's private registry or an internally hosted one:
 
 ```hcl
 module "internal_service" {
-  source  = "git::ssh://git@github.com/acme-corp/terraform-modules.git//internal-service?ref=v1.4.0"
+  source = "git::ssh://git@github.com/acme-corp/terraform-modules.git//internal-service?ref=v1.4.0"
 
   project_id = var.project_id
 }

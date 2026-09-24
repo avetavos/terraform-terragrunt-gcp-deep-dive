@@ -23,7 +23,7 @@ terragrunt run --all plan
 terragrunt run --all apply
 ```
 
-นี่คือ syntax ของ command ปัจจุบัน คุ้มค่าที่จะพูดให้ชัดว่ามาแทนอะไร เพราะ content จำนวนมากบนอินเทอร์เน็ตยังสอน syntax เก่าอยู่ `terragrunt run-all plan` แบบไม่มีช่องว่างก่อน `--all` เป็น deprecated แล้ว ส่วน command เก่ากว่าคือ `terragrunt plan-all` กับ `terragrunt apply-all` ถูกเอาออกไปหมดแล้ว รันบน Terragrunt version ปัจจุบันไม่ได้เลย ถ้า tutorial, blog post, หรือ internal wiki ไหนยังโชว์ `plan-all` หรือ `apply-all` อยู่ ให้ถือว่านั่นคือสัญญาณว่า content นั้นเก่ากว่า CLI ปัจจุบัน และต้อง verify ส่วนที่เหลือก่อนเชื่อ
+นี่คือ syntax ของ command ปัจจุบัน คุ้มค่าที่จะพูดให้ชัดว่ามาแทนอะไร เพราะ content จำนวนมากบนอินเทอร์เน็ตยังสอน syntax เก่าอยู่ `terragrunt run-all plan` แบบไม่มีช่องว่างก่อน `--all` รวมถึง command เก่ากว่าคือ `terragrunt plan-all` กับ `terragrunt apply-all` ถูกเอาออกไปหมดทั้งคู่แล้วบน Terragrunt version ปัจจุบัน การรันคำสั่งไหนในสามคำสั่งนี้ไม่ได้แค่ขึ้น deprecation warning แล้วรันต่อ แต่ fail ทันทีด้วย `unknown command` เพราะ Terragrunt ไม่ forward command ที่ไม่รู้จักให้อีกต่อไปโดย default ถ้า tutorial, blog post, หรือ internal wiki ไหนยังโชว์ `run-all`, `plan-all` หรือ `apply-all` อยู่ ให้ถือว่านั่นคือสัญญาณว่า content นั้นเก่ากว่า CLI ปัจจุบัน และต้อง verify ส่วนที่เหลือก่อนเชื่อ
 
 ## scope ด้วย --filter และรันแบบ non-interactive ใน CI
 
@@ -73,7 +73,7 @@ export const runAllDiagram = `flowchart TD
   compute --> hook["after_hook: notify_slack"]`;
 
 <Callout title="สรุปหนึ่งบรรทัด">
-`terragrunt run --all plan` กับ `terragrunt run --all apply` คือ command ปัจจุบันสำหรับ operate กับทุก unit ใต้ directory tree ตามลำดับที่ Terragrunt คำนวณจาก `dependency` block ของแต่ละ unit syntax เก่าอย่าง `terragrunt run-all <command>` เป็น deprecated แล้ว และ `plan-all`/`apply-all` ถูกเอาออกไปทั้งหมด ให้ถือว่า content ไหนสอนแบบนั้นเป็นข้อมูลเก่า scope `run --all` ให้แคบลงเหลือบางส่วนของ tree ด้วย `--filter` (ซึ่งมาแทน `--queue-include-dir`/`--queue-exclude-dir`) และข้าม confirmation prompt ใน CI ด้วย `--non-interactive` `before_hook` กับ `after_hook` block ข้างใน `terraform` block ของ unit รัน shell command ตามใจก่อนหรือหลัง Terragrunt command เฉพาะบน unit นั้น เหมาะกับ validate ก่อน `plan` หรือแจ้งเตือนหลัง `apply`
+`terragrunt run --all plan` กับ `terragrunt run --all apply` คือ command ปัจจุบันสำหรับ operate กับทุก unit ใต้ directory tree ตามลำดับที่ Terragrunt คำนวณจาก `dependency` block ของแต่ละ unit syntax เก่าอย่าง `terragrunt run-all <command>` และ `plan-all`/`apply-all` ถูกเอาออกไปทั้งหมดแล้ว — ไม่มีอันไหนในสามอันนี้รันได้บน version ปัจจุบัน ให้ถือว่า content ไหนสอนแบบนั้นเป็นข้อมูลเก่า scope `run --all` ให้แคบลงเหลือบางส่วนของ tree ด้วย `--filter` (ซึ่งมาแทน `--queue-include-dir`/`--queue-exclude-dir`) และข้าม confirmation prompt ใน CI ด้วย `--non-interactive` `before_hook` กับ `after_hook` block ข้างใน `terraform` block ของ unit รัน shell command ตามใจก่อนหรือหลัง Terragrunt command เฉพาะบน unit นั้น เหมาะกับ validate ก่อน `plan` หรือแจ้งเตือนหลัง `apply`
 </Callout>
 
 export const quizRunAll = [
@@ -90,8 +90,8 @@ export const quizRunAll = [
   {
     q: 'อะไรคือความจริงเกี่ยวกับ plan-all, apply-all, และ run-all ในปัจจุบัน',
     options: [
-      'ทั้งสามอย่างยังทำงานเหมือนเดิมทุกประการและแนะนำให้ใช้เท่ากัน',
-      'plan-all กับ apply-all ถูกเอาออกไปทั้งหมดแล้ว และ run-all เป็น deprecated โดยให้ใช้ run --all แทน',
+      'plan-all กับ apply-all ถูกเอาออกไปแล้ว แต่ run-all ยังใช้งานได้อยู่ เพียงแค่เป็น deprecated โดยให้ใช้ run --all แทน',
+      'ทั้งสามคำสั่งถูกเอาออกไปหมดแล้ว การรันคำสั่งไหนก็ตามจะ fail ทันทีด้วย unknown command แทนที่จะแค่ขึ้น deprecation warning แล้วรันต่อ',
       'run-all ถูกเอาออกไปแล้ว ส่วน plan-all/apply-all คือ command ปัจจุบันที่แนะนำ',
       'ทั้งหมดเป็นแค่ alias ของ run --all ที่ทำงานเหมือนกันเป๊ะโดยไม่มี warning ใด ๆ',
     ],

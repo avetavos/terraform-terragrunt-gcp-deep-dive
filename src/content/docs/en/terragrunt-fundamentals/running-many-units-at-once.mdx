@@ -23,7 +23,7 @@ terragrunt run --all plan
 terragrunt run --all apply
 ```
 
-This is the current command syntax. It is worth being explicit about what it replaced, because a lot of existing material online still teaches the old forms: `terragrunt run-all plan` — without the space before `--all` — is deprecated, and the older `terragrunt plan-all` and `terragrunt apply-all` commands have been removed completely; they will not run at all on a current Terragrunt install. If a tutorial, blog post, or internal wiki still shows `plan-all` or `apply-all`, treat that as a sign the content predates the current CLI and verify the rest of it before trusting it.
+This is the current command syntax. It is worth being explicit about what it replaced, because a lot of existing material online still teaches the old forms: `terragrunt run-all plan` — without the space before `--all` — and the older `terragrunt plan-all` and `terragrunt apply-all` commands have all been removed outright on a current Terragrunt install. Running any of them does not just print a deprecation warning and continue; it fails immediately with `unknown command`, since Terragrunt no longer forwards unrecognized commands by default. If a tutorial, blog post, or internal wiki still shows `run-all`, `plan-all`, or `apply-all`, treat that as a sign the content predates the current CLI and verify the rest of it before trusting it.
 
 ## Scoping with --filter, and running non-interactively in CI
 
@@ -73,7 +73,7 @@ export const runAllDiagram = `flowchart TD
   compute --> hook["after_hook: notify_slack"]`;
 
 <Callout title="The one-line takeaway">
-`terragrunt run --all plan` and `terragrunt run --all apply` are the current commands for operating on every unit under a directory tree, applied in the order Terragrunt computes from each unit's `dependency` blocks; the older `terragrunt run-all <command>` syntax is deprecated and `plan-all`/`apply-all` have been removed entirely, so treat any content teaching those as stale. Scope a `run --all` to part of the tree with `--filter` (which replaced `--queue-include-dir`/`--queue-exclude-dir`), and skip confirmation prompts in CI with `--non-interactive`. `before_hook` and `after_hook` blocks inside a unit's `terraform` block run an arbitrary shell command before or after specific Terragrunt commands on that unit, useful for validation before a `plan` or notifications after an `apply`.
+`terragrunt run --all plan` and `terragrunt run --all apply` are the current commands for operating on every unit under a directory tree, applied in the order Terragrunt computes from each unit's `dependency` blocks; the older `terragrunt run-all <command>` syntax and `plan-all`/`apply-all` have all been removed entirely — none of the three runs on a current install, so treat any content teaching those as stale. Scope a `run --all` to part of the tree with `--filter` (which replaced `--queue-include-dir`/`--queue-exclude-dir`), and skip confirmation prompts in CI with `--non-interactive`. `before_hook` and `after_hook` blocks inside a unit's `terraform` block run an arbitrary shell command before or after specific Terragrunt commands on that unit, useful for validation before a `plan` or notifications after an `apply`.
 </Callout>
 
 export const quizRunAll = [
@@ -90,8 +90,8 @@ export const quizRunAll = [
   {
     q: 'What is true about plan-all, apply-all, and run-all today?',
     options: [
-      'All three still work exactly as before and are equally recommended',
-      'plan-all and apply-all have been removed completely, and run-all is deprecated in favor of run --all',
+      'plan-all and apply-all were removed, but run-all still works and is merely deprecated in favor of run --all',
+      'All three have been removed outright; running any of them fails immediately with unknown command instead of just printing a deprecation warning',
       'run-all was removed and plan-all/apply-all are the current recommended commands',
       'They are all just aliases for run --all with identical behavior and no warnings',
     ],

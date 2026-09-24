@@ -49,7 +49,7 @@ import { Card, CardGrid } from '@astrojs/starlight/components';
     ทุกหัวข้อเริ่มจาก model — dependency graph, state file, ปัญหา DRY ที่ Terragrunt แก้ — พอเข้าใจแล้วพฤติกรรมของ Terraform จะกลายเป็นกลไกที่คุณเข้าใจ ไม่ใช่ HCL ที่ copy-paste ตามกัน
   </Card>
   <Card title="ตาม practice ปัจจุบัน ที่ verify แล้ว" icon="random">
-    เขียนตาม practice ปัจจุบันของ Terraform และ Terragrunt และตรวจสอบกับ official docs ผ่าน context7 — รวมถึงการปรับ CLI ของ Terragrunt เป็น `run --all` ซึ่ง tutorial เก่าหลายที่ยังสอนผิดอยู่
+    เขียนตาม practice ปัจจุบันของ Terraform และ Terragrunt และตรวจสอบกับ official docs ผ่าน context7 — รวมถึงการปรับ CLI ของ Terragrunt เป็น `run --all` ซึ่ง tutorial เก่าหลายที่ยังสอนผิดอยู่ ตรวจสอบกับ Terraform 1.16, Terragrunt 1.1 และ provider `hashicorp/google` สาย 8.x แล้ว
   </Card>
   <Card title="GCP จริง trade-off จริง" icon="approve-check">
     ไม่ใช่แค่ "นี่คือ resource block" แต่เป็น "remote state ให้อะไรจริง ๆ และตรงไหนที่ isolation ของ workspace เดียวกันยังพังได้" คุณจะ reason เรื่องการเปลี่ยนแปลง infrastructure ได้อย่างมั่นใจ

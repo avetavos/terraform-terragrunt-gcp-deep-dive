@@ -28,7 +28,7 @@ terraform init
 terraform plan
 ```
 
-```
+```text
 # example output
 Terraform will perform the following actions:
 
@@ -92,7 +92,7 @@ provider "registry.terraform.io/hashicorp/google" {
 }
 ```
 
-This file should be **committed to version control**. It is the provider-level analogue of a `package-lock.json` or `Gemfile.lock`: without it, two different runs of `terraform init` — your laptop today, a teammate's laptop tomorrow, a CI runner next week — could each resolve `~> 6.0` to a different patch release, and a subtle behavior difference in the provider could produce a different plan on someone else's machine for no visible reason. With the lock file committed, every `init` installs the identical versions until someone deliberately runs `terraform init -upgrade` to move the constraints forward.
+This file should be **committed to version control**. It is the provider-level analogue of a `package-lock.json` or `Gemfile.lock`: without it, two different runs of `terraform init` — your laptop today, a teammate's laptop tomorrow, a CI runner next week — could each resolve `~> 8.0` to a different patch release, and a subtle behavior difference in the provider could produce a different plan on someone else's machine for no visible reason. With the lock file committed, every `init` installs the identical versions until someone deliberately runs `terraform init -upgrade` to move the constraints forward.
 
 <Callout title="The one-line takeaway">
 The everyday loop is **init** (install providers, set up the backend), **plan** (a dry-run diff, changes nothing), **apply** (execute the plan against real GCP), and **destroy** (tear down everything managed); saving a plan with `plan -out=tfplan` then running `apply tfplan` guarantees the exact reviewed plan is what runs, and the committed **`.terraform.lock.hcl`** pins exact provider versions and checksums so every teammate and CI run gets identical providers.

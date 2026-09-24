@@ -50,11 +50,11 @@ operator ตัวเดียวกันนี้ใช้ได้ละเ�
 
 ## private source และการ publish module ของตัวเอง
 
-ไม่ใช่ทุก module ที่ควรอยู่บน public Registry module ที่ encode security policy, naming convention หรือการเชื่อมต่อ service ภายในของบริษัทหนึ่งไม่มีเหตุผลที่ต้อง public และอาจไม่ควร public ด้วยซ้ำ Terraform รองรับ `source` mechanic แบบเดียวกันสำหรับกรณีนี้ — private Git repository (มักผ่าน SSH เพื่อให้ `init` authenticate ด้วย credential ที่มีอยู่แล้ว) หรือ private module registry เช่น private registry ของ Terraform Cloud หรือ registry ที่ host เองภายในองค์กร
+ไม่ใช่ทุก module ที่ควรอยู่บน public Registry module ที่ encode security policy, naming convention หรือการเชื่อมต่อ service ภายในของบริษัทหนึ่งไม่มีเหตุผลที่ต้อง public และอาจไม่ควร public ด้วยซ้ำ Terraform รองรับ `source` mechanic แบบเดียวกันสำหรับกรณีนี้ — private Git repository (มักผ่าน SSH เพื่อให้ `init` authenticate ด้วย credential ที่มีอยู่แล้ว) หรือ private module registry เช่น private registry ของ HCP Terraform หรือ registry ที่ host เองภายในองค์กร
 
 ```hcl
 module "internal_service" {
-  source  = "git::ssh://git@github.com/acme-corp/terraform-modules.git//internal-service?ref=v1.4.0"
+  source = "git::ssh://git@github.com/acme-corp/terraform-modules.git//internal-service?ref=v1.4.0"
 
   project_id = var.project_id
 }

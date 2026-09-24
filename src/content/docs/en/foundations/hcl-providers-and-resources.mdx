@@ -52,7 +52,7 @@ terraform {
 }
 ```
 
-`source` is the provider's registry address (`hashicorp/google` resolves to the official Google Cloud provider on the Terraform Registry), and `version` is a constraint, not a pin — `~> 6.0` allows any `6.x` release.
+`source` is the provider's registry address (`hashicorp/google` resolves to the official Google Cloud provider on the Terraform Registry), and `version` is a constraint, not a pin — `~> 8.0` allows any `8.x` release.
 
 The `provider` block then configures one instance of a provider you declared above — for GCP, this is where the project and region (and, in real projects, things like credentials) live:
 

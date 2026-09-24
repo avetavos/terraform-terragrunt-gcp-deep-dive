@@ -28,7 +28,7 @@ terraform init
 terraform plan
 ```
 
-```
+```text
 # example output
 Terraform will perform the following actions:
 
@@ -92,7 +92,7 @@ provider "registry.terraform.io/hashicorp/google" {
 }
 ```
 
-ไฟล์นี้ควร**ถูก commit เข้า version control** เพราะเป็น provider-level analogue ของ `package-lock.json` หรือ `Gemfile.lock` ถ้าไม่มีไฟล์นี้ การรัน `terraform init` แต่ละครั้ง — โน้ตบุ๊กคุณวันนี้ โน้ตบุ๊กเพื่อนร่วมทีมพรุ่งนี้ CI runner สัปดาห์หน้า — อาจ resolve `~> 6.0` ไปคนละ patch release กัน และความต่างเล็ก ๆ ของ behavior ใน provider ก็อาจทำให้เครื่องคนอื่นได้ plan ที่ต่างออกไปโดยไม่มีเหตุผลที่มองเห็น เมื่อ commit lock file ไว้ ทุกครั้งที่ `init` จะติดตั้งเวอร์ชันเดิมเป๊ะ ๆ จนกว่าจะมีคนตั้งใจรัน `terraform init -upgrade` เพื่อขยับ constraint ไปข้างหน้า
+ไฟล์นี้ควร**ถูก commit เข้า version control** เพราะเป็น provider-level analogue ของ `package-lock.json` หรือ `Gemfile.lock` ถ้าไม่มีไฟล์นี้ การรัน `terraform init` แต่ละครั้ง — โน้ตบุ๊กคุณวันนี้ โน้ตบุ๊กเพื่อนร่วมทีมพรุ่งนี้ CI runner สัปดาห์หน้า — อาจ resolve `~> 8.0` ไปคนละ patch release กัน และความต่างเล็ก ๆ ของ behavior ใน provider ก็อาจทำให้เครื่องคนอื่นได้ plan ที่ต่างออกไปโดยไม่มีเหตุผลที่มองเห็น เมื่อ commit lock file ไว้ ทุกครั้งที่ `init` จะติดตั้งเวอร์ชันเดิมเป๊ะ ๆ จนกว่าจะมีคนตั้งใจรัน `terraform init -upgrade` เพื่อขยับ constraint ไปข้างหน้า
 
 <Callout title="สรุปหนึ่งบรรทัด">
 loop ที่ใช้ทุกวันคือ **init** (ติดตั้ง provider, เตรียม backend), **plan** (dry-run diff ไม่เปลี่ยนอะไรจริง), **apply** (รัน plan จริงกับ GCP) และ **destroy** (รื้อทุกอย่างที่จัดการอยู่ทิ้ง) การ save plan ด้วย `plan -out=tfplan` แล้วรัน `apply tfplan` การันตีว่า plan ที่ review ไว้คือสิ่งที่รันจริง และ **`.terraform.lock.hcl`** ที่ commit ไว้ pin เวอร์ชันและ checksum ของ provider ให้ทุกคนในทีมและทุก CI run ได้ provider เดียวกันเป๊ะ ๆ
