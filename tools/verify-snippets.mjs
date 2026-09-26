@@ -109,7 +109,7 @@ const REPO_ROOT = path.resolve(import.meta.dirname, '..');
 const PROBE_DIR = path.join(REPO_ROOT, 'tools/probe');
 const LESSONS_DIR = path.join(PROBE_DIR, 'lessons');
 const DOCS_EN = path.join(REPO_ROOT, 'src/content/docs/en');
-const PLUGIN_CACHE_DIR = path.join(PROBE_DIR, '.plugin-cache');
+const PLUGIN_CACHE_DIR = process.env.VERIFY_PLUGIN_CACHE_DIR ?? (path.join(PROBE_DIR, '.plugin-cache')); // env override: give each concurrent agent its own cache
 const CONFIG_PATH = path.join(REPO_ROOT, 'tools/harness.config.json');
 
 const CONFIG = JSON.parse(readFileSync(CONFIG_PATH, 'utf8'));
