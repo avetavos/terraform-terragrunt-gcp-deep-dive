@@ -9,3 +9,6 @@ node_modules/
 .env.production
 # macOS
 .DS_Store
+# verify-snippets harness scratch probe (regenerated on every run — see
+# tools/verify-snippets.mjs / README "Harness" section)
+tools/probe/

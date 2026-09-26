@@ -1,0 +1,8 @@
+{
+  "cloud": "gcp",
+  "providerLabel": "google",
+  "providerSource": "hashicorp/google",
+  "providerVersion": "~> 8.0",
+  "requiredVersion": ">= 1.11.0",
+  "mockProviderBlock": "provider \"google\" {\n  project = \"mock-project\"\n  region  = \"us-central1\"\n}\n"
+}
