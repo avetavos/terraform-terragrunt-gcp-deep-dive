@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## ไอเดียในหนึ่งประโยค
 
@@ -83,7 +84,151 @@ terraform state show google_compute_instance.web
 
 `terraform state list` คือวิธีเร็วที่สุดในการตอบคำถามว่า "configuration นี้จัดการอะไรอยู่ตอนนี้" คำสั่งนี้ print address อย่าง `google_compute_instance.web` หรือ `module.network.google_compute_network.main` โดยไม่มีรายละเอียดอื่น `terraform state show <address>` จะลงลึกไป address ใดตัวหนึ่ง แล้ว print attribute ทุกตัวที่ Terraform บันทึกไว้ ซึ่งบ่อยครั้งเร็วกว่าการไปเปิด Google Cloud Console เวลาต้องเช็คค่าที่ Terraform track อยู่
 
-<Mermaid title="Config and real GCP resources both feed the state file that the next plan reads" code={stateFlowDiagram} />
+## กายวิภาคของ state file จริง
+
+ตัวอย่างข้างล่างนี้ไม่ได้เขียนจากความจำ — มาจาก `terraform apply` จริงกับ resource สองตัวที่ไม่ต้องใช้ cloud credential เลย: `terraform_data` (ตัวแทน `null_resource` ที่ deprecated ไปแล้วของ built-in provider) และ `local_file` (`hashicorp/local`) นี่คือ JSON structure ชุดเดียวกับที่ state ของ GCP ใช้ — format ไม่ขึ้นกับ provider ต่างกันแค่สตริง `provider` กับ `type`/`attributes` ของ resource ถ้าเป็น `google_*` จริง configuration:
+
+```hcl
+# main.tf
+terraform {
+  required_providers {
+    local = {
+      source  = "hashicorp/local"
+      version = "~> 2.5"
+    }
+  }
+}
+
+resource "terraform_data" "trigger" {
+  input = "v1"
+}
+
+resource "local_file" "config" {
+  filename = "${path.module}/generated/app.conf"
+  content  = "listen=8080\ntrigger_id=${terraform_data.trigger.output}\n"
+}
+```
+
+หลัง `terraform init -backend=false && terraform apply -auto-approve` ไฟล์ `terraform.tfstate` จริงบน disk (ตัด machine path ออกแล้ว)
+
+```json
+{
+  "version": 4,
+  "terraform_version": "1.16.4",
+  "serial": 6,
+  "lineage": "91789eb2-a206-8e38-2571-62323b581164",
+  "outputs": {},
+  "resources": [
+    {
+      "mode": "managed",
+      "type": "local_file",
+      "name": "config",
+      "provider": "provider[\"registry.terraform.io/hashicorp/local\"]",
+      "instances": [
+        {
+          "schema_version": 0,
+          "attributes": {
+            "content": "listen=8080\ntrigger_id=v1\n",
+            "content_sha1": "7551ae2164513c74b5c0665a6b28b6a40399686f",
+            "filename": "./generated/app.conf",
+            "id": "7551ae2164513c74b5c0665a6b28b6a40399686f"
+          },
+          "dependencies": ["terraform_data.trigger"],
+          "sensitive_attributes": [[{ "type": "get_attr", "value": "sensitive_content" }]]
+        }
+      ]
+    },
+    {
+      "mode": "managed",
+      "type": "terraform_data",
+      "name": "trigger",
+      "provider": "provider[\"terraform.io/builtin/terraform\"]",
+      "instances": [
+        {
+          "schema_version": 0,
+          "attributes": {
+            "id": "7e48645a-6b7e-14c9-d8b3-99d042610145",
+            "input": { "value": "v1", "type": "string" },
+            "output": { "value": "v1", "type": "string" }
+          },
+          "sensitive_attributes": []
+        }
+      ]
+    }
+  ],
+  "check_results": null
+}
+```
+
+field ระดับบนสุดแต่ละตัวมีความหมายเฉพาะ
+
+- **`version`** — เวอร์ชันของ *format* ไฟล์ state (เป็น 4 มาตั้งแต่ Terraform 0.12 — ไม่เกี่ยวกับเวอร์ชันของตัว Terraform binary)
+- **`terraform_version`** — เวอร์ชัน CLI จริงที่เขียนไฟล์นี้ครั้งล่าสุด
+- **`serial`** — ตัวนับที่เพิ่มขึ้นทุกครั้งที่เขียน state ไฟล์ state สองไฟล์ที่มี `lineage` เดียวกันจะถูกเทียบกันด้วย `serial` เพื่อดูว่าไฟล์ไหนใหม่กว่า
+- **`lineage`** — UUID ที่ generate ครั้งเดียวตอนสร้าง state ให้ working directory ครั้งแรก มันไม่เปลี่ยนตลอดอายุของ state นั้น และเป็นวิธีที่ Terraform แยก "state เดียวกันแต่เป็นก็อปปี้เก่ากว่า" ออกจาก "state คนละไฟล์กันที่หน้าตาคล้ายกันเฉย ๆ"
+- **`resources[]`** — หนึ่ง entry ต่อ resource *block* (ไม่ใช่ต่อ instance — `count`/`for_each` ใช้ entry เดียวกันแต่มีหลาย `instances[]`) แต่ละตัวมี `mode`, `type`, `name`, `provider`, และ `instances` ถ้าเป็น `google_compute_instance` จริง `type` จะเป็น `"google_compute_instance"` และ `provider` จะเป็น `provider["registry.terraform.io/hashicorp/google"]`
+- **`instances[].attributes`** — attribute ทุกตัวที่ provider ส่งกลับมาหลัง create/read ข้อมูลชุดเดียวกับที่ `terraform state show` print ออกมา
+- **`instances[].dependencies`** — resource address ที่ configuration ของ instance นี้อ้างถึง (พิสูจน์ข้างบน: `local_file.config` depend on `terraform_data.trigger` เพราะ `content` ของมัน interpolate `terraform_data.trigger.output`) นี่คือ dependency metadata ที่พูดถึงข้างบนเป๊ะ ๆ — เป็นเหตุผลที่ `destroy` รื้อ resource ตามลำดับที่ถูกต้องได้โดยไม่ต้องคำนวณ dependency ใหม่ตั้งแต่ต้น
+
+## `terraform show -json` ข้อมูลชุดเดียวกัน แต่ provider-agnostic และเสถียร
+
+`terraform state show` ข้างบนเป็น format ที่อ่านง่ายสำหรับคน `terraform show -json` คือ machine-readable contract ที่ tool อื่น (Sentinel, OPA/conftest, custom CI check) ต้อง parse — มัน document ไว้ชัดเจน มี version (`format_version`) และไม่เปลี่ยนรูปแบบระหว่างเวอร์ชัน provider เหมือน internal ของ raw state บางครั้งเป็น output จริง (ตัดทอน) จาก apply เดียวกัน
+
+```json
+{
+  "format_version": "1.0",
+  "terraform_version": "1.16.4",
+  "values": {
+    "root_module": {
+      "resources": [
+        {
+          "address": "local_file.config",
+          "mode": "managed",
+          "type": "local_file",
+          "name": "config",
+          "provider_name": "registry.terraform.io/hashicorp/local",
+          "values": {
+            "content": "listen=8080\ntrigger_id=v1\n",
+            "id": "7551ae2164513c74b5c0665a6b28b6a40399686f"
+          },
+          "sensitive_values": { "sensitive_content": true },
+          "depends_on": ["terraform_data.trigger"]
+        }
+      ]
+    }
+  }
+}
+```
+
+`drift-detection-and-import.mdx` และ `sensitive-data-and-team-workflows.mdx` ต่างก็กลับมาใช้ `show -json` เพราะ proof ของ `-detailed-exitcode` และ `sensitive_values` map ทั้งคู่อยู่ใน structure นี้เป๊ะ ๆ
+
+## ทำไมการแก้ state ด้วยมือถึงพัง `lineage` กับ `serial` ถูกบังคับใช้จริง ไม่ใช่แค่ตกแต่ง
+
+`terraform state push <file>` อัพโหลด state file ในเครื่องไปแทนที่สิ่งที่ backend ถืออยู่ตอนนี้ — และมันบังคับตรวจ `lineage` กับ `serial` ก่อนจะยอมทำแบบนั้น เพื่อกันไม่ให้คุณเอา state เก่าหรือไม่เกี่ยวข้องไปทับ state ที่ใหม่กว่า พิสูจน์ เอา state จริงข้างบน เปลี่ยน `lineage` เป็น UUID สุ่ม แล้ว push กลับ
+
+```text
+$ terraform state push tampered.tfstate
+Failed to write state: cannot import state with lineage "00000000-0000-0000-0000-000000000000" over unrelated state with lineage "91789eb2-a206-8e38-2571-62323b581164"
+```
+
+state เดียวกัน แต่ตั้ง `serial` ให้ย้อนกลับแทน
+
+```text
+$ terraform state push tampered2.tfstate
+Failed to write state: cannot import state with serial 1 over newer state with serial 6
+```
+
+ทั้งสองคือ error จริงจาก Terraform 1.16.4 ไม่ได้จำลอง นี่คือเหตุผลที่การแก้ `terraform.tfstate` ด้วย text editor ตรง ๆ อันตราย แม้จะตั้งใจแก้แค่ field เดียว เว้นแต่คุณจะเพิ่ม `serial` ให้ถูกต้องด้วย (และไม่แตะ `lineage` เลย) consistency check ของ Terraform เองจะปฏิเสธการเขียนทันทีตอนคุณพยายาม push กลับ — และถ้าคุณข้าม check นี้ไปด้วยการเขียนทับ backend object ตรง ๆ (ข้าม `state push` ไปเลย เช่น copy ไฟล์ทับ GCS object ด้วยมือ) ก็ไม่มีอะไรหยุดคุณได้ ซึ่งนี่คือ failure mode ตัวจริง state เสียหายแบบเงียบ ไม่มี error เลย จะรู้ตัวอีกทีก็ตอน `plan` ครั้งถัดไป ที่ความเข้าใจของ Terraform ไม่ตรงกับ GCP resource ที่ deploy จริงอีกต่อไป `terraform state mv`, `import`, และ `rm` ถูกสร้างมาเพื่อไม่ให้คุณต้องเปิด JSON ด้วยมือเลย — มันอัพเดต `serial` ให้ถูกต้องในตัวเป็นส่วนหนึ่งของ operation เดียวกัน
+
+## gcs backend เก็บอะไรจริง ๆ
+
+คอร์สนี้ใช้ **local** backend สำหรับ proof ทุกอันข้างบน (ไม่ต้องใช้ credential) แต่ production state บน GCP อยู่บน `gcs` backend ตาม documentation ของ GCS backend เอง
+
+> "Stores the state as an object in a configurable prefix in a pre-existing bucket on Google Cloud Storage (GCS)." — [developer.hashicorp.com/terraform/language/backend/gcs](https://developer.hashicorp.com/terraform/language/backend/gcs)
+
+ดังนั้น state JSON ที่แสดงข้างบนคือสิ่งที่ไปอยู่ใน GCS object นั้นเป๊ะ ๆ — shape เดียวกันของ `version`/`serial`/`lineage`/`resources` ไม่มีอะไรเฉพาะ GCP เพิ่มเข้ามา argument `prefix` ควบคุมว่า object นั้น (และ object ของแต่ละ workspace) อยู่ตรงไหนใต้ bucket — ตาม docs "named states for workspaces are stored in an object called `<prefix>/<name>.tfstate`" gcs backend documentation ยืนยันว่า locking รองรับ แต่ต่างจากหน้า S3 backend (ที่บอกชัดว่าเป็น object `<key>.tflock`) หรือหน้า azurerm (ที่ระบุกลไก blob lease) หน้า docs ของ gcs ไม่ได้ document กลไก locking ที่แน่ชัดไว้ในตัวเนื้อหาเอง — บอกตรง ๆ แบบนี้ดีกว่าเดาสุ่ม implementation detail ที่ไม่มีหน้า HashiCorp ไหนยืนยัน สิ่งที่ docs ยืนยันได้ ไม่ต้อง provision lock resource แยก (table, bucket เพิ่ม) — locking เป็นคุณสมบัติของ backend กับ bucket เดียวกันนั่นเอง `remote-backends-and-locking.mdx` พูดถึง backend block เต็ม ๆ, migration, และ `force-unlock`
+
+<Mermaid title="ทั้ง config และ resource จริงบน GCP ป้อนข้อมูลเข้า state file ที่ plan ครั้งถัดไปอ่าน" code={stateFlowDiagram} />
 
 export const stateFlowDiagram = `flowchart LR
   cfg["Terraform config (.tf files)"] --> apply["terraform apply"]
@@ -92,8 +237,44 @@ export const stateFlowDiagram = `flowchart LR
   cfg -->|next run| plan["terraform plan"]
   state -->|read for comparison| plan`;
 
+## Mental Model
+
+state คือความจำ*เดียว*ของ Terraform เกี่ยวกับความจริง — ไม่ใช่ cache ที่ทิ้งได้ปลอดภัย และไม่ใช่ log ที่ append เพิ่มด้วยมือได้ปลอดภัย ทุกอย่างในบทนี้มาจากข้อเท็จจริงเดียว GCP API ไม่รู้จัก Terraform เลย ทุกบิตของ "สร้างอะไรไปแล้ว หน้าตาเป็นยังไง" ต้องอยู่ที่ที่ Terraform ควบคุมได้เต็มที่ `lineage` กับ `serial` ไม่ใช่ metadata ให้คนอ่านเฉย ๆ — มันคือกลไกที่ทำให้ `state push` เป็น operation ที่ปลอดภัยและถูกตรวจสอบ แทนที่จะเป็นการเขียนทับแบบไม่ดูอะไร ปฏิบัติกับ state file เหมือนกับ transaction log ของ database คุณอ่านมันด้วย tool ที่สร้างมาเพื่ออ่าน (`state show`, `show -json`, `state pull`) และแก้มันด้วยคำสั่งที่สร้างมาเพื่อแก้ (`state mv`, `import`, `rm`) — ไม่ใช่ text editor เด็ดขาด
+
+## ข้อแลกเปลี่ยน
+
+| ทางเลือก | ได้อะไร | เสียอะไร |
+|---|---|---|
+| cache attribute ทุกตัวไว้ใน state | `plan` เทียบกับข้อมูล cache แทนที่จะ describe resource ทุกตัวใหม่จาก GCP API — ได้ performance จริงเมื่อ scale ใหญ่ | attribute ทุกตัว รวม secret อยู่แบบ plaintext บน disk หรือใน GCS object (พิสูจน์ข้างบน) |
+| consistency check `lineage`/`serial` บน `state push` | state เก่าหรือไม่เกี่ยวข้องเขียนทับ state ปัจจุบันแบบเงียบ ๆ ไม่ได้ (พิสูจน์ข้างบนสองครั้ง) | ป้องกันแค่ทาง `state push` — การเขียนทับ GCS object ตรง ๆ ข้าม check นี้ได้เลย ไม่มี error |
+| `terraform show -json` เป็น machine format ที่เสถียร | tool (policy check, CI, custom script) พึ่ง schema ที่ document ไว้ มี version แทนที่จะ parse output ที่อ่านง่ายสำหรับคน | มี representation ของข้อมูลชุดเดียวกันสองแบบให้จำ raw `terraform.tfstate` กับ `show -json` ไม่ใช่ shape เดียวกัน |
+
+## ความเข้าใจผิดที่พบบ่อย
+
+- **"state เก็บแค่สิ่งที่ใส่ใน `output` block"** พิสูจน์ข้างบน attribute เต็มชุดของ `local_file.config` — รวมค่าที่มาจากการคำนวณที่ไม่เคย output เลย — ถูกเขียนลง `resources[].instances[].attributes` ไม่ว่าจะมี `output` block หรือไม่
+- **"แก้ `terraform.tfstate` ด้วยมือได้ปลอดภัย ถ้าระวังพอ"** พิสูจน์ข้างบน `state push` ปฏิเสธการเปลี่ยน `lineage` และ `serial` ที่ย้อนกลับด้วย error จริง ความอันตรายจริง ๆ อยู่ที่กรณีที่ error นั้นไม่ครอบคลุม — การเขียนทับ GCS object ตรง ๆ ที่ไม่มี error หรือ warning ใด ๆ
+- **"`serial` คือจำนวน resource หรือ version number ที่เราตั้งเองได้"** มันคือตัวนับการเขียนภายในที่ Terraform เพิ่มเอง คุณไม่เคยตั้งมันเอง และการตั้งเป็นค่าที่ไม่ใช่ "สูงกว่าค่าปัจจุบัน" คือสิ่งที่ `state push` ปฏิเสธในพิสูจน์ข้างบน
+- **"argument `prefix` ของ gcs backend ใช้สร้าง bucket อัตโนมัติเหมือน `project`/`location`"** `remote-backends-and-locking.mdx` พิสูจน์ด้วย `terragrunt render` output จริงว่า `project` กับ `location` ถูกใช้สร้าง bucket อัตโนมัติ ส่วน `prefix` มีผลแค่ path ของ object ข้างในเท่านั้น — docs ที่ quote ข้างบน ("named states for workspaces are stored in an object called `<prefix>/<name>.tfstate`") ยืนยันว่า `prefix` เป็นแค่ path ไม่ใช่ input สำหรับสร้าง bucket
+
+## อ่านโค้ดที่ AI เขียน
+
+ตอน review Terraform ที่ generate มาแล้วแตะ state ตรง ๆ เช็คสิ่งเหล่านี้
+
+- script ที่เปิด `terraform.tfstate` ด้วย `sed`/`jq -i`/text editor เพื่อ "แก้" ค่าเดียว ณ ที่นั้น แล้วหวังให้ `apply` ครั้งถัดไป pick up ไป — พิสูจน์ข้างบน อย่างดีก็โดน `state push` ปฏิเสธด้วย check `lineage`/`serial` อย่างแย่ backend object เสียหายแบบเงียบ ๆ ถ้า check ถูกข้ามไป
+- `.gitignore` ไม่มี `*.tfstate*` เลย หรือมีแค่ `terraform.tfstate` แต่ขาด `terraform.tfstate.backup` กับ `*.tfstate.*` (workspace variant)
+- โค้ดหรือ runbook ที่คิดว่า `serial` เป็นเลขที่ตั้งเองได้ปลอดภัย ("ตั้ง serial เป็น 1 เพื่อ reset") — มันคือตัวนับการเขียนแบบ monotonic ที่ backend บังคับใช้ ไม่ใช่ field ให้เลือกเลขเอง
+- custom drift-checking script ที่อ่าน `terraform.tfstate` ตรง ๆ ด้วย local path ที่ hardcode ไว้ แทนที่จะใช้ `terraform state pull` ซึ่งพังทันทีที่โปรเจกต์เปลี่ยนไปใช้ remote `gcs` backend
+- อ้างเป็นข้อเท็จจริงว่า GCS implement locking ภายในยังไงเป๊ะ ๆ — พิสูจน์ข้างบน docs ของ HashiCorp ที่ fetch มายืนยันแค่ว่ารองรับ locking โดยไม่ document กลไก บอกช่องว่างนี้ตรง ๆ ดีกว่าเดา internal ที่ฟังดูสมเหตุสมผล
+
+<SpotTheBug code={`#!/usr/bin/env bash
+# "quick fix" for a wrong machine_type recorded in state
+sed -i '' 's/"e2-medium"/"e2-standard-4"/' terraform.tfstate
+terraform state push terraform.tfstate`}>
+มีปัญหาจริงสองอย่าง พิสูจน์ข้างบน อย่างแรก `state push` บังคับตรวจ `lineage`/`serial` — แต่ `sed -i` ตรงนี้ไม่ได้เปลี่ยนทั้งสอง field เลย push อาจ*สำเร็จ*ได้จริง ๆ ซึ่งคือกับดัก Terraform เชื่อว่า instance มี `machine_type` เป็น `e2-standard-4` ไปแล้ว ทั้งที่ GCP ยังรัน instance แบบ `e2-medium` อยู่ ไม่มีการเรียก Compute Engine API มา verify เลย `plan` ครั้งถัดไปจะไม่แสดงการเปลี่ยนแปลงใด ๆ (state ตอนนี้ "เห็นด้วย" กับค่าที่แก้ไปแบบผิด ๆ แล้ว) drift ระหว่าง state ที่แก้กับ instance จริงจะไม่ถูกจับได้เลยจนกว่าอย่างอื่นจะทำให้เห็น วิธีแก้ที่ถูกต้องเมื่อ "state ไม่ตรงกับความจริง" ไม่ใช่การแก้มือเด็ดขาด — คือ `terraform apply` (ถ้า config ควรชนะ), `terraform plan -refresh-only` (เพื่อดูว่าอะไรเปลี่ยน), หรือ `terraform import`/`state rm` (พูดถึงใน `drift-detection-and-import.mdx`) ทั้งหมดนี้ผ่านกลไก consistency ของ Terraform เอง ไม่ใช่การข้ามมันไป
+</SpotTheBug>
+
 <Callout title="สรุปหนึ่งบรรทัด">
-**state** ของ Terraform คือ record แบบ JSON ที่แมป resource address ใน configuration เข้ากับ object ID จริงบน GCP พร้อม attribute ทั้งหมด — มีอยู่เพราะ provider API บอก Terraform ไม่ได้ว่าตัวเองจัดการอะไร และยังทำหน้าที่เป็น cache ด้าน performance ทำให้ `plan` ไม่ต้อง describe resource ทุกตัวใหม่ตั้งแต่ต้น เพราะ state เก็บทุก attribute แบบ **plaintext** รวมถึง secret อย่าง database password ด้วย `terraform.tfstate` และ `terraform.tfstate.backup` ต้องอยู่ใน `.gitignore` ตั้งแต่วันแรก ใช้ `terraform state list` เพื่อดูว่า track อะไรอยู่ และ `terraform state show <address>` เพื่อดูรายละเอียดของ resource ตัวใดตัวหนึ่ง
+**state** ของ Terraform คือ record แบบ JSON ที่แมป resource address ใน configuration เข้ากับ object ID และ attribute จริง — พิสูจน์ข้างบนทีละ field (`version`/`serial`/`lineage`/`resources[].instances[].attributes`/`dependencies`) มีอยู่เพราะ provider API บอก Terraform ไม่ได้ว่าตัวเองจัดการอะไร และยังทำหน้าที่เป็น performance cache กับ machine-readable contract (`terraform show -json`) ให้ policy tooling ใช้ เพราะ attribute ทุกตัวเก็บแบบ **plaintext** `terraform.tfstate` กับ `.backup`/workspace variant ของมันต้องอยู่ใน `.gitignore` ตั้งแต่วันแรก `lineage` กับ `serial` ทำให้ `state push` เป็นการเขียนที่ *ถูกตรวจสอบ* — พิสูจน์ข้างบนด้วย lineage-mismatch จริงและ serial-regression จริงที่ถูกปฏิเสธ — แต่ check นี้ครอบคลุมแค่ `state push` การเขียนทับ GCS object ตรง ๆ ข้ามมันได้แบบเงียบ ๆ `prefix` ของ gcs backend ควบคุมแค่ path ของ object ไม่เกี่ยวกับการสร้าง bucket ใช้ `terraform state list`/`state show`/`state pull` เพื่ออ่าน state และ `state mv`/`import`/`rm` เพื่อแก้ — ไม่ใช่ text editor เด็ดขาด
 </Callout>
 
 export const quizStateFile = [
@@ -106,6 +287,7 @@ export const quizStateFile = [
       'state ของ Terraform มาแทนที่ configuration file ทั้งหมด',
     ],
     answer: 1,
+    explain: 'Compute Engine API ไม่มีแนวคิดเรื่อง "Terraform" เลย — บอกไม่ได้ว่า resource ตัวไหน Terraform สร้าง เทียบกับที่สร้างมือหรือด้วย tool อื่น state คือ record ที่ปิดช่องว่างนั้น และยังทำหน้าที่เป็น cache ทำให้ plan ไม่ต้อง describe resource ทุกตัวใหม่',
   },
   {
     q: 'database password ถูกตั้งเป็น resource attribute แต่ไม่เคย print ด้วย terraform output ค่านั้นยังไปอยู่แบบ plaintext ที่ไหนได้ไหม',
@@ -116,6 +298,29 @@ export const quizStateFile = [
       'ไม่ได้ Terraform เข้ารหัส attribute value ทุกตัวใน state ให้อัตโนมัติ',
     ],
     answer: 1,
+    explain: 'พิสูจน์ข้างบน attribute เต็มชุดของ local_file.config ไปอยู่ใน resources[].instances[].attributes ไม่ว่าจะมี output block หรือไม่ ไม่มี attribute-level filtering ใด ๆ โดย default',
+  },
+  {
+    q: '```json\n{\n  "serial": 1,\n  "lineage": "00000000-0000-0000-0000-000000000000"\n}\n```\nstate file ที่แก้มือแบบนี้ ถูก push ด้วย `terraform state push tampered.tfstate` กับ backend ที่ตอนนี้อยู่ที่ serial 6, lineage `91789eb2-...` จะเกิดอะไรขึ้น',
+    options: [
+      'Terraform ยอมรับแบบเงียบ ๆ เพราะ state push เขียนทับเสมอ',
+      'Terraform ปฏิเสธการ push — ทั้ง lineage mismatch และ serial regression ถูกตรวจสอบ พิสูจน์ข้างบนด้วย error text จริง',
+      'Terraform merge state ทั้งสองเข้าด้วยกันอัตโนมัติ',
+      'Terraform ลบ state เดิมทิ้งแล้วเริ่มใหม่',
+    ],
+    answer: 1,
+    explain: 'output จริงจาก Terraform 1.16.4: "Failed to write state: cannot import state with lineage ... over unrelated state" และแยกกัน "cannot import state with serial 1 over newer state with serial 6" — พิสูจน์ทั้งคู่ข้างบน',
+  },
+  {
+    q: 'field `dependencies` บน state resource instance บันทึกอะไรจริง ๆ พิสูจน์จากตัวอย่าง local_file.config / terraform_data.trigger ข้างบน',
+    options: [
+      'Terraform provider plugin ตัวไหนถูกติดตั้งบ้าง',
+      'resource address ที่ configuration ของ instance นี้อ้างถึง — ในที่นี้ local_file.config depend on terraform_data.trigger เพราะ content interpolate output ของอันหลัง',
+      'ลำดับที่ resource ปรากฏในไฟล์ .tf',
+      'รายชื่อ resource ทั้งหมดใน state ไม่ว่าจะเกี่ยวข้องกันหรือไม่',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ข้างบน instance ของ local_file.config มี "dependencies": ["terraform_data.trigger"] เพราะ attribute content ของมันอ้างถึง terraform_data.trigger.output นี่คือ ordering metadata ที่ Terraform ใช้สำหรับลำดับ create/update/destroy',
   },
   {
     q: 'terraform state list กับ terraform state show ต่างกันยังไง',
@@ -126,16 +331,18 @@ export const quizStateFile = [
       'state show แสดง resource list และ state list แสดง attribute',
     ],
     answer: 1,
+    explain: 'พิสูจน์ข้างบน `terraform state list` print address สองตัวเปล่า ๆ ไม่มีรายละเอียด ส่วน `terraform state show local_file.config` print attribute เต็มของแค่ resource ตัวนั้น',
   },
   {
-    q: '.gitignore ของโปรเจกต์ Terraform ใหม่ ควรมีอะไรตั้งแต่ commit แรก',
+    q: 'ตาม gcs backend documentation ที่ quote ข้างบน argument `prefix` ควบคุมอะไรจริง ๆ',
     options: [
-      'มีแค่ไฟล์ configuration .tf เท่านั้น',
-      'terraform.tfstate และ terraform.tfstate.backup เพราะ state อาจมี secret แบบ plaintext อยู่',
-      'ไม่ต้องมีอะไรเลย state file commit ได้ปลอดภัยตราบใดที่มีการ review',
-      'มีแค่ binary ของ provider plugin เท่านั้น',
+      'มันสร้าง GCS bucket อัตโนมัติใน project และ location ที่กำหนด',
+      'มันคือ path ที่ state object (และ object ของแต่ละ workspace) ถูกเก็บไว้ — "named states for workspaces are stored in an object called <prefix>/<name>.tfstate"',
+      'มันตั้งค่า IAM permission ที่ต้องใช้อ่าน bucket',
+      'มันเปิดใช้ state locking ซึ่ง default ปิดอยู่',
     ],
     answer: 1,
+    explain: 'quote ข้างบนจาก developer.hashicorp.com/terraform/language/backend/gcs prefix เป็นแค่ path prefix ของ object เท่านั้น remote-backends-and-locking.mdx พิสูจน์แยกต่างหากว่า project/location ไม่ใช่ prefix คือสิ่งที่ถูกใช้สร้าง bucket อัตโนมัติใน Terragrunt remote_state block',
   },
 ];
 

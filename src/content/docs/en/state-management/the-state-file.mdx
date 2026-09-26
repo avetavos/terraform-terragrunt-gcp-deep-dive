@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## The idea in one sentence
 
@@ -83,6 +84,150 @@ terraform state show google_compute_instance.web
 
 `terraform state list` is the fast way to answer "what does this configuration actually manage right now" — it prints addresses like `google_compute_instance.web` or `module.network.google_compute_network.main` with no other detail. `terraform state show <address>` drills into one of those addresses and prints every attribute Terraform has recorded for it, which is often faster than going to the Google Cloud Console when you need to check a specific value Terraform is tracking.
 
+## Anatomy of a real state file
+
+The examples below are not reconstructed from memory — they come from a real `terraform apply` against two resources that need no cloud credentials at all: `terraform_data` (the built-in provider's replacement for the deprecated `null_resource`) and `local_file` (`hashicorp/local`). This is the same underlying JSON structure GCP state uses — the format is provider-independent; only the `provider` string and the resource `type`/`attributes` would differ for a real `google_*` resource. The config:
+
+```hcl
+# main.tf
+terraform {
+  required_providers {
+    local = {
+      source  = "hashicorp/local"
+      version = "~> 2.5"
+    }
+  }
+}
+
+resource "terraform_data" "trigger" {
+  input = "v1"
+}
+
+resource "local_file" "config" {
+  filename = "${path.module}/generated/app.conf"
+  content  = "listen=8080\ntrigger_id=${terraform_data.trigger.output}\n"
+}
+```
+
+After `terraform init -backend=false && terraform apply -auto-approve`, the real `terraform.tfstate` on disk (machine paths stripped):
+
+```json
+{
+  "version": 4,
+  "terraform_version": "1.16.4",
+  "serial": 6,
+  "lineage": "91789eb2-a206-8e38-2571-62323b581164",
+  "outputs": {},
+  "resources": [
+    {
+      "mode": "managed",
+      "type": "local_file",
+      "name": "config",
+      "provider": "provider[\"registry.terraform.io/hashicorp/local\"]",
+      "instances": [
+        {
+          "schema_version": 0,
+          "attributes": {
+            "content": "listen=8080\ntrigger_id=v1\n",
+            "content_sha1": "7551ae2164513c74b5c0665a6b28b6a40399686f",
+            "filename": "./generated/app.conf",
+            "id": "7551ae2164513c74b5c0665a6b28b6a40399686f"
+          },
+          "dependencies": ["terraform_data.trigger"],
+          "sensitive_attributes": [[{ "type": "get_attr", "value": "sensitive_content" }]]
+        }
+      ]
+    },
+    {
+      "mode": "managed",
+      "type": "terraform_data",
+      "name": "trigger",
+      "provider": "provider[\"terraform.io/builtin/terraform\"]",
+      "instances": [
+        {
+          "schema_version": 0,
+          "attributes": {
+            "id": "7e48645a-6b7e-14c9-d8b3-99d042610145",
+            "input": { "value": "v1", "type": "string" },
+            "output": { "value": "v1", "type": "string" }
+          },
+          "sensitive_attributes": []
+        }
+      ]
+    }
+  ],
+  "check_results": null
+}
+```
+
+Every top-level field means something specific:
+
+- **`version`** — the state file *format* version (4 since Terraform 0.12; unrelated to the Terraform binary version).
+- **`terraform_version`** — the actual CLI version that last wrote this file.
+- **`serial`** — a counter incremented on every write. Two state files claiming the same `lineage` are compared by `serial` to decide which is newer.
+- **`lineage`** — a UUID generated once, the first time state is created for a working directory. It never changes for the life of that state, and it is how Terraform tells "an older copy of the same state" apart from "an unrelated state file that happens to look similar."
+- **`resources[]`** — one entry per resource *block* (not per instance — `count`/`for_each` share one entry with multiple `instances[]`), each with `mode`, `type`, `name`, `provider`, and `instances`. For a `google_compute_instance`, `type` would be `"google_compute_instance"` and `provider` would read `provider["registry.terraform.io/hashicorp/google"]`.
+- **`instances[].attributes`** — every attribute the provider returned after create/read, the same data `terraform state show` prints.
+- **`instances[].dependencies`** — the resource addresses this instance's config referenced (proven above: `local_file.config` depends on `terraform_data.trigger` because its `content` interpolates `terraform_data.trigger.output`). This is exactly the ordering metadata mentioned above — it is why a `destroy` tears things down in the right order without recomputing dependencies from scratch.
+
+## `terraform show -json`: the same data, provider-agnostic and stable
+
+`terraform state show` above is a human-readable *format* meant to be read by a person. `terraform show -json` is the machine-readable contract other tools (Sentinel, OPA/conftest, custom CI checks) are meant to parse — it is documented, versioned (`format_version`), and does not change shape between provider versions the way raw state internals sometimes do. Real output (trimmed) from the same apply:
+
+```json
+{
+  "format_version": "1.0",
+  "terraform_version": "1.16.4",
+  "values": {
+    "root_module": {
+      "resources": [
+        {
+          "address": "local_file.config",
+          "mode": "managed",
+          "type": "local_file",
+          "name": "config",
+          "provider_name": "registry.terraform.io/hashicorp/local",
+          "values": {
+            "content": "listen=8080\ntrigger_id=v1\n",
+            "id": "7551ae2164513c74b5c0665a6b28b6a40399686f"
+          },
+          "sensitive_values": { "sensitive_content": true },
+          "depends_on": ["terraform_data.trigger"]
+        }
+      ]
+    }
+  }
+}
+```
+
+`drift-detection-and-import.mdx` and `sensitive-data-and-team-workflows.mdx` both come back to `show -json`, because `-detailed-exitcode` proofs and the `sensitive_values` map both live in this exact structure.
+
+## Why hand-editing state breaks it: `lineage` and `serial` are enforced, not decorative
+
+`terraform state push <file>` uploads a local state file to replace whatever the backend currently holds — and it enforces `lineage` and `serial` before it will do that, precisely to stop you from clobbering a newer state with a stale or unrelated one. Proof: take the real state above, flip its `lineage` to a random UUID, and push it back:
+
+```text
+$ terraform state push tampered.tfstate
+Failed to write state: cannot import state with lineage "00000000-0000-0000-0000-000000000000" over unrelated state with lineage "91789eb2-a206-8e38-2571-62323b581164"
+```
+
+Same state, `serial` set backwards instead:
+
+```text
+$ terraform state push tampered2.tfstate
+Failed to write state: cannot import state with serial 1 over newer state with serial 6
+```
+
+Both are real refusals from Terraform 1.16.4, not simulated errors. This is exactly why hand-editing `terraform.tfstate` in a text editor is dangerous even when you only mean to fix one field: unless you also correctly bump `serial` (and never touch `lineage`), Terraform's own consistency check rejects the write the moment you try to push it back — and if you bypass that check by overwriting the backend object directly (skipping `state push` entirely, e.g. hand-copying a file into a GCS object), nothing stops you, which is the real failure mode: silent corruption with no error at all, only discovered on the next `plan` when Terraform's idea of reality no longer matches the GCP resources actually deployed. `terraform state mv`, `import`, and `rm` all exist specifically so you never need to open the JSON by hand — they update `serial` correctly as part of the same operation.
+
+## What the GCS backend actually stores
+
+This course uses a **local** backend for every proof above (no credentials needed), but production GCP state lives in a `gcs` backend. Per the GCS backend's own documentation:
+
+> "Stores the state as an object in a configurable prefix in a pre-existing bucket on Google Cloud Storage (GCS)." — [developer.hashicorp.com/terraform/language/backend/gcs](https://developer.hashicorp.com/terraform/language/backend/gcs)
+
+So the state JSON shown above is exactly what lands in that GCS object — same `version`/`serial`/`lineage`/`resources` shape, nothing GCP-specific added. The `prefix` argument controls where under the bucket that object (and any named workspace's object) lives — per the docs, "named states for workspaces are stored in an object called `<prefix>/<name>.tfstate`." The gcs backend documentation confirms locking is supported but, unlike the S3 backend page (which spells out the `<key>.tflock` object) or the azurerm page (which names the blob-lease mechanism), it does not document the exact locking mechanism in the page text itself — worth stating plainly rather than guessing at an implementation detail no fetched HashiCorp page confirms. What the docs do confirm: no separate lock resource (table, extra bucket) needs to be provisioned — locking is a property of the backend against the same bucket. `remote-backends-and-locking.mdx` covers the full backend block, migration, and `force-unlock`.
+
 <Mermaid title="Config and real GCP resources both feed the state file that the next plan reads" code={stateFlowDiagram} />
 
 export const stateFlowDiagram = `flowchart LR
@@ -92,8 +237,44 @@ export const stateFlowDiagram = `flowchart LR
   cfg -->|next run| plan["terraform plan"]
   state -->|read for comparison| plan`;
 
+## Mental Model
+
+State is Terraform's *only* memory of reality — not a cache you can safely discard and not a log you can safely append to by hand. Everything in this lesson follows from one fact: the GCP API has no idea Terraform exists, so every bit of "what did I create, and what did it look like" has to live somewhere Terraform fully controls. `lineage` and `serial` are not metadata for humans to read — they are the mechanism that makes `state push` a safe, checked operation instead of a blind overwrite. Treat the state file the way you'd treat a database's transaction log: you read it with the tools built for reading it (`state show`, `show -json`, `state pull`), and you mutate it with the commands built for mutating it (`state mv`, `import`, `rm`) — never a text editor.
+
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---|---|---|
+| Caching every attribute in state | `plan` compares against cached data instead of re-describing every resource from the GCP API — real performance win at scale | Every attribute, including secrets, sits in plaintext on disk or in the GCS object (proven above) |
+| `lineage`/`serial` consistency checks on `state push` | A stale or unrelated state file cannot silently clobber current state (proven above, twice) | Only protects the `state push` path — a direct GCS-object overwrite bypasses the check entirely, with no error |
+| `terraform show -json` as a stable machine format | Tooling (policy checks, CI, custom scripts) can rely on a documented, versioned schema instead of parsing human-readable output | A second representation of the same data to keep in mind; raw `terraform.tfstate` internals and `show -json` are not the same shape |
+
+## Common Misconceptions
+
+- **"State only stores what I put in `output` blocks."** Proven above: `local_file.config`'s full attribute set — including derived values it never explicitly output — is written into `resources[].instances[].attributes` regardless of any `output` block.
+- **"I can safely hand-edit `terraform.tfstate` as long as I'm careful."** Proven above: `state push` rejects a `lineage` change and a `serial` regression with a real error. The danger is exactly the case that error doesn't cover — overwriting the GCS object directly, which produces no error and no warning, only a `plan` that no longer matches reality.
+- **"`serial` is the resource count, or a version number I control."** It is an internal write counter Terraform increments itself. You never set it, and setting it to anything other than "higher than the current value" is what `state push` refuses in the proof above.
+- **"The GCS backend's `prefix` argument is used to auto-create the bucket, like `project`/`location` are."** `remote-backends-and-locking.mdx` proves with real `terragrunt render` output that `project` and `location` are consumed to auto-create the bucket while `prefix` only ever affects the object path inside it — the docs quote above ("named states for workspaces are stored in an object called `<prefix>/<name>.tfstate`") confirms `prefix` is purely a path, not a bucket-creation input.
+
+## Reading AI-generated code
+
+When reviewing generated Terraform that touches state directly, check for:
+
+- A script that opens `terraform.tfstate` with `sed`/`jq -i`/a text editor to "fix" one value in place, then relies on the next `apply` to pick it up — proven above, this either gets rejected by `state push`'s `lineage`/`serial` check, or worse, silently corrupts the backend object if the check is bypassed.
+- `.gitignore` missing `*.tfstate*` entirely, or only listing `terraform.tfstate` and missing `terraform.tfstate.backup` and the `*.tfstate.*` (workspace) variants.
+- Code or a runbook that assumes `serial` is something safe to set to a specific number ("set serial to 1 to reset") — it is a monotonic write counter enforced by the backend, not a field to hand-pick.
+- A custom drift-checking script that reads `terraform.tfstate` directly with a hardcoded local path instead of `terraform state pull`, which breaks the moment the project switches to a remote `gcs` backend.
+- A claim, stated as fact, about exactly how GCS implements the backend's locking internally — proven above, the fetched HashiCorp docs confirm locking is supported without documenting the mechanism; state that gap rather than inventing a plausible-sounding internal.
+
+<SpotTheBug code={`#!/usr/bin/env bash
+# "quick fix" for a wrong machine_type recorded in state
+sed -i '' 's/"e2-medium"/"e2-standard-4"/' terraform.tfstate
+terraform state push terraform.tfstate`}>
+Two real problems, proven above. First, `state push` enforces `lineage`/`serial` — but `sed -i` here doesn't change either field, so the push might actually *succeed*, which is the trap: Terraform now believes the instance's `machine_type` is `e2-standard-4` while GCP still has an `e2-medium` instance running. Nothing calls the Compute Engine API to verify. The next `plan` will show no change (state now falsely agrees with the edited value), so drift between the edited state and the real instance goes completely undetected until something else surfaces it. The correct fix for "state disagrees with reality" is never a hand edit — it's `terraform apply` (if the config should win), `terraform plan -refresh-only` (to see what changed), or `terraform import`/`state rm` (covered in `drift-detection-and-import.mdx`), all of which go through Terraform's own consistency machinery instead of bypassing it.
+</SpotTheBug>
+
 <Callout title="The one-line takeaway">
-Terraform **state** is the JSON record mapping your configuration's resource addresses to real GCP object IDs and their attributes — it exists because provider APIs cannot tell Terraform what it manages, and it doubles as a performance cache so `plan` does not have to re-describe every resource from scratch. Because state stores every attribute in **plaintext**, including secrets like database passwords, `terraform.tfstate` and `terraform.tfstate.backup` must be in `.gitignore` from day one. Use `terraform state list` to see what is tracked and `terraform state show <address>` to inspect one resource in detail.
+Terraform **state** is the JSON record mapping your configuration's resource addresses to real object IDs and attributes — proven above field by field (`version`/`serial`/`lineage`/`resources[].instances[].attributes`/`dependencies`), it exists because provider APIs cannot tell Terraform what it manages, and it doubles as a performance cache and a machine-readable contract (`terraform show -json`) for policy tooling. Because every attribute is stored in **plaintext**, `terraform.tfstate` and its `.backup`/workspace variants must be in `.gitignore` from day one. `lineage` and `serial` make `state push` a *checked* write — proven above with a real lineage-mismatch and a real serial-regression refusal — but that check only covers `state push`; a direct GCS-object overwrite bypasses it silently. The gcs backend's `prefix` only controls the object path, never bucket creation. Use `terraform state list`/`state show`/`state pull` to read state, and `state mv`/`import`/`rm` to change it — never a text editor.
 </Callout>
 
 export const quizStateFile = [
@@ -106,6 +287,7 @@ export const quizStateFile = [
       'Terraform state replaces the need for a configuration file entirely',
     ],
     answer: 1,
+    explain: 'The Compute Engine API has no concept of "Terraform" — it cannot distinguish a resource Terraform created from one made by hand or by another tool. State is the record that closes that gap, and it doubles as a cache so plan does not re-describe every resource.',
   },
   {
     q: 'A database password was set as a resource attribute but was never printed with terraform output. Can it still end up readable in plain text',
@@ -116,6 +298,29 @@ export const quizStateFile = [
       'No, Terraform automatically encrypts all attribute values in state',
     ],
     answer: 1,
+    explain: 'Proven above: local_file.config\'s full attribute set lands in resources[].instances[].attributes regardless of any output block. There is no attribute-level filtering by default.',
+  },
+  {
+    q: '```json\n{\n  "serial": 1,\n  "lineage": "00000000-0000-0000-0000-000000000000"\n}\n```\nA hand-edited state file like this is pushed with `terraform state push tampered.tfstate` against a backend currently at serial 6, lineage `91789eb2-...`. What happens?',
+    options: [
+      'Terraform accepts it silently since state push always overwrites',
+      'Terraform refuses the push — both the lineage mismatch and the serial regression are checked, proven above with real error text',
+      'Terraform merges the two states automatically',
+      'Terraform deletes the existing state and starts fresh',
+    ],
+    answer: 1,
+    explain: 'Real Terraform 1.16.4 output: "Failed to write state: cannot import state with lineage ... over unrelated state" and, separately, "cannot import state with serial 1 over newer state with serial 6" — both proven above.',
+  },
+  {
+    q: 'What does the `dependencies` field on a state resource instance actually record, proven in the local_file.config / terraform_data.trigger example above?',
+    options: [
+      'Which Terraform provider plugins are installed',
+      'The resource addresses this instance\'s configuration referenced — here, local_file.config depends on terraform_data.trigger because its content interpolates the latter\'s output',
+      'The order resources appear in the .tf file',
+      'A list of every resource in the entire state, regardless of relationship',
+    ],
+    answer: 1,
+    explain: 'Proven above: local_file.config\'s instance has "dependencies": ["terraform_data.trigger"] because its content attribute references terraform_data.trigger.output. This is the ordering metadata Terraform uses for create/update/destroy ordering.',
   },
   {
     q: 'What is the difference between terraform state list and terraform state show',
@@ -126,16 +331,18 @@ export const quizStateFile = [
       'state show lists resources and state list shows their attributes',
     ],
     answer: 1,
+    explain: 'Proven above: `terraform state list` printed two bare addresses with no detail; `terraform state show local_file.config` printed the full attribute block for just that one resource.',
   },
   {
-    q: 'What belongs in .gitignore for a new Terraform project from the first commit',
+    q: 'According to the gcs backend documentation quoted above, what does the `prefix` argument actually control?',
     options: [
-      'Only the .tf configuration files',
-      'terraform.tfstate and terraform.tfstate.backup, since state can contain plaintext secrets',
-      'Nothing, state files are safe to commit as long as they are reviewed',
-      'Only the provider plugin binaries',
+      'It auto-creates the GCS bucket in the given project and location',
+      'It is the path under which the state object (and each named workspace\'s object) is stored — "named states for workspaces are stored in an object called <prefix>/<name>.tfstate"',
+      'It sets the IAM permissions required to read the bucket',
+      'It enables state locking, which is off by default',
     ],
     answer: 1,
+    explain: 'Quoted above from developer.hashicorp.com/terraform/language/backend/gcs: prefix is purely an object-path prefix. remote-backends-and-locking.mdx proves separately that project/location, not prefix, are what get consumed for bucket auto-creation in a Terragrunt remote_state block.',
   },
 ];
 
