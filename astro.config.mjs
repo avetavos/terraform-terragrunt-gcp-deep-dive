@@ -38,6 +38,7 @@ export default defineConfig({
         { label: 'Multi-Environment', items: [{ autogenerate: { directory: 'multi-environment' } }] },
         { label: 'Terragrunt Fundamentals', items: [{ autogenerate: { directory: 'terragrunt-fundamentals' } }] },
         { label: 'Production & Ecosystem', items: [{ autogenerate: { directory: 'production-and-ecosystem' } }] },
+        { label: 'Glossary', translations: { th: 'อภิธานศัพท์' }, link: 'glossary' },
       ],
       }), preact()],
 });
