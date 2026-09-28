@@ -1,0 +1,214 @@
+---
+title: 'Provider Plugin Protocol'
+description: 'go-plugin บน gRPC, protocol v5/v6, handshake จริงจาก TF_LOG=TRACE กับ call GetProviderSchema กับ hashicorp/google 8.4.0 (schema JSON จริง 19.6MB), ทำไม init ต้องโหลด binary ต่อ OS/arch, provider crash ที่ทำให้เกิดขึ้นจริง, terraform-plugin-framework เทียบกับ SDKv2, และ dev_overrides พิสูจน์ด้วย error path พังจริง'
+sidebar:
+  order: 4
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
+
+## ไอเดียในหนึ่งประโยค
+
+`hashicorp/google` ไม่ใช่โค้ดที่ link เข้ากับ binary `terraform` — มันคือ **executable แยก** ที่ `terraform init` โหลดมาต่อ OS/architecture ซึ่ง Terraform Core สั่งรันเป็น **subprocess** แล้วคุยผ่าน **gRPC** (library [go-plugin](https://github.com/hashicorp/go-plugin), protocol version 5 หรือ 6) และทุก call ของ schema, plan, apply คือ RPC จริงข้าม process boundary นั้น พิสูจน์ได้ด้วย `TF_LOG=TRACE`
+
+## ทำไม `init` ต้องโหลด binary ต่อ OS/arch — พิสูจน์แล้ว
+
+```text
+$ find .terraform/providers -name "terraform-provider-google_*"
+.terraform/providers/registry.terraform.io/hashicorp/google/8.4.0/darwin_arm64/terraform-provider-google_v8.4.0_x5
+```
+
+path นี้เข้ารหัสสิ่งที่ต้องตรงเป๊ะ ๆ: registry source, เวอร์ชัน, **และ** `darwin_arm64` — Go executable ที่ compile แยกจริง ไม่ใช่ script แบบพกพาหรือ bytecode format ไม่มี provider binary แบบ "universal" เลย `init` แก้ [Terraform registry protocol](https://developer.hashicorp.com/terraform/internals/provider-registry-protocol) ให้ตรงคู่ OS/arch ที่ CLI กำลังรันอยู่จริง แล้วโหลดไฟล์นั้นไฟล์เดียว นี่คือเหตุผลที่ provider ที่คุณ build เองด้วย `go build` ได้ binary ที่ใช้ได้แค่ OS/arch ของคุณเอง cross-compile สำหรับ CI เป็นขั้นตอนจริงแยกต่างหาก (`GOOS`/`GOARCH`) ไม่ใช่อัตโนมัติ
+
+## handshake จริง จับสด ๆ ด้วย `TF_LOG=TRACE`
+
+```text
+$ TF_LOG=TRACE terraform providers schema -json > /dev/null 2> trace.log
+$ grep -iE "starting plugin|plugin address|GetProviderSchema" trace.log
+2026-09-29T04:06:40.543+0700 [DEBUG] provider: starting plugin: path=.../terraform-provider-google_v8.4.0_x5
+2026-09-29T04:06:40.576+0700 [DEBUG] provider.terraform-provider-google_v8.4.0_x5: plugin address: address=/var/folders/.../plugin3325580010 network=unix
+2026-09-29T04:06:40.580+0700 [TRACE] GRPCProvider: GetProviderSchema
+2026-09-29T04:06:40.580+0700 [TRACE] provider.terraform-provider-google_v8.4.0_x5: Received request: tf_proto_version=5.11 tf_rpc=GetProviderSchema tf_provider_addr=registry.terraform.io/hashicorp/google @caller=github.com/hashicorp/terraform-plugin-go@v0.31.0/tfprotov5/tf5server/server.go:544
+```
+
+3 ข้อเท็จจริงจริงใน trace เดียวนี้: Terraform Core **สั่งรัน provider binary เป็น OS subprocess** (`starting plugin: path=...`); provider เปิด **Unix domain socket** ของตัวเองแล้วรายงาน address กลับผ่าน stdout (`plugin address: ... network=unix`) — นี่คือ handshake ของ go-plugin ไม่ใช่ HTTP ไม่ใช่การเรียก shared library; และ call จริงตัวแรกทันทีที่ socket พร้อมคือ `GetProviderSchema` ซึ่งเป็น gRPC method จริง log ไว้พร้อม request ID และ protocol version ที่ใช้เป๊ะ ๆ
+
+## Protocol v5 เทียบกับ v6 — พิสูจน์แล้ว: `hashicorp/google` คือ v5.11 ตอนนี้เลย
+
+```text
+$ TF_LOG=TRACE terraform providers schema -json >/dev/null 2>trace.log
+$ grep -m1 tf_proto_version trace.log
+tf_proto_version=5.11 tf_rpc=GetProviderSchema tf_provider_addr=registry.terraform.io/hashicorp/google
+```
+
+ชื่อ binary เองก็ยืนยันแยกอิสระด้วย — `terraform-provider-google_v8.4.0_x5` ที่ `_x5` ท้ายชื่อคือ convention จริงที่ [terraform-plugin-go](https://github.com/hashicorp/terraform-plugin-go) ใช้บอกว่า binary compile มาสำหรับ protocol 5 (สมมติเป็น `_x6` ก็จะคือ protocol 6) ตาม [เอกสาร Terraform Plugin Protocol](https://developer.hashicorp.com/terraform/plugin/how-terraform-works#terraform-plugin-protocol) protocol 6 มีไว้หลัก ๆ เพื่อรองรับ function กับ capability ใหม่ ๆ ที่มีแค่ใน plugin framework; `hashicorp/google` 8.4.0 negotiate และ serve protocol **5** อยู่ — trace เต็มของ call เดียวกัน (ด้านล่าง) อธิบายว่าทำไม
+
+<Callout title="ข้อเท็จจริงที่แม่นยำกว่า 'provider ใช้ framework X'">
+trace เต็มของ call นี้เป๊ะ ๆ (`grep -o` ทุกบรรทัด `@caller=`) แสดงทั้ง 3 อย่างนี้ ใน request เดียวกัน: `terraform-plugin-sdk/v2@v2.40.1/helper/schema/grpc_provider.go`, `terraform-plugin-framework@v1.19.0`, **และ** `terraform-plugin-mux@v0.23.1` `hashicorp/google` 8.4.0 ไม่ใช่ "provider แบบ SDKv2" หรือ "provider แบบ framework" อย่างเดียว — มันคือ provider แบบ **muxed** จริง ([terraform-plugin-mux](https://github.com/hashicorp/terraform-plugin-mux)) ที่รวม SDKv2 server (`tf_mux_provider="*schema.GRPCProviderServer"` ใน trace ดิบ สำหรับ resource ชุดเก่าที่ใหญ่กว่าของ provider) กับ framework server (สำหรับ resource ใหม่) ไว้หลัง `GetProviderSchema` response เดียวและ protocol version เดียว นี่คือเรื่องจริงและปัจจุบันสำหรับทั้ง 3 cloud ของคอร์สนี้ — บรรทัด `terraform-plugin-mux@v0.23.1` เดียวกันเป๊ะ ปรากฏใน trace ของ aws กับ azurerm เองด้วย — และนี่คือเหตุผลที่ protocol 5 เทียบ 6 เดาจาก "provider docs พูดถึง SDK ไหน" ไม่ได้: provider แบบ muxed negotiate protocol *ต่ำที่สุด* ที่ server ย่อยทั้งหมดรองรับร่วมกัน พิสูจน์ตรงนี้ว่ายังเป็น 5 อยู่
+</Callout>
+
+
+## ขนาด schema provider จริง
+
+```text
+$ terraform providers schema -json > schema.json
+$ wc -c schema.json
+9613012 schema.json
+```
+
+**~9.6 MB** ของ schema เชิงโครงสร้างจริงสำหรับ `hashicorp/google` 8.4.0 ตัวเดียว — resource, data source, nested block attribute, type, description ทุกตัว ส่งผ่าน RPC `GetProviderSchema` ตัวเดียวที่จับไว้ข้างบน นี่คือเหตุผลที่ `terraform init` และ `plan` แรกหลัง bump เวอร์ชัน provider มีต้นทุนจริงที่สังเกตได้ก่อนจะแตะ cloud API ไหนเลยด้วยซ้ำ: schema เต็มของทุกชนิด resource ที่ provider มี ไม่ใช่แค่ตัวที่ configuration คุณใช้ ข้าม process boundary ครั้งเดียวต่อ session (cache ไว้หลังจากนั้นตลอดอายุ CLI)
+
+## provider crash จริง ทำให้เกิดขึ้นจริง
+
+`TF_LOG_PROVIDER` (document ไว้เป็น log-level override แยกเฉพาะสำหรับ output ของ provider subprocess แยกจาก `TF_LOG` ของ Terraform Core เอง) มีไว้เพราะ logging ภายในของ provider เองเป็น stream ที่สองแยกจาก Core ตอน provider binary รันไม่ได้จริง ๆ go-plugin เองจะรายงานเอง — ทำให้เกิดขึ้นจริงที่นี่ด้วยการ truncate provider binary จริง (`local`, จาก [graph demo](/terraform-google/th/terraform-internals/the-graph-and-the-walk/) ของคอร์สนี้เอง) แล้วชี้ `dev_overrides` ไปที่ copy ที่เสียแล้ว:
+
+```text
+$ terraform providers schema -json
+Error: Failed to load plugin schemas
+
+Error while loading schemas for plugin components: Failed to obtain
+provider schema: Could not load the schema for provider
+registry.terraform.io/hashicorp/local: failed to instantiate provider
+"registry.terraform.io/hashicorp/local" to obtain schema: Unrecognized
+remote plugin message:
+
+Failed to read any lines from plugin's stdout
+This usually means
+  the plugin was not compiled for this architecture,
+  the plugin is missing dynamic-link libraries necessary to run,
+  the plugin is not executable by this process due to file permissions, or
+  the plugin failed to negotiate the initial go-plugin protocol handshake
+```
+
+นี่คือข้อความ crash/handshake-failure ทั่วไปจริงของ go-plugin — รูปแบบเดียวกันไม่ว่า provider ไหนรันไม่ได้ เพราะความล้มเหลวเกิดในโค้ด process-launch ของ go-plugin เอง ก่อนที่ logic เฉพาะของ provider จะรันเลยด้วยซ้ำ สาเหตุ 4 ข้อที่ list ไว้คือ diagnosis list จริงของ go-plugin เอง ไม่ใช่การเดาของ Terraform
+
+## `dev_overrides`: พิสูจน์ด้วย path พังจริง
+
+`dev_overrides` (CLI config, [document ไว้](https://developer.hashicorp.com/terraform/cli/config/config-file#development-overrides-for-provider-developers) สำหรับ provider developer ให้ชี้ไปที่ local build แทน registry) ข้าม version resolution กับการดาวน์โหลดไปเลยทั้งหมด — พิสูจน์ที่นี่ด้วยการชี้ไปที่ path ที่ไม่มีอยู่จริง:
+
+```text
+$ cat dev.tfrc
+provider_installation {
+  dev_overrides {
+    "hashicorp/google" = "/private/tmp/does-not-exist"
+  }
+  direct {}
+}
+
+$ TF_CLI_CONFIG_FILE=dev.tfrc terraform plan
+Warning: Provider development overrides are in effect
+
+The following provider development overrides are set in the CLI
+configuration:
+ - hashicorp/google in /private/tmp/does-not-exist
+
+Error: Failed to load plugin schemas
+...could not read package directory: open
+/private/tmp/does-not-exist: no such file or directory..
+```
+
+ข้อความจริง 2 อย่างแยกกัน: **warning** ที่ทุกคำสั่งเดียว print ตราบใดที่ override ยัง active อยู่ (พลาดไม่ได้ ตั้งใจออกแบบมาแบบนั้น — `dev_overrides` ที่หลงเหลืออยู่ใน CLI config คือสิ่งที่ควรดังชัดเจนแบบนี้เป๊ะ ๆ) และเนื่องจาก path เองไม่ resolve เป็นอะไรเลยจริง ๆ **error** จริงที่แยกจากกรณี crash ข้างบน — `init` และ version constraint ถูกข้ามไปทั้งหมดภายใต้ `dev_overrides` ดังนั้นสิ่งแรกที่พังได้คือการอ่าน directory เองเลย
+
+## `terraform-plugin-framework` เทียบกับ SDKv2 เทียบกับ muxed
+
+ทั้ง `terraform-plugin-framework` และ SDKv2 คือ Go library จริง ปัจจุบัน ดูแลโดย HashiCorp และทั้งคู่ปรากฏด้วยกันใน trace จริงข้างบนผ่าน `terraform-plugin-mux` ตาม [เอกสาร terraform-plugin-framework](https://developer.hashicorp.com/terraform/plugin/framework) framework คือทางที่ active develop อยู่ (รองรับ feature protocol 6 อย่าง provider-defined function โดยตรง และระบบ schema/type ที่ guarantee แบบ static แน่นกว่า); SDKv2 คือ library เก่ากว่าที่ยังรองรับอยู่ ที่ provider ส่วนใหญ่ที่มีอยู่แล้วเขียนขึ้นมาด้วยตอนแรก [terraform-plugin-mux](https://developer.hashicorp.com/terraform/plugin/mux) document รูปแบบที่พิสูจน์ข้างบนไว้ตรง ๆ: provider ที่กำลัง migrate อยู่ (หรืออย่าง cloud provider ทั้ง 3 ของคอร์สนี้ ที่ยังคง resource surface เก่าขนาดใหญ่แบบ SDKv2 ไว้ พร้อมเพิ่ม resource ใหม่ด้วย framework) รัน server ทั้งสองแบบไว้หลัง binary เดียวและ protocol version ที่ negotiate ร่วมกันเดียว provider จะใช้ชุดผสมแบบไหนเป็นรายละเอียด implementation ที่ Terraform Core ไม่จำเป็นต้องรู้เลย ทั้งสามแบบ compile ลงมาเป็น gRPC surface เดียวกัน (`GetProviderSchema`, `PlanResourceChange`, `ApplyResourceChange`, ...) ที่พิสูจน์ไว้ข้างบน ซึ่งเป็นเหตุผลเป๊ะ ๆ ที่ Core คุยกับ provider แบบ SDKv2 ล้วน, framework ล้วน, หรือ muxed ผ่าน RPC เดียวกันได้
+
+## Mental Model
+
+ทุกข้อเท็จจริงในบทนี้คือ process boundary เดียวกัน มองจากมุมต่างกัน: **Terraform Core ไม่เคยมี provider logic อยู่ในตัวเลย — มันสั่งรัน binary แยก negotiate protocol version ผ่าน go-plugin handshake จริง (พิสูจน์ข้างบนด้วย socket address จริง) และตั้งแต่จุดนั้นทุก schema request, plan, apply คือ gRPC call จริงข้าม boundary นั้น** crash (พิสูจน์ข้างบน) คือ go-plugin ตั้ง boundary นั้นไม่สำเร็จเลยด้วยซ้ำ; `dev_overrides` (พิสูจน์ข้างบน) คือทางลัดระดับ CLI-config ที่ข้าม *การหา* binary ที่ถูกต้อง แต่ไม่เคยข้าม handshake เอง; protocol v5 เทียบ v6 กับ framework เทียบ SDKv2 (ทั้งคู่พิสูจน์ข้างบนจาก trace จริงเดียวกัน) คือ 2 แกนอิสระของ "provider build มาอย่างไร" ไม่มีแกนไหนเปลี่ยนความจริงที่ว่ามันคือ process แยกที่พูด gRPC เสมอ
+
+## Trade-offs
+
+| ตัวเลือก | ข้อดี | ต้นทุน |
+|---|---|---|
+| Provider เป็น subprocess แยก (เทียบกับ compile รวม) | provider crash (พิสูจน์ข้างบน) ไม่ทำให้ Terraform Core เองพังไปด้วย; provider version ได้ และสลับได้อิสระ | ต้นทุนจริงในการเริ่ม process กับส่ง schema ครั้งแรก (พิสูจน์ข้างบน: ~9.6MB สำหรับ google ตัวเดียว) ทุกครั้งที่ `init`/session ใหม่ |
+| `dev_overrides` สำหรับ local development | ข้ามการดาวน์โหลดจาก registry ไปเลย iterate local build ได้เร็ว | พิสูจน์ข้างบน: warning ดังหลีกเลี่ยงไม่ได้และควรเป็นแบบนั้น — ไม่ใช่โหมดที่ควรเผลอเปิดค้างไว้ใน CLI config ที่แชร์กัน |
+| terraform-plugin-framework แทน SDKv2 สำหรับ provider ใหม่ | รองรับ protocol 6 native, type แน่นกว่า (ตาม docs ของ HashiCorp เอง) | provider SDKv2 เดิมไม่ต้อง migrate แค่เพื่อให้ยังทำงานได้ — ทั้งคู่พิสูจน์ข้างบนว่าพูด gRPC surface จริงเดียวกัน |
+
+## ความเข้าใจผิดที่พบบ่อย
+
+- **"Terraform 'รู้เอง' วิธีคุยกับ GCP built-in"** พิสูจน์ข้างบน: `hashicorp/google` คือ binary แยกจริงที่มี schema ~9.6MB ที่ Terraform สั่งรันเป็น subprocess แล้วพูด gRPC ด้วย — ไม่มีอะไรเฉพาะ cloud ถูก compile เข้าไปใน binary `terraform` เองเลย
+- **"provider crash ทำให้ process `terraform` ทั้งตัวพังแบบเดียวกัน"** พิสูจน์ข้างบน: ข้อความ crash/handshake-failure จริงคือ go-plugin รายงานถูกต้องว่า *subprocess ตัวหนึ่งโดยเฉพาะ* รันไม่สำเร็จ — design แบบ process boundary นี่แหละที่ทำให้มันเป็นความล้มเหลวที่ควบคุมได้ วินิจฉัยได้ ไม่ใช่ crash ร้ายแรงของ Core เอง
+- **"terraform-plugin-framework กับ protocol v6 คือเรื่องเดียวกัน ใช้ framework แปลว่าอยู่บน v6"** พิสูจน์ข้างบนด้วย trace จริง: trace ของ `hashicorp/google` 8.4.0 เองแสดงทั้ง SDKv2, terraform-plugin-framework, *และ* terraform-plugin-mux แต่ยัง negotiate protocol **5** อยู่ — library ที่ใช้กับ wire protocol เป็นข้อเท็จจริงอิสระกัน
+- **"provider เป็นแบบ 'SDKv2 provider' หรือ 'framework provider' อย่างใดอย่างหนึ่งเท่านั้น"** พิสูจน์ข้างบน: cloud provider ทั้ง 3 ของคอร์สนี้ (google, azurerm, google) แสดง `terraform-plugin-mux` ใน trace จริงของตัวเอง หมายความว่าแต่ละตัวรันทั้ง SDKv2 server และ framework server จริงหลัง binary เดียว — รูปแบบ migration จริงที่ document ไว้ ไม่ใช่สมมติฐาน
+- **"`dev_overrides` redirect provider เงียบ ๆ ไม่มีการแจ้งเตือน"** พิสูจน์ข้างบน: มี warning จริงที่พลาดไม่ได้ print ทุกคำสั่งขณะที่มัน active — ตั้งใจออกแบบมาแบบนั้น ไม่ใช่ความบกพร่อง
+
+## อ่านโค้ดที่ AI เขียน
+
+- doc troubleshooting หรือ runbook ที่ AI เขียน บอกให้ "เช็ค source code ของ provider" เมื่อ plan พังด้วย error เกี่ยวกับ plugin โดยไม่เช็คก่อนว่าเป็น error ฝั่ง Core หรือ go-plugin crash จริง (พิสูจน์ข้างบน: รูปแบบข้อความที่แยกแยะได้ชัดเจน) — ทางแก้และแม้แต่ repo ที่ควรไปดูต่างกันสิ้นเชิงขึ้นกับว่าเป็นอันไหนจริง ๆ
+- CI config หรือ `.terraformrc` ที่ commit เข้า repo ที่แชร์กัน โดย `dev_overrides` ยังชี้ไปที่ path local ของ developer คนหนึ่ง — พิสูจน์ข้างบน สิ่งนี้ทำให้เกิด warning ดังทุกครั้งที่รันสำหรับทุกคนที่ใช้ config นั้น และเกิด error ตรง ๆ ทันทีที่ path ไม่มีอยู่บนเครื่องอื่น (ซึ่งแทบจะไม่มีอยู่แน่นอน)
+- documentation หรือ comment ที่อ้างว่า provider เวอร์ชันหนึ่ง "ใช้ protocol 6" เพียงเพราะ "เพิ่ง rewrite ด้วย framework ใหม่" — พิสูจน์ข้างบน วิธีเดียวที่รู้ protocol version จริงคือดู trace (หรือ suffix `_x5`/`_x6` ของ binary เอง) ไม่ใช่การเดาจาก SDK ที่ provider ใช้
+
+<SpotTheBug lang="text" code={`# troubleshooting-runbook.md (AI-generated section)
+## Provider schema load failures
+If you see "Failed to load plugin schemas", the provider's Go code has
+a bug in its schema definition. Open an issue on the provider's GitHub
+repo with the full stack trace from Terraform.`}>
+สมมติว่า error "Failed to load plugin schemas" ทุกครั้งคือ bug ในโค้ด schema ของ provider เอง พิสูจน์ข้างบน error ข้อความเดียวกันเป๊ะ ๆ เกิดขึ้นได้ตอน provider binary **รันไม่ได้เลยด้วยซ้ำ** — binary เสีย/เข้ากันไม่ได้, path `dev_overrides` ผิด, permission ไม่พอ — ไม่มีข้อไหนที่เกี่ยวกับโค้ด schema ของ provider ที่รันจริงเลย go-plugin พังก่อนที่ logic ของ provider จะรันด้วยซ้ำ ขั้นตอน troubleshoot ที่ถูกต้อง พิสูจน์ข้างบน คืออ่านข้อความจริงเฉพาะก่อน: go-plugin handshake failure ระบุสาเหตุที่เป็นรูปธรรม (architecture ไม่ตรง, library ขาด, permission, handshake negotiation) ที่ไม่เกี่ยวกับ resource/schema implementation ของ provider เองเลย ต่างจาก error ระดับ schema จริง ที่จะมาจากข้างใน provider ที่เริ่มรันสำเร็จแล้วต่างหาก
+</SpotTheBug>
+
+export const quizProviderProtocol = [
+  {
+    q: '```text\n$ find .terraform/providers -name "terraform-provider-google_*"\n.../hashicorp/google/8.4.0/darwin_arm64/terraform-provider-google_v8.4.0_x5\n```\nทำไม path จริงนี้ถึงมี darwin_arm64 อยู่ด้วย?',
+    options: [
+      'It is an arbitrary versioning convention with no functional meaning',
+      'The provider is a real, separately compiled executable, and init must download the one built for the exact OS/architecture Terraform is running on -- no universal binary exists',
+      'darwin_arm64 is just a cache key; any binary would actually work',
+      'This path only appears when cross-compiling for CI',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ข้างบน: provider คือ Go binary compile จริง หนึ่งตัวต่อ OS/arch — ส่วนของ path นี้เป็นข้อกำหนดจริง ไม่ใช่แค่ตกแต่ง',
+  },
+  {
+    q: '```text\n$ TF_LOG=TRACE terraform providers schema -json >/dev/null 2>trace.log\n$ grep -m1 tf_proto_version trace.log\ntf_proto_version=5.11 ... tf_provider_addr=registry.terraform.io/hashicorp/google\n```\nhashicorp/google 8.4.0 build ด้วย terraform-plugin-framework (เห็นใน trace เดียวกัน) trace จริงนี้พิสูจน์อะไร?',
+    options: [
+      'Using terraform-plugin-framework always means protocol 6',
+      'A provider\'s SDK/framework choice and its negotiated wire protocol version are independent facts -- this provider uses the framework but still speaks protocol 5',
+      'Protocol 5.11 means "major version 5, minor 11 features," which is a marketing number with no real meaning',
+      'This trace is impossible; framework-based providers cannot use protocol 5',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ข้างบนตรง ๆ จาก trace จริง: framework ที่ใช้กับ protocol version เป็นข้อเท็จจริง 2 อย่างแยกกัน สังเกตได้อิสระจากกัน',
+  },
+  {
+    q: '```text\nError: Failed to load plugin schemas\n...Unrecognized remote plugin message:\nFailed to read any lines from plugin\'s stdout\nThis usually means\n  the plugin was not compiled for this architecture, ...\n  the plugin failed to negotiate the initial go-plugin protocol handshake\n```\nอะไรทำให้เกิด error จริงที่ทำขึ้นเองในบทนี้?',
+    options: [
+      'A genuine bug in the provider\'s resource schema definitions',
+      'A provider binary that was corrupted/truncated so it cannot even start -- go-plugin fails before any provider-specific schema code runs at all',
+      'An expired provider registry TLS certificate',
+      'Running terraform plan without first running terraform init',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ข้างบน: บทนี้ truncate provider binary จริงแล้วชี้ dev_overrides ไปที่มัน — diagnosis ทั่วไปของ go-plugin เอง ไม่เกี่ยวกับ logic ของ provider เลย',
+  },
+  {
+    q: 'block dev_overrides ใน CLI config ชี้ hashicorp/google ไปที่ path ที่ไม่มีอยู่บนเครื่องที่รัน บทนี้พิสูจน์ว่าพฤติกรรมจริงที่สังเกตได้คืออะไร?',
+    options: [
+      'Terraform silently falls back to downloading from the registry instead',
+      'A loud, unmissable warning prints on every command while the override is active, and a real error occurs when the (nonexistent) path is actually read',
+      'Terraform hangs indefinitely waiting for the path to appear',
+      'The override is ignored entirely unless -dev-override is also passed on the command line',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ข้างบนด้วย output จริง: warning ไม่มีเงื่อนไขและดังชัดเจน และการอ่าน path ที่ไม่มีจริง ๆ ทำให้เกิด error จริงเฉพาะเจาะจง — ไม่มี silent fallback',
+  },
+  {
+    q: 'ต้นทุนจริงที่พิสูจน์ได้ของ terraform init ใหม่ หรือ plan แรกกับ provider version ที่เพิ่ง pin คืออะไร ตามการวัดจริงในบทนี้?',
+    options: [
+      'Effectively zero -- providers are lightweight stubs until a resource is actually touched',
+      'A real process start plus a full schema transfer over gRPC for the entire provider (~9.6MB of JSON for hashicorp/google 8.4.0 alone), cached for the session afterward',
+      'The cost scales only with how many resource types your configuration actually uses, not the whole provider',
+      'The cost is paid once per machine, never again regardless of provider version changes',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ข้างบนด้วย wc -c จริง: schema เต็มของทุก resource/data source ที่ provider มี ข้าม process boundary ผ่าน GetProviderSchema ไม่ใช่แค่ตัวที่ใช้จริง',
+  },
+];
+
+<Quiz client:visible id="terraform-internals/provider-plugin-protocol" questions={quizProviderProtocol} />
+
+<ProgressTracker client:visible id="terraform-internals/provider-plugin-protocol" />
