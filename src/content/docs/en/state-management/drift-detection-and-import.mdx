@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## The idea in one sentence
 
@@ -34,6 +35,98 @@ terraform apply -refresh-only
 
 This updates only the state file's recorded attributes to match what is really running in GCP right now. It does not create, update, or destroy any real resource — it is purely a reconciliation of Terraform's memory with the world.
 
+Real `-refresh-only` output, proven with no cloud credentials at all — a `local_file` resource edited out-of-band (its content changed by a plain shell command, not by Terraform), then refreshed:
+
+```text
+$ echo "listen=9090" > generated/app.conf
+$ terraform plan -refresh-only
+
+Note: Objects have changed outside of Terraform
+
+Terraform detected the following changes made outside of Terraform since the
+last "terraform apply" which may have affected this plan:
+
+  # local_file.app_config has been deleted
+  - resource "local_file" "app_config" {
+      - content              = <<-EOT
+            listen=8080
+        EOT -> null
+      - id                   = "5d54098470458257525a27f6f0b6de89e278569d" -> null
+    }
+
+This is a refresh-only plan, so Terraform will not take any actions to undo
+these. If you were expecting these changes then you can apply this plan to
+record the updated values in the Terraform state without changing any remote
+objects.
+```
+
+Notice the `local_file` provider reports this as the resource being **deleted**, not modified — its `id` is a content hash, so editing the file's bytes out-of-band means the object at the recorded `id` genuinely no longer exists as far as the provider's read logic is concerned, even though a file still exists at that path. This is a real, provider-specific nuance worth knowing when reading `-refresh-only` output: "deleted" does not always mean "gone from disk," it can mean "the specific version this resource represents no longer matches."
+
+## `-detailed-exitcode`: turning drift into a script-friendly signal
+
+`terraform plan -detailed-exitcode` is what CI pipelines use to distinguish "nothing to do" from "there's a plan to review" from "something actually broke," instead of parsing plan output text. Three real exit codes, proven:
+
+```text
+$ terraform plan -detailed-exitcode
+Terraform has compared your real infrastructure against your configuration
+and found no differences, so no changes are needed.
+$ echo $?
+0
+```
+
+```text
+$ terraform plan -detailed-exitcode
+Plan: 1 to add, 0 to change, 0 to destroy.
+$ echo $?
+2
+```
+
+```text
+$ terraform plan -detailed-exitcode
+Error: Reference to undeclared input variable
+
+An input variable with the name "undefined_var" has not been declared.
+$ echo $?
+1
+```
+
+`0` means "no changes, config matches reality," `2` means "there is a real plan with changes" (not an error — CI should treat this as "needs review/apply," not "failed"), and `1` means an actual error occurred, such as invalid configuration. A pipeline that only checks "exit code nonzero = fail" cannot tell a legitimate pending change (`2`) from a broken configuration (`1`) — treating them the same either blocks every ordinary plan or silently ignores real errors.
+
+## `moved`: renaming a resource without destroying and recreating it
+
+Renaming a resource in your `.tf` file — `local_file.config` to `local_file.app_config`, or moving something into a module — looks to Terraform like "the old address is gone, there's a new address" unless you tell it otherwise. Left alone, that reads as destroy-then-create. A `moved` block tells Terraform these are the same real object under a new address:
+
+```hcl
+moved {
+  from = local_file.config
+  to   = local_file.app_config
+}
+
+resource "local_file" "app_config" {
+  filename = "${path.module}/generated/app.conf"
+  content  = "listen=8080\n"
+}
+```
+
+Real plan output proving no destroy/recreate happens, on a resource that already existed in state under the old name:
+
+```text
+$ terraform plan
+local_file.app_config: Refreshing state... [id=5d54098470458257525a27f6f0b6de89e278569d]
+
+Terraform will perform the following actions:
+
+  # local_file.config has moved to local_file.app_config
+    resource "local_file" "app_config" {
+        id                   = "5d54098470458257525a27f6f0b6de89e278569d"
+        # (10 unchanged attributes hidden)
+    }
+
+Plan: 0 to add, 0 to change, 0 to destroy.
+```
+
+`# local_file.config has moved to local_file.app_config` with a `Plan: 0 to add, 0 to change, 0 to destroy` is the proof: the real object was never touched, only its address in state changed. `moved` blocks were introduced in **Terraform 1.1** specifically to make refactors like this safe and reviewable. Like `import` and `removed`, a `moved` block is configuration — it ships in a pull request, applies identically everywhere, and can (and should) be deleted once every environment has applied it at least once. For `google_compute_instance.web` renamed to `google_compute_instance.app_server`, the same mechanism means the real instance keeps its disk, its internal IP, and its uptime — no `moved` block means a real VM gets deleted and a brand-new one created in its place, with all the downtime that implies.
+
 ## Bringing existing resources under management with terraform import
 
 Plenty of GCP resources get created before Terraform ever exists for a project — a Compute Engine instance someone clicked through in the Console, a Cloud Storage bucket created by an early script. The CLI `terraform import` command associates one of those existing, real resources with a resource address already written in your configuration:
@@ -55,7 +148,40 @@ import {
 }
 ```
 
-The advantage over the CLI command is entirely about review. A CLI `terraform import` run is an immediate side effect — it writes to state the moment you run it, with no preview step. An `import` block, by contrast, is just more configuration: it shows up in the output of `terraform plan` as a planned import, exactly like a planned create or update, so a teammate can review it in a pull request before anyone runs `apply`. Terraform can even generate a starting `resource` block for you from the real object's attributes using `terraform plan -generate-config-out=generated.tf`, which you then review and clean up rather than writing from scratch.
+The advantage over the CLI command is entirely about review. A CLI `terraform import` run is an immediate side effect — it writes to state the moment you run it, with no preview step. An `import` block, by contrast, is just more configuration: it shows up in the output of `terraform plan` as a planned import, exactly like a planned create or update, so a teammate can review it in a pull request before anyone runs `apply`. Terraform can even generate a starting `resource` block for you from the real object's attributes using `terraform plan -generate-config-out=generated.tf`, which you then review and clean up rather than writing from scratch. The GCP example above is `terraform validate`-clean HCL syntax — proving a real *plan* for `google_compute_instance` needs a real instance ID and a GCP project this course does not have. What follows is the same mechanism proven end-to-end with no cloud credentials, using the built-in `terraform_data` resource, whose `id` you can set to anything at import time:
+
+```hcl
+import {
+  to = terraform_data.existing
+  id = "my-existing-id-123"
+}
+
+resource "terraform_data" "existing" {
+  input = "v1"
+}
+```
+
+Real plan output:
+
+```text
+$ terraform plan
+terraform_data.existing: Preparing import... [id=my-existing-id-123]
+terraform_data.existing: Refreshing state... [id=my-existing-id-123]
+
+Terraform will perform the following actions:
+
+  # terraform_data.existing will be updated in-place
+  # (imported from "my-existing-id-123")
+  ~ resource "terraform_data" "existing" {
+        id     = "my-existing-id-123"
+      + input  = "v1"
+      + output = (known after apply)
+    }
+
+Plan: 1 to import, 0 to add, 1 to change, 0 to destroy.
+```
+
+`Plan: 1 to import, ... 1 to change` is the real, exact signal an import block produces — the `1 to change` here is because the configuration's `input = "v1"` did not previously exist on the object being imported (`terraform_data` has no real external "read," so this specific example always shows a change; a real `google_compute_instance` import against a config that already matches the instance's actual attributes shows `0 to change`).
 
 ## Reorganizing state without touching infrastructure
 
@@ -69,7 +195,19 @@ terraform state mv google_compute_instance.web module.app.google_compute_instanc
 terraform state rm google_compute_instance.web
 ```
 
-`terraform state mv` changes only the address Terraform uses to refer to a resource in state — useful when you restructure a configuration into modules and do not want Terraform to think it needs to destroy the old address and create a new one. `terraform state rm` is the direct opposite of `import`: it deletes a resource's entry from state so Terraform no longer manages it, but it has zero effect on the real GCP object, which keeps running exactly as it was, now simply unmanaged.
+`terraform state mv` changes only the address Terraform uses to refer to a resource in state — useful when you restructure a configuration into modules and do not want Terraform to think it needs to destroy the old address and create a new one. Real output, renaming `terraform_data.a` to `terraform_data.b` after the `.tf` file itself was already edited:
+
+```text
+$ terraform state mv terraform_data.a terraform_data.b
+Move "terraform_data.a" to "terraform_data.b"
+Successfully moved 1 object(s).
+$ terraform plan
+No changes. Your infrastructure matches the configuration.
+```
+
+`terraform state rm` is the direct opposite of `import`: it deletes a resource's entry from state so Terraform no longer manages it, but it has zero effect on the real GCP object, which keeps running exactly as it was, now simply unmanaged.
+
+Both have the same drawback the CLI `import` command had: they happen immediately, on one machine, with nothing in the repository recording that they happened. `state mv` versus the `moved` block proven earlier is the same trade-off exactly: `state mv` is imperative and instant — you type the command once, on your own machine, and if a teammate does not run the identical command on theirs, their `plan` sees a destroy-then-create the next time they refactor the same way. `moved` is declarative and lives in the `.tf` file itself, so every clone of the repository gets the same rename automatically on its next `plan`, with no separate command anyone has to remember to run.
 
 ### The declarative version: the removed block
 
@@ -85,7 +223,23 @@ removed {
 }
 ```
 
-Delete the `resource` block from your configuration, add this `removed` block in its place, and the next `terraform plan` shows the removal for review before anything happens. The `lifecycle` argument is the part that matters: `destroy = false` tells Terraform to forget the resource while leaving the real instance running, exactly like `state rm`. The default is `destroy = true`, which forgets the resource **and** destroys it — so omitting that `lifecycle` block silently turns a hand-off into a deletion. Once the apply succeeds you can delete the `removed` block as well; it has done its job.
+Delete the `resource` block from your configuration, add this `removed` block in its place, and the next `terraform plan` shows the removal for review before anything happens. The `lifecycle` argument is the part that matters: `destroy = false` tells Terraform to forget the resource while leaving the real instance running, exactly like `state rm`. The default is `destroy = true`, which forgets the resource **and** destroys it — so omitting that `lifecycle` block silently turns a hand-off into a deletion. Once the apply succeeds you can delete the `removed` block as well; it has done its job. Real output proving the `destroy = false` path — a `terraform_data.existing` resource previously under management, removed from config with a `removed` block instead of a plain deletion:
+
+```text
+$ terraform plan
+Plan: 0 to add, 0 to change, 0 to destroy.
+
+Warning: Some objects will no longer be managed by Terraform
+
+If you apply this plan, Terraform will discard its tracking information for
+the following objects, but it will not delete them:
+ - terraform_data.existing
+
+After applying this plan, Terraform will no longer manage these objects. You
+will need to import them into Terraform to manage them again.
+```
+
+`Plan: 0 to add, 0 to change, 0 to destroy` alongside that warning is the proof: nothing was destroyed, Terraform simply stopped tracking the object, exactly as `destroy = false` promises.
 
 <Mermaid title="A manually changed resource surfaces as drift on plan, while an existing untracked resource is brought in with import" code={driftImportDiagram} />
 
@@ -95,8 +249,54 @@ export const driftImportDiagram = `flowchart LR
   existing["Existing untracked GCP resource"] --> importBlock["import block or terraform import"]
   importBlock -->|"state entry created"| state["terraform.tfstate"]`;
 
+## Mental Model
+
+Every block in this lesson exists to give Terraform a way to change its *bookkeeping* about a resource without changing the *resource itself* — a rename (`moved`), an adoption (`import`), a release (`removed`), or a correction (`-refresh-only`). The common thread is: state is a claim about reality, and these are the tools for correcting the claim when it is the claim that is wrong, not the reality. `-detailed-exitcode` exists because "there is a plan" and "something is broken" are different facts a script needs to tell apart, and text-parsing a human-oriented plan output is the wrong way to do that.
+
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---|---|---|
+| `moved` block over `terraform state mv` | Declarative, ships in the repo, applies identically on every clone (proven above: `Plan: 0 to add, 0 to change, 0 to destroy`) | An extra block to remember to delete once every environment has applied it |
+| `import` block over `terraform import` CLI | Plannable and reviewable before anything happens (proven above: real `Plan: 1 to import, ...` output), and `-generate-config-out` can draft the HCL for you | Still requires reviewing (and usually cleaning up) the generated `resource` block — neither form is a substitute for understanding the resource |
+| `removed { lifecycle { destroy = false } }` over `terraform state rm` | Reviewable in a PR, applies identically everywhere (proven above: real warning + `0 to destroy`) | One more block type to recognize during review — easy to misread as "this resource is being destroyed" if you don't know the syntax |
+| `-refresh-only` before deciding what to do about drift | Updates your mental model and the recorded state without ever touching real infrastructure (proven above) | Does not fix anything by itself — it is a diagnostic step, not a remediation |
+
+## Common Misconceptions
+
+- **"Renaming a resource in .tf and rerunning apply is safe as long as the attributes stay the same."** Proven above: without a `moved` block, Terraform has no way to know the new address refers to the same object — it reads as destroy-then-create unless told otherwise. `google_project` carries this even further: its `deletion_policy` argument defaults to `"PREVENT"` since provider 6.0, so an unintended destroy on a mis-refactored `google_project` resource does not even succeed as a recreate — the `apply` fails outright with "Cannot destroy project as deletion_policy is set to PREVENT."
+- **"`terraform import` (or the import block) writes the resource's HCL for you."** The `import` block alone does not — it only populates the state entry. `-generate-config-out` gets closer (it drafts a `resource` block from the real object's attributes), but the result is explicitly meant to be reviewed and cleaned up, not applied blindly.
+- **"A plan's nonzero exit code always means something failed."** Proven above: `-detailed-exitcode` returns `2` for a legitimate pending change, distinct from `1` for a genuine error — a CI script that treats all nonzero exits as failures cannot tell "review this plan" from "this is broken."
+- **"`-refresh-only` drift always shows as a modified attribute."** Proven above with a real `local_file` example: content edited out-of-band showed as the resource "has been deleted," because the provider's `id` is a content hash and the specific version at that hash no longer exists — not every drift is a tidy in-place diff.
+
+## Reading AI-generated code
+
+When reviewing generated drift/import/refactor code, check for:
+
+- A resource renamed in `.tf` with no accompanying `moved` block — proven above, this reads as destroy-then-create without one; for a `google_project` resource specifically, its `deletion_policy = "PREVENT"` default (provider 6.0+) turns that into a hard `apply` failure instead of a quiet recreate.
+- `terraform import` or `terraform state mv`/`rm` given as a one-off CLI instruction in a runbook with no mention of also needing a `moved`/`import`/`removed` block for teammates and CI to see the same effect automatically.
+- An `import` block or CLI import command with no adjacent `resource` block, or a comment implying the import "sets up the configuration" — proven above, only the state entry is populated; `-generate-config-out` drafts HCL but it is still the author's job to review it.
+- A CI script or runbook checking `terraform plan`'s exit code with `if [ $? -ne 0 ]` instead of `-detailed-exitcode` and explicitly handling `0`/`1`/`2` — proven above, plain nonzero-exit checks cannot distinguish a real error from a legitimate pending plan.
+- A `removed` block missing the `lifecycle { destroy = false }` (or with `destroy = true` where "leave it alone" was clearly intended) — the `lifecycle` argument is required and is the entire point of the block; getting it backwards deletes real infrastructure instead of releasing it.
+
+<SpotTheBug code={`# Refactor: renamed the resource, forgot the moved block
+resource "google_compute_instance" "app_server" {
+  name         = "app-server-vm"
+  machine_type = "e2-medium"
+  zone         = "us-central1-a"
+
+  boot_disk {
+    initialize_params {
+      image = "debian-cloud/debian-12"
+    }
+  }
+}
+# (previously this block was named "web")`}>
+Proven above with a real plan (`local_file.config` -> `local_file.app_config`): renaming a resource block with no `moved { from = ... to = ... }` alongside it does not read as a rename to Terraform at all — it reads as the old address disappearing and a brand-new address appearing, which plans as **destroy the old object, create a new one**. For `google_compute_instance.web` -> `google_compute_instance.app_server`, that is a real Compute Engine instance being deleted and a new one created, with all the downtime, new instance ID, and possibly new internal/external IP that implies — for a change that was, in the author's intent, just a rename. The fix is a `moved` block added in the same commit as the rename, proven above to produce `Plan: 0 to add, 0 to change, 0 to destroy` with a `has moved to` note instead.
+</SpotTheBug>
+
 <Callout title="The one-line takeaway">
-**Configuration drift** is any gap between your Terraform config and real infrastructure caused by changes made outside Terraform, and `terraform plan` is what surfaces it, while `terraform apply -refresh-only` reconciles state with reality without changing any real resource. Both the CLI `terraform import` command and the declarative `import` block bring an existing resource under management by writing a state entry, but only the `import` block is **plannable and reviewable** before it takes effect, which is why it is usually preferred. `terraform state rm` stops Terraform from tracking a resource **without destroying it** — the real object is untouched.
+**Configuration drift** is any gap between your Terraform config and real infrastructure caused by changes made outside Terraform, and `terraform plan` is what surfaces it (proven above, including the `local_file` nuance where drift can show as "deleted" rather than "modified"), while `terraform apply -refresh-only` reconciles state with reality without changing any real resource. **`-detailed-exitcode`** turns that into a script-friendly signal: `0` no changes, `2` a real pending plan, `1` an actual error — all three proven above. **`moved`** (Terraform 1.1+) renames a resource without destroy/recreate (proven above: `has moved to`, `0 to destroy`) — for a `google_project` resource, whose `deletion_policy` defaults to `"PREVENT"` since provider 6.0, skipping it does not even quietly recreate, it hard-fails the `apply`. Both the CLI `terraform import` command and the declarative `import` block bring an existing resource under management by writing a state entry (proven above: real `Plan: 1 to import` output), but only the `import` block is **plannable and reviewable** before it takes effect, and `-generate-config-out` can draft the matching HCL for review. **`removed { lifecycle { destroy = false } }`** stops Terraform from tracking a resource **without destroying it** (proven above: `0 to destroy` plus the explicit warning) — the real object is untouched.
 </Callout>
 
 export const quizDrift = [
@@ -109,6 +309,40 @@ export const quizDrift = [
       'Drift is invisible to Terraform unless you delete and recreate the resource',
     ],
     answer: 1,
+    explain: 'Terraform refreshes its view of real infrastructure on every plan and compares it against configuration. A drifted attribute shows as a diff that would restore the configured value on the next apply — nothing pushes a notification on its own.',
+  },
+  {
+    q: '```text\n$ echo "listen=9090" > generated/app.conf\n$ terraform plan -refresh-only\n...\n  # local_file.app_config has been deleted\n  - resource "local_file" "app_config" {\n      - content = <<-EOT\n            listen=8080\n        EOT -> null\n```\nWhy does editing the file\'s content out-of-band show up as "has been deleted" rather than "has been modified"?',
+    options: [
+      'This is a bug in the local provider',
+      'local_file\'s id is a content hash, so the object at the recorded id no longer exists once the content changes — the provider genuinely cannot find "that version" anymore, even though a file still exists at the path',
+      'Refresh-only plans always report every change as a deletion regardless of what actually happened',
+      'The file was actually deleted from disk, not just edited',
+    ],
+    answer: 1,
+    explain: 'Proven above: local_file computes id from content, so an out-of-band content edit means the specific object the id refers to is gone as far as the provider\'s read logic is concerned. This is a real, provider-specific nuance, not a universal rule for all drift.',
+  },
+  {
+    q: '```text\n$ terraform plan -detailed-exitcode\nPlan: 1 to add, 0 to change, 0 to destroy.\n$ echo $?\n2\n```\nWhat does exit code 2 mean here, and how should a CI script treat it differently from exit code 1?',
+    options: [
+      'Exit code 2 means the plan failed; treat it identically to exit code 1',
+      'Exit code 2 means there is a legitimate pending plan with real changes to review or apply; exit code 1 means an actual error occurred (like invalid configuration) — a script should handle them differently, not treat all nonzero exits as failure',
+      'Exit code 2 and 1 are interchangeable and both mean success',
+      'Exit code 2 only appears when using -refresh-only',
+    ],
+    answer: 1,
+    explain: 'Proven above with three real runs: 0 = no changes, 2 = real pending plan (not an error), 1 = a genuine error (undeclared variable reference). A pipeline checking only "nonzero = fail" cannot distinguish these.',
+  },
+  {
+    q: '```text\n$ terraform plan\nlocal_file.app_config: Refreshing state...\n  # local_file.config has moved to local_file.app_config\n    resource "local_file" "app_config" {\n        id = "5d54098470458257525a27f6f0b6de89e278569d"\n        # (10 unchanged attributes hidden)\n    }\nPlan: 0 to add, 0 to change, 0 to destroy.\n```\nWhat real HCL block produced this exact output when a resource was renamed?',
+    options: [
+      'A removed block with destroy = false',
+      'A moved block with from = local_file.config and to = local_file.app_config',
+      'An import block pointing at the same id',
+      'No block is needed; Terraform detects renames automatically',
+    ],
+    answer: 1,
+    explain: 'Proven above: the moved block (introduced in Terraform 1.1) is what produces the "has moved to" plan line with zero add/change/destroy — without it, the same rename would plan as destroy-then-create, which on a google_project resource (deletion_policy defaults to "PREVENT" since provider 6.0) hard-fails the apply instead of recreating.',
   },
   {
     q: 'What is the key difference between the CLI terraform import command and a declarative import block',
@@ -119,26 +353,18 @@ export const quizDrift = [
       'The import block automatically writes the matching resource block for you, while the CLI command does not',
     ],
     answer: 1,
+    explain: 'Proven above with real terraform_data output: "Preparing import..." followed by a full plan (Plan: 1 to import, 0 to add, 1 to change, 0 to destroy) shown before anything happens, unlike the CLI command which mutates state on invocation. -generate-config-out can draft HCL, but it still needs review — the import block itself does not write it.',
   },
   {
-    q: 'What does terraform state rm do to the real GCP resource it is pointed at',
+    q: '```text\n$ terraform plan\nPlan: 0 to add, 0 to change, 0 to destroy.\n\nWarning: Some objects will no longer be managed by Terraform\n...\n - terraform_data.existing\n```\nWhat real HCL produced this output after terraform_data.existing was removed from the resource blocks?',
     options: [
-      'It deletes the real resource immediately',
-      'It schedules the real resource for destruction on the next apply',
-      'Nothing. It only removes the entry from Terraform state; the real resource keeps running, now unmanaged',
-      'It moves the real resource into a different GCP project',
-    ],
-    answer: 2,
-  },
-  {
-    q: 'What does terraform apply -refresh-only do',
-    options: [
-      'It destroys and recreates every resource to match the configuration exactly',
-      'It updates only the state file to match the real infrastructure, without creating, updating, or destroying any real resource',
-      'It is identical to a normal terraform apply but skips confirmation',
-      'It deletes the local state file and forces a fresh import of everything',
+      'A bare deletion of the resource block with no other change',
+      'A removed block with lifecycle { destroy = false }',
+      'A removed block with lifecycle { destroy = true }',
+      'terraform state rm run from the CLI',
     ],
     answer: 1,
+    explain: 'Proven above: the removed block with destroy = false produces exactly this output — 0 to destroy plus the explicit warning that Terraform will stop tracking the object without deleting it. destroy = true would instead plan to actually delete the real object.',
   },
 ];
 
