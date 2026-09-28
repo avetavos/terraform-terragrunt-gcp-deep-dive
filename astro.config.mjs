@@ -38,6 +38,8 @@ export default defineConfig({
         { label: 'Multi-Environment', items: [{ autogenerate: { directory: 'multi-environment' } }] },
         { label: 'Terragrunt Fundamentals', items: [{ autogenerate: { directory: 'terragrunt-fundamentals' } }] },
         { label: 'Production & Ecosystem', items: [{ autogenerate: { directory: 'production-and-ecosystem' } }] },
+        { label: 'How Terraform Works', translations: { th: 'Terraform ทำงานอย่างไรข้างใน' }, items: [{ autogenerate: { directory: 'terraform-internals' } }] },
+        { label: 'Reading AI-generated Terraform', translations: { th: 'อ่านโค้ด Terraform ที่ AI เขียน' }, items: [{ autogenerate: { directory: 'reading-terraform' } }] },
         { label: 'Glossary', translations: { th: 'อภิธานศัพท์' }, link: 'glossary' },
       ],
       }), preact()],

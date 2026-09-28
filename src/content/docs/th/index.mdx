@@ -40,6 +40,12 @@ import { Card, CardGrid } from '@astrojs/starlight/components';
   <Card title="Production & Ecosystem" icon="approve-check">
     CI/CD สำหรับ infrastructure, policy as code กับ static analysis, secret และ credential และ production checklist [ขึ้น production →](/terraform-gcp/th/production-and-ecosystem/ci-cd-for-infrastructure/)
   </Card>
+  <Card title="Terraform ทำงานอย่างไรข้างใน" icon="seti:config">
+    graph กับการ walk, anatomy ของ state file, plan file กับ JSON ของมัน, provider plugin protocol บน gRPC และวิธีที่ Terragrunt ค้นหา unit แล้วเรียงลำดับ DAG — ทุก claim พิสูจน์บน Terraform 1.16 / Terragrunt 1.1 ด้วย trace log จริง [ดูข้างใน →](/terraform-gcp/th/terraform-internals/)
+  </Card>
+  <Card title="อ่านโค้ด Terraform ที่ AI เขียน" icon="magnifier">
+    catalog 23 bug ที่ HCL จาก AI เขียนผิดบน cloud นี้, review checklist, บันได verification tool (validate, plan JSON, terraform test, tflint, checkov, conftest, terragrunt render) และ worked review 3 ชุด — ทุก bug พิสูจน์จริง [ไป review →](/terraform-gcp/th/reading-terraform/)
+  </Card>
 </CardGrid>
 
 ## คอร์สนี้ทำงานยังไง
