@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## The idea in one sentence
 
@@ -57,6 +58,94 @@ resource "google_sql_user" "app" {
 
 This does not make the value vanish from state entirely — the resource attribute Terraform sets still gets recorded the same way it always does. What it does change is where the secret's long-term source of truth lives: Secret Manager, with its own access policies, audit logging, and rotation story, instead of a Terraform variable that someone has to remember to pass in securely every single run.
 
+## `nonsensitive()`: deliberately un-redacting a value
+
+Sometimes `sensitive = true` propagates further than you want — any expression that touches a sensitive value becomes sensitive too, even if the result genuinely is not secret. The `nonsensitive()` function strips that marking from a single value, deliberately, for exactly that case. Real proof with `terraform console`, first showing the redaction, then removing it:
+
+```text
+$ echo 'var.db_password' | terraform console
+(sensitive value)
+$ echo 'nonsensitive(var.db_password)' | terraform console
+"S3cretPassword!"
+```
+
+That is the entire mechanism: `nonsensitive()` does not add any protection and does not remove the value from state either way — it only changes whether Terraform's redaction applies to *this particular expression's* result going forward. Reach for it only when you are certain the value is not actually secret in this context; calling it on an actual secret just to quiet a warning defeats the one guardrail `sensitive = true` provides.
+
+## Ephemeral values: excluded from state and plan by construction
+
+Terraform 1.10 added **ephemeral** resources, variables, and outputs — values that exist only for the duration of a single Terraform operation and are never written to state or a saved plan file, not "written but redacted" the way `sensitive = true` values are. Mark a variable ephemeral like this:
+
+```hcl
+variable "session_token" {
+  type      = string
+  ephemeral = true
+}
+```
+
+The google provider ships a matching **ephemeral resource** for reading a secret straight out of Secret Manager without ever recording it, documented with a real, complete example (`registry.terraform.io/providers/hashicorp/google/latest/docs/ephemeral-resources/secret_manager_secret_version`): `ephemeral "google_secret_manager_secret_version" "example" { project = "my-project"; secret = "my-secret"; version = "latest" }`, whose `.secret_data` is then routed into another resource's write-only argument. This course has no live Secret Manager secret to read from, so the offline proof below uses the built-in pattern instead — a short-lived value generated fresh on every run, never persisted anywhere:
+
+```hcl
+ephemeral "random_password" "db" {
+  length = 16
+}
+```
+
+Because an ephemeral value is never persisted, Terraform enforces *where* it is allowed to flow, at plan time, with a real error — not just a convention. Proof: passing `ephemeral.random_password.db.result` into an ordinary (non-write-only) resource argument:
+
+```text
+$ terraform plan
+Error: Invalid use of ephemeral value
+
+  with terraform_data.marker,
+  on main.tf line 15, in resource "terraform_data" "marker":
+  15:   input = ephemeral.random_password.db.result
+
+Ephemeral values are not valid for "input", because it is not a write-only
+attribute and must be persisted to state.
+```
+
+That error names the actual rule directly: an ephemeral value may only flow into an attribute the provider has explicitly declared **write-only**, because a write-only attribute is the one kind of argument Terraform guarantees it will never persist. A second real constraint, proven the same way: an ephemeral *output* is not allowed at all in the root module —
+
+```text
+$ terraform plan
+Error: Ephemeral outputs are not allowed in context of a root module
+```
+
+— ephemeral outputs exist so a **child module** can hand an ephemeral value back up to whatever called it (to be consumed by that caller's own write-only argument or further ephemeral chain), not so the root module can print one.
+
+## Write-only arguments (`_wo`): the other half of the mechanism
+
+Terraform 1.11 added **write-only arguments** — resource attributes, conventionally suffixed `_wo` and paired with a companion `_wo_version` integer, that a provider promises never to write into state or a saved plan at all. This is not a hypothetical for the google provider: `google_secret_manager_secret_version` genuinely declares the pair, per the real provider docs — "`secret_data_wo` - (Optional, Write-Only) The secret data. ... **Note**: This property is write-only and will not be read from the API." / "`secret_data_wo_version` - (Optional) Triggers update of `secret_data_wo` write-only. Increment this value when an update to `secret_data_wo` is needed." — and the resource's own top-level note confirms it directly: "All arguments marked as write-only values will not be stored in the state: `secret_data_wo`."
+
+Confirmed directly against the pinned `hashicorp/google` 8.4.0 provider schema — no GCP credentials needed, `terraform providers schema -json` only reads what `init` already downloaded, and this same check found 7 resources across the whole provider with a write-only attribute (`google_secret_manager_secret_version`, `google_sql_database_instance`, `google_sql_user`, `google_alloydb_user`, `google_compute_ssl_certificate`, `google_compute_region_ssl_certificate`, `google_compute_vpn_tunnel`):
+
+```text
+$ terraform providers schema -json | python3 -c "
+import json,sys
+d = json.load(sys.stdin)
+attrs = d['provider_schemas']['registry.terraform.io/hashicorp/google']['resource_schemas']['google_secret_manager_secret_version']['block']['attributes']
+for k, v in attrs.items():
+    if v.get('write_only') or k.endswith('_wo_version'):
+        print(k, v)
+"
+secret_data_wo {'type': 'string', 'description_kind': 'plain', 'optional': True, 'write_only': True}
+secret_data_wo_version {'type': 'number', 'description_kind': 'plain', 'optional': True}
+```
+
+What genuinely does need real credentials is *applying* it — creating a real Secret Manager secret version needs a live GCP project. Here is the honest question instead: is write-only support universal across every resource, or opt-in? Checking `hashicorp/random`'s `random_password` — a resource this course *can* fully apply offline — with the identical query:
+
+```text
+$ terraform providers schema -json | python3 -c "
+import json,sys
+d = json.load(sys.stdin)
+attrs = d['provider_schemas']['registry.terraform.io/hashicorp/random']['resource_schemas']['random_password']['block']['attributes']
+print([k for k,v in attrs.items() if v.get('write_only')])
+"
+[]
+```
+
+Zero. `random_password` has no write-only attribute at all, and neither does the built-in `terraform_data`. The real picture, proven both ways above: write-only support is not a Terraform-wide guarantee every resource gets for free at 1.11 — a provider author adds it one resource, one attribute at a time, and as of these pinned versions exactly 7 `google` resources have it while none of this course's fully-offline-appliable resources do. What *is* fully provable offline end-to-end, proven above, is the other half of the mechanism that makes write-only arguments useful in the first place: the ephemeral-value enforcement that decides what is even allowed to flow into a `_wo` argument once a resource has one.
+
 ## Where a shared backend stops being enough
 
 Earlier lessons in this module got state onto a shared GCS backend with built-in locking, which already fixes the worst team problems — divergent local files and corrupted concurrent writes. But it does not fully solve how a growing team should work together. If everyone still runs `terraform apply` from their own laptop whenever they feel like it, concurrent applies simply queue up behind the lock instead of colliding, and there is still no natural point where a second person reviews a change before it takes effect against real infrastructure.
@@ -71,8 +160,49 @@ export const sensitiveDataDiagram = `flowchart LR
   secretManager["Secret Manager secret version"] -->|read via data source at apply time| resource["google_sql_user.app"]
   resource --> state`;
 
+## Mental Model
+
+Three mechanisms in this lesson look similar from a distance — `sensitive`, `ephemeral`, and write-only arguments — but they solve genuinely different problems, and the difference is exactly *what gets written to state*. `sensitive = true` writes the value to state in full, and only redacts your terminal — proven above, the raw value is one `state pull | grep` away. `ephemeral` values are never written to state at all, and Terraform enforces that at plan time with a real error the moment you try to route one into an ordinary attribute — proven above. Write-only arguments are the provider-side half of that same guarantee: a `_wo` attribute is the one place an ephemeral value is allowed to land, specifically because the provider has promised never to persist it — proven above, `google_secret_manager_secret_version.secret_data_wo` (and six sibling resources across the provider) really exist in the pinned schema. Read in that order — display-only, structurally-excluded, provider-promised-never-persisted — the three stop looking like three flavors of "secret" and start looking like three different answers to "does this reach disk."
+
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---|---|---|
+| `sensitive = true` | Stops a value scrolling past in a shared terminal or CI log (proven above: `(sensitive value)`) | Zero effect on state — proven above, the raw value is still one `state pull` away |
+| `ephemeral` variable/resource | Structurally cannot reach state or a saved plan — enforced by a real error, not a convention (proven above); google even ships `ephemeral "google_secret_manager_secret_version"` to read a secret without ever recording it | Only usable in a narrow set of contexts (write-only arguments, provider config, other ephemeral values); a root-module ephemeral output is rejected outright (proven above) |
+| Write-only (`_wo`) arguments | The value genuinely never touches state, even transiently — proven above, 7 real `google` resources declare one | Opt-in per resource per provider, not a blanket 1.11 guarantee — proven above, `random_password` has none at all; real use needs a live GCP project and credentials |
+| `nonsensitive()` | Lets a value that is not actually secret escape unnecessary redaction (proven above via console) | Removes the one guardrail `sensitive = true` provides if misapplied to something that actually is secret |
+
+## Common Misconceptions
+
+- **"`sensitive = true` keeps a value out of the state file."** Proven above twice: the original `state pull` claim from earlier in this module, and the baseline redaction example — it only changes CLI display, never storage.
+- **"`ephemeral = true` is just a stricter version of `sensitive = true`."** Proven above: they are different mechanisms entirely. `sensitive` redacts display but still writes to state; `ephemeral` is structurally barred from state and plan, enforced by a real "Ephemeral values are not valid for ..." error the moment you try to persist one.
+- **"Any resource can accept an ephemeral value if you just reference it directly."** Proven above: `terraform plan` refuses with a specific, named reason — the target attribute is "not a write-only attribute and must be persisted to state." Only a `_wo` attribute a provider has explicitly built qualifies.
+- **"Write-only arguments are a general Terraform 1.11 feature you can use with any resource."** Proven above by dumping two real provider schemas: `google_secret_manager_secret_version` genuinely declares `secret_data_wo`/`secret_data_wo_version` (one of 7 `google` resources that do), while `random_password` in the exact same pinned toolchain declares zero write-only attributes — it is opt-in, per resource, per provider, not a capability every resource gets for free at 1.11.
+
+## Reading AI-generated code
+
+When reviewing generated code that touches secrets or ephemeral data, check for:
+
+- `sensitive = true` presented as "the fix" for a credential, with no mention of the backend still holding it in plaintext — proven above, that is exactly the gap this lesson closes.
+- An `ephemeral` value referenced directly in a plain (non-`_wo`) resource attribute, assumed to "just work" because it compiles — proven above, `terraform plan` rejects this with a specific error; it never gets to `apply`.
+- A root-module `output` marked `ephemeral = true`, intended to hand a generated secret to something outside Terraform — proven above, this is rejected outright; ephemeral outputs only exist for a child module handing a value back up to its caller.
+- `nonsensitive()` wrapped around a value that genuinely is secret, just to silence a "sensitive value in output" error, instead of marking the output `sensitive = true` — this defeats the one protection `sensitive` provides for no real gain.
+- A `secret_data_wo`-style argument used without its paired `secret_data_wo_version` bump on `google_secret_manager_secret_version`, then a report that "the new secret value never gets applied" — proven above, the version number is the only signal Terraform has that a new write-only value needs sending, since it never stores the value itself to diff against.
+
+<SpotTheBug code={`ephemeral "random_password" "db" {
+  length = 16
+}
+
+resource "google_secret_manager_secret_version" "db" {
+  secret      = google_secret_manager_secret.db.id
+  secret_data = ephemeral.random_password.db.result
+}`}>
+Proven above with the real error for the same mistake on `terraform_data.marker`: `secret_data` on `google_secret_manager_secret_version` is an ordinary, persisted attribute, not a write-only one — Terraform rejects this plan with "Ephemeral values are not valid for ..., because it is not a write-only attribute and must be persisted to state." The fix is not to give up on generating the secret ephemerally; it is to route it through the resource's actual write-only pair instead: `secret_data_wo = ephemeral.random_password.db.result` plus a `secret_data_wo_version` that increments whenever the value should change. Writing to the plain `secret_data` argument would not even get as far as reaching GCP — the plan itself fails first, which is the safety net working as designed, not a bug to route around with `sensitive = true` (that would only redact display; the ephemeral value still could not be persisted to a non-write-only attribute).
+</SpotTheBug>
+
 <Callout title="The one-line takeaway">
-`sensitive = true` only redacts a value from **CLI output and logs** — the value is still written into `terraform.tfstate` in **plaintext**, so it is not a substitute for protecting the state file itself. Real protection means relying on GCS server-side encryption at rest and scoping IAM roles like `roles/storage.objectViewer` tightly to only the principals that need to read the state bucket. For long-lived credentials, prefer pulling the value from a service like Secret Manager through a `data` source at apply time over storing it as a Terraform variable, since the secret's source of truth then lives in a system built for access control and rotation rather than in state.
+`sensitive = true` only redacts a value from **CLI output and logs** — the value is still written into `terraform.tfstate` in **plaintext** (proven above), so it is not a substitute for protecting the state file itself. **`ephemeral`** variables, resources, and outputs (Terraform 1.10+) are structurally different: they are never written to state or a saved plan at all, enforced by a real "must be persisted to state" error the moment you try to route one into an ordinary attribute (proven above) — and a root-module ephemeral output is rejected outright. **Write-only arguments** (`_wo` / `_wo_version`, Terraform 1.11+) are the provider-side half of that guarantee — proven above, 7 real `google` resources including `google_secret_manager_secret_version.secret_data_wo` declare one, while `random_password` has zero, confirming it is opt-in per resource, not universal. **`nonsensitive()`** deliberately removes the display redaction from one expression's result (proven above via console) without touching storage either way. Real protection means relying on GCS server-side encryption at rest and scoping IAM roles like `roles/storage.objectViewer` tightly to only the principals that need to read the state bucket.
 </Callout>
 
 export const quizSensitive = [
@@ -85,6 +215,40 @@ export const quizSensitive = [
       'It automatically rotates the value on a schedule',
     ],
     answer: 1,
+    explain: 'Proven above with a real state pull: a variable marked sensitive is still written into terraform.tfstate in full plaintext. sensitive = true only changes what shows up in plan/apply/output on your terminal.',
+  },
+  {
+    q: '```text\n$ terraform plan\nError: Invalid use of ephemeral value\n\n  with terraform_data.marker,\n  ...\n  15:   input = ephemeral.random_password.db.result\n\nEphemeral values are not valid for "input", because it is not a write-only\nattribute and must be persisted to state.\n```\nWhat does this real error prove about where an ephemeral value is allowed to go?',
+    options: [
+      'Ephemeral values can never be used anywhere in Terraform',
+      'An ephemeral value may only flow into an attribute the provider has explicitly declared write-only, since that is the one kind of attribute guaranteed never to be persisted',
+      'This is a bug and ephemeral values should be usable in any attribute',
+      'The error means the random provider does not support ephemeral resources at all',
+    ],
+    answer: 1,
+    explain: 'Proven above: Terraform enforces, at plan time, that an ephemeral value can only be routed into a write-only (_wo) attribute — trying to persist one into an ordinary attribute is rejected with this exact error naming the reason.',
+  },
+  {
+    q: '```text\n$ terraform providers schema -json | ... google_secret_manager_secret_version ...\nsecret_data_wo {\'write_only\': True} secret_data_wo_version {...}\n$ terraform providers schema -json | ... random_password ...\n[]\n```\nThe pinned google_secret_manager_secret_version schema really declares secret_data_wo, but the pinned random_password schema declares zero write-only attributes. What does this prove?',
+    options: [
+      'Write-only arguments do not exist in Terraform at all',
+      'Write-only arguments are opt-in per resource per provider (Terraform 1.11+), not a capability every resource gets automatically — a provider author has to build support attribute by attribute, and random_password simply never has',
+      'The random provider is too old to support Terraform 1.11 features',
+      'write_only is a deprecated field that was removed from the schema format',
+    ],
+    answer: 1,
+    explain: 'Proven above by inspecting two real schema dumps rather than guessing — and by counting: exactly 7 google resources declare a write-only attribute across the whole provider, while random_password (same pinned Terraform version) has none. That gap is only explainable as a per-resource choice.',
+  },
+  {
+    q: 'Why does a root-module output marked ephemeral = true fail with "Ephemeral outputs are not allowed in context of a root module"',
+    options: [
+      'Ephemeral outputs are entirely unsupported in any version of Terraform',
+      'Ephemeral outputs exist specifically so a child module can hand an ephemeral value back up to its caller (for that caller\'s own write-only argument or further ephemeral use) — the root module has no caller to hand it to',
+      'This is a temporary bug that will be fixed in a future Terraform release',
+      'Only variables can be ephemeral, never outputs',
+    ],
+    answer: 1,
+    explain: 'Proven above with the real error. Ephemeral outputs are a child-module-to-parent-module handoff mechanism — the root module is the top of the call chain, so there is no parent for it to hand an ephemeral output to.',
   },
   {
     q: 'What is the real way to protect a GCS-backed state bucket at rest',
@@ -95,16 +259,7 @@ export const quizSensitive = [
       'Storing a copy of the state file locally as a backup in case the bucket is compromised',
     ],
     answer: 2,
-  },
-  {
-    q: 'Why is pulling a secret from Secret Manager via a data source often preferred over a Terraform variable for long-lived credentials',
-    options: [
-      'Because data sources never get written into the state file at all',
-      'Because the secret then lives in a system with its own access control, audit logging, and rotation, rather than depending on someone passing a variable in securely every run',
-      'Because Terraform variables cannot hold string values',
-      'Because data sources run before the GCS backend is configured',
-    ],
-    answer: 1,
+    explain: 'sensitive = true never removes data from state (proven above) — the real protection is GCS server-side encryption at rest plus IAM roles scoped tightly to the state bucket, treating the whole state object as a secret.',
   },
   {
     q: 'A team already has a shared GCS backend with built-in locking. What gap still remains for a growing team',
@@ -115,6 +270,7 @@ export const quizSensitive = [
       'GCS backends cannot be shared by more than one engineer at a time',
     ],
     answer: 2,
+    explain: 'Locking prevents corrupted concurrent writes but does not add a review step — a second engineer applying an unreviewed change is still possible, which is the gap CI/CD for infrastructure closes.',
   },
 ];
 

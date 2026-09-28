@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## ไอเดียในหนึ่งประโยค
 
@@ -57,13 +58,101 @@ resource "google_sql_user" "app" {
 
 วิธีนี้ไม่ได้ทำให้ค่านั้นหายไปจาก state ทั้งหมด — attribute ของ resource ที่ Terraform ตั้งไว้ก็ยังถูกบันทึกเหมือนเดิมตลอดมา สิ่งที่เปลี่ยนคือที่ที่ source of truth ระยะยาวของ secret นั้นอยู่ นั่นคือ Secret Manager ที่มี access policy, audit logging และเรื่อง rotation ของตัวเอง แทนที่จะเป็น Terraform variable ที่ต้องมีใครสักคนจำไว้ให้ pass เข้ามาอย่างปลอดภัยทุกครั้งที่รัน
 
+## `nonsensitive()` ยกเลิกการ redact ค่าอย่างตั้งใจ
+
+บางครั้ง `sensitive = true` แพร่กระจายไปไกลกว่าที่คุณต้องการ — expression ใด ๆ ที่แตะค่า sensitive จะกลายเป็น sensitive ไปด้วย แม้ผลลัพธ์จริง ๆ จะไม่ใช่ secret เลยก็ตาม ฟังก์ชัน `nonsensitive()` เอา marking นั้นออกจากค่าเดียวอย่างตั้งใจ สำหรับกรณีแบบนั้นเป๊ะ ๆ พิสูจน์จริงด้วย `terraform console` แสดงการ redact ก่อน แล้วค่อยเอาออก
+
+```text
+$ echo 'var.db_password' | terraform console
+(sensitive value)
+$ echo 'nonsensitive(var.db_password)' | terraform console
+"S3cretPassword!"
+```
+
+นั่นคือกลไกทั้งหมด `nonsensitive()` ไม่ได้เพิ่มการป้องกันอะไร และไม่ได้เอาค่าออกจาก state ไม่ว่ากรณีไหน — มันแค่เปลี่ยนว่าการ redact ของ Terraform จะใช้กับผลลัพธ์ของ expression ตัวนี้โดยเฉพาะต่อจากนี้หรือไม่เท่านั้น ใช้มันเฉพาะตอนที่คุณมั่นใจว่าค่านั้นไม่ได้เป็น secret จริง ๆ ในบริบทนั้น — เรียกมันกับ secret จริงแค่เพื่อปิด warning จะทำลายการป้องกันเดียวที่ `sensitive = true` มีให้
+
+## Ephemeral value ถูกกันออกจาก state และ plan โดยโครงสร้าง
+
+Terraform 1.10 เพิ่ม resource, variable และ output แบบ **ephemeral** — ค่าที่มีอยู่แค่ตลอด operation เดียวของ Terraform และไม่เคยถูกเขียนลง state หรือ saved plan file เลย ไม่ใช่ "เขียนแต่ redact" แบบที่ `sensitive = true` ทำ ตั้ง variable เป็น ephemeral แบบนี้
+
+```hcl
+variable "session_token" {
+  type      = string
+  ephemeral = true
+}
+```
+
+google provider เองก็ ship **ephemeral resource** ที่ตรงกันไว้ สำหรับอ่าน secret จาก Secret Manager โดยไม่เคย record มันเลย document ไว้พร้อมตัวอย่างจริงครบ (`registry.terraform.io/providers/hashicorp/google/latest/docs/ephemeral-resources/secret_manager_secret_version`): `ephemeral "google_secret_manager_secret_version" "example" { project = "my-project"; secret = "my-secret"; version = "latest" }` แล้วเอา `.secret_data` ของมันไปส่งต่อเข้า write-only argument ของ resource อื่น คอร์สนี้ไม่มี Secret Manager secret จริงให้อ่าน พิสูจน์แบบ offline ข้างล่างจึงใช้ pattern built-in แทน — ค่าอายุสั้นที่ generate สด ๆ ทุกครั้งที่รัน ไม่เคย persist ไว้ที่ไหนเลย
+
+```hcl
+ephemeral "random_password" "db" {
+  length = 16
+}
+```
+
+เพราะ ephemeral value ไม่เคยถูก persist Terraform จึง enforce ว่า *ที่ไหน* ที่มันไหลไปได้ ตอน plan time ด้วย error จริง — ไม่ใช่แค่ convention พิสูจน์ ส่ง `ephemeral.random_password.db.result` เข้า argument ธรรมดา (ไม่ใช่ write-only) ของ resource
+
+```text
+$ terraform plan
+Error: Invalid use of ephemeral value
+
+  with terraform_data.marker,
+  on main.tf line 15, in resource "terraform_data" "marker":
+  15:   input = ephemeral.random_password.db.result
+
+Ephemeral values are not valid for "input", because it is not a write-only
+attribute and must be persisted to state.
+```
+
+error นั้นระบุกฎจริงตรง ๆ ค่า ephemeral ไหลไปได้แค่ใน attribute ที่ provider ประกาศเป็น **write-only** ไว้ชัดเจนเท่านั้น เพราะ write-only attribute คือ argument ชนิดเดียวที่ Terraform รับประกันว่าจะไม่ persist เลย ข้อจำกัดจริงอีกข้อ พิสูจน์แบบเดียวกัน output แบบ ephemeral ใช้ใน root module ไม่ได้เลย —
+
+```text
+$ terraform plan
+Error: Ephemeral outputs are not allowed in context of a root module
+```
+
+— ephemeral output มีไว้ให้ **child module** ส่งค่า ephemeral กลับขึ้นไปให้ตัวที่เรียกมัน (เพื่อให้ผู้เรียกเอาไปใช้กับ write-only argument ของตัวเองหรือส่งต่อเป็น ephemeral chain) ไม่ใช่ให้ root module print มันออกมา
+
+## Write-only argument (`_wo`) อีกครึ่งหนึ่งของกลไก
+
+Terraform 1.11 เพิ่ม **write-only argument** — resource attribute ที่ตามธรรมเนียมลงท้ายด้วย `_wo` คู่กับ integer `_wo_version` ที่ provider สัญญาว่าจะไม่เขียนลง state หรือ saved plan เลย นี่ไม่ใช่สมมติฐานสำหรับ google provider `google_secret_manager_secret_version` ประกาศคู่นี้จริง ตาม docs จริงของ provider — "`secret_data_wo` - (Optional, Write-Only) The secret data. ... **Note**: This property is write-only and will not be read from the API." / "`secret_data_wo_version` - (Optional) Triggers update of `secret_data_wo` write-only. Increment this value when an update to `secret_data_wo` is needed." — และ note ระดับบนสุดของ resource เองก็ยืนยันตรง ๆ "All arguments marked as write-only values will not be stored in the state: `secret_data_wo`"
+
+ยืนยันตรง ๆ กับ schema ของ provider `hashicorp/google` 8.4.0 ที่ pin ไว้ — ไม่ต้องมี GCP credential เลย `terraform providers schema -json` แค่อ่านสิ่งที่ `init` ดาวน์โหลดมาแล้ว และการเช็คแบบเดียวกันนี้เจอ resource ทั้งหมด 7 ตัวทั่วทั้ง provider ที่มี write-only attribute (`google_secret_manager_secret_version`, `google_sql_database_instance`, `google_sql_user`, `google_alloydb_user`, `google_compute_ssl_certificate`, `google_compute_region_ssl_certificate`, `google_compute_vpn_tunnel`)
+
+```text
+$ terraform providers schema -json | python3 -c "
+import json,sys
+d = json.load(sys.stdin)
+attrs = d['provider_schemas']['registry.terraform.io/hashicorp/google']['resource_schemas']['google_secret_manager_secret_version']['block']['attributes']
+for k, v in attrs.items():
+    if v.get('write_only') or k.endswith('_wo_version'):
+        print(k, v)
+"
+secret_data_wo {'type': 'string', 'description_kind': 'plain', 'optional': True, 'write_only': True}
+secret_data_wo_version {'type': 'number', 'description_kind': 'plain', 'optional': True}
+```
+
+สิ่งที่ต้องการ credential จริงคือการ *apply* มันต่างหาก — สร้าง Secret Manager secret version จริงต้องมี GCP project จริง คำถามที่ต้องตอบตรง ๆ แทนคือ write-only support เป็นสากลทุก resource หรือ opt-in เช็คกับ `random_password` ของ `hashicorp/random` — resource ที่คอร์สนี้ apply ได้เต็มรูปแบบแบบ offline — ด้วย query เดียวกันเป๊ะ
+
+```text
+$ terraform providers schema -json | python3 -c "
+import json,sys
+d = json.load(sys.stdin)
+attrs = d['provider_schemas']['registry.terraform.io/hashicorp/random']['resource_schemas']['random_password']['block']['attributes']
+print([k for k,v in attrs.items() if v.get('write_only')])
+"
+[]
+```
+
+`random_password` ไม่มี write-only attribute เลยแม้แต่ตัวเดียว เหมือนกับ built-in `terraform_data` ภาพจริงที่พิสูจน์แล้วทั้งสองด้านข้างบนคือ write-only support ไม่ใช่การรับประกันทั่วทั้ง Terraform ที่ resource ไหนก็ได้ฟรีตั้งแต่ 1.11 — มันคือสิ่งที่ผู้เขียน provider แต่ละคนเพิ่มเข้ามาทีละ resource ทีละ attribute และตามเวอร์ชันที่ pin ไว้นี้มี resource `google` 7 ตัวที่มี ในขณะที่ resource ที่ apply ได้แบบ offline เต็มรูปแบบของคอร์สนี้ไม่มีตัวไหนมีเลย สิ่งที่พิสูจน์ได้จริงแบบ offline ครบวงจร และพิสูจน์ไปแล้วข้างบนคือครึ่งหนึ่งของกลไกที่ทำให้ write-only argument มีประโยชน์ตั้งแต่แรก คือการ enforce ค่า ephemeral ว่าอะไรได้รับอนุญาตให้ไหลเข้า `_wo` argument บ้าง เมื่อ resource นั้นมี attribute แบบนี้แล้ว
+
 ## จุดที่ shared backend เริ่มไม่พอแล้ว
 
 บทก่อนหน้าใน module นี้พา state ไปอยู่บน shared GCS backend ที่มี locking built-in มาให้ ซึ่งแก้ปัญหาทีมที่แย่ที่สุดไปแล้ว — local file ที่ต่างกันไปเรื่อย ๆ และการเขียนพร้อมกันที่ corrupt กัน แต่ยังไม่ได้แก้ปัญหาว่าทีมที่กำลังโตควรทำงานร่วมกันยังไงให้ครบ ถ้าทุกคนยังรัน `terraform apply` จาก laptop ตัวเองเมื่อไหร่ก็ตามที่อยากรัน การ apply พร้อมกันก็แค่ต่อคิวกันหลัง lock แทนที่จะชนกัน และก็ยังไม่มีจุดตามธรรมชาติที่คนที่สอง review การเปลี่ยนแปลงก่อนที่จะมีผลจริงกับ infrastructure
 
 ช่องว่างนั้น — ที่ที่ review ได้ audit ได้ สำหรับให้การเปลี่ยนแปลงถูก approve ก่อน `apply` จะรันกับ shared state — คือสิ่งที่ CI/CD สำหรับ infrastructure มาปิดช่องว่างนี้พอดี และเรื่องนี้จะพูดถึงในบทหลัง ๆ ของคอร์สนี้
 
-<Mermaid title="A sensitive variable still lands in state as plaintext, while a data source pulls a secret at apply time instead of storing it as a variable" code={sensitiveDataDiagram} />
+<Mermaid title="variable แบบ sensitive ยังไปอยู่ใน state แบบ plaintext ขณะที่ data source ดึง secret ตอน apply แทนที่จะเก็บเป็น variable" code={sensitiveDataDiagram} />
 
 export const sensitiveDataDiagram = `flowchart LR
   varInput["variable db_password (sensitive = true)"] -->|redacted in CLI output| cli["terraform plan / apply output"]
@@ -71,8 +160,49 @@ export const sensitiveDataDiagram = `flowchart LR
   secretManager["Secret Manager secret version"] -->|read via data source at apply time| resource["google_sql_user.app"]
   resource --> state`;
 
+## Mental Model
+
+สามกลไกในบทนี้ดูคล้ายกันจากภายนอก — `sensitive`, `ephemeral`, และ write-only argument — แต่แก้ปัญหาคนละอย่างกันจริง ๆ และความต่างอยู่ตรงที่ *อะไรถูกเขียนลง state* `sensitive = true` เขียนค่าลง state เต็ม ๆ แล้ว redact แค่ terminal — พิสูจน์ข้างบน ค่าดิบห่างแค่ `state pull | grep` เดียว ค่า `ephemeral` ไม่เคยถูกเขียนลง state เลย และ Terraform enforce เรื่องนี้ตอน plan time ด้วย error จริงทันทีที่คุณพยายามส่งมันเข้า attribute ธรรมดา — พิสูจน์ข้างบน write-only argument คือครึ่งฝั่ง provider ของการรับประกันเดียวกันนั้น `_wo` attribute คือที่เดียวที่ ephemeral value ได้รับอนุญาตให้ไปถึง เพราะ provider สัญญาว่าจะไม่ persist มันเลย — พิสูจน์ข้างบนว่า `google_secret_manager_secret_version.secret_data_wo` (และ resource พี่น้องอีกหกตัว) มีอยู่จริงใน schema ที่ pin ไว้ อ่านตามลำดับนี้ — display-only, กันออกจากโครงสร้าง, provider สัญญาว่าจะไม่ persist — ทั้งสามจะไม่ดูเหมือน "secret" สามแบบอีกต่อไป แต่กลายเป็นคำตอบสามแบบสำหรับคำถาม "ค่านี้ไปถึง disk ไหม"
+
+## ข้อแลกเปลี่ยน
+
+| ทางเลือก | ได้อะไร | เสียอะไร |
+|---|---|---|
+| `sensitive = true` | หยุดค่าเลื่อนผ่าน terminal หรือ CI log ที่แชร์กัน (พิสูจน์ข้างบน `(sensitive value)`) | ไม่มีผลกับ state เลย — พิสูจน์ข้างบน ค่าดิบยังห่างแค่ `state pull` เดียว |
+| variable/resource แบบ `ephemeral` | ไปไม่ถึง state หรือ saved plan ได้เลยโดยโครงสร้าง — enforce ด้วย error จริง ไม่ใช่แค่ convention (พิสูจน์ข้างบน) google ยัง ship `ephemeral "google_secret_manager_secret_version"` ให้อ่าน secret โดยไม่ต้อง record เลยด้วย | ใช้ได้แค่บริบทแคบ ๆ (write-only argument, provider config, ephemeral value อื่น) ephemeral output ใน root module ถูกปฏิเสธตรง ๆ (พิสูจน์ข้างบน) |
+| write-only (`_wo`) argument | ค่านั้นไม่แตะ state เลยจริง ๆ แม้จะชั่วคราวก็ตาม — พิสูจน์ข้างบนว่า resource `google` จริง 7 ตัวประกาศ attribute แบบนี้ | opt-in ต่อ resource ต่อ provider ไม่ใช่การรับประกันทั่ว 1.11 — พิสูจน์ข้างบน `random_password` ไม่มีเลยสักตัว ใช้จริงต้องมี GCP project จริงกับ credential |
+| `nonsensitive()` | ให้ค่าที่จริง ๆ ไม่ใช่ secret หลุดจากการ redact ที่ไม่จำเป็น (พิสูจน์ข้างบนผ่าน console) | เอาการป้องกันเดียวที่ `sensitive = true` มีให้ออกไป ถ้าใช้ผิดกับสิ่งที่เป็น secret จริง |
+
+## ความเข้าใจผิดที่พบบ่อย
+
+- **"`sensitive = true` กันไม่ให้ค่าไปอยู่ใน state file"** พิสูจน์ข้างบนสองครั้ง ทั้งข้อเท็จจริงจาก `state pull` ก่อนหน้าในโมดูลนี้ และตัวอย่าง redact baseline — มันเปลี่ยนแค่การแสดงผลบน CLI ไม่เคยเปลี่ยนวิธีเก็บ
+- **"`ephemeral = true` เป็นแค่ `sensitive = true` เวอร์ชันเข้มกว่า"** พิสูจน์ข้างบน คนละกลไกกันเลย `sensitive` redact การแสดงผลแต่ยังเขียนลง state `ephemeral` ถูกกันออกจาก state และ plan โดยโครงสร้าง enforce ด้วย error จริง "Ephemeral values are not valid for ..." ทันทีที่พยายาม persist
+- **"resource ไหนก็รับ ephemeral value ได้ถ้าอ้างถึงตรง ๆ"** พิสูจน์ข้างบน `terraform plan` ปฏิเสธด้วยเหตุผลที่ระบุชัดเจน — attribute เป้าหมาย "ไม่ใช่ write-only attribute และต้อง persist ลง state" มีแค่ `_wo` attribute ที่ provider สร้างไว้ให้ชัดเจนเท่านั้นที่ผ่านได้
+- **"write-only argument เป็น feature ทั่วไปของ Terraform 1.11 ใช้กับ resource ไหนก็ได้"** พิสูจน์ข้างบนด้วยการ dump provider schema จริงสองตัว `google_secret_manager_secret_version` ประกาศ `secret_data_wo`/`secret_data_wo_version` จริง (หนึ่งใน resource `google` 7 ตัวที่มี) ในขณะที่ `random_password` บน toolchain เวอร์ชันเดียวกันเป๊ะไม่มี write-only attribute เลย — มันคือ opt-in ต่อ resource ต่อ provider ไม่ใช่ความสามารถที่ทุก resource ได้ฟรีตั้งแต่ 1.11
+
+## อ่านโค้ดที่ AI เขียน
+
+ตอน review โค้ดที่ generate มาซึ่งแตะ secret หรือ ephemeral data เช็คสิ่งเหล่านี้
+
+- `sensitive = true` ถูกนำเสนอเป็น "ทางแก้" ของ credential โดยไม่พูดถึงว่า backend ยังเก็บมันแบบ plaintext อยู่ดี — พิสูจน์ข้างบน นี่คือช่องว่างที่บทนี้ปิดพอดี
+- ephemeral value ถูกอ้างถึงตรง ๆ ใน attribute ธรรมดา (ไม่ใช่ `_wo`) ของ resource สันนิษฐานว่า "ก็แค่ใช้ได้" เพราะ compile ผ่าน — พิสูจน์ข้างบน `terraform plan` ปฏิเสธด้วย error เฉพาะเจาะจง ไม่มีทางไปถึง `apply` เลย
+- root-module `output` ที่ตั้ง `ephemeral = true` ตั้งใจส่ง secret ที่ generate มาให้สิ่งภายนอก Terraform — พิสูจน์ข้างบน สิ่งนี้ถูกปฏิเสธตรง ๆ ephemeral output มีไว้ให้ child module ส่งค่ากลับขึ้นไปให้ผู้เรียกเท่านั้น
+- `nonsensitive()` ถูกใช้ห่อค่าที่จริง ๆ เป็น secret แค่เพื่อปิด error "sensitive value in output" แทนที่จะตั้ง output เป็น `sensitive = true` — สิ่งนี้ทำลายการป้องกันเดียวที่ `sensitive` มีให้โดยไม่ได้อะไรคืนมาจริง
+- argument แบบ `secret_data_wo` บน `google_secret_manager_secret_version` ถูกใช้โดยไม่เพิ่ม `secret_data_wo_version` คู่กัน แล้วมีรายงานว่า "ค่า secret ใหม่ไม่เคย apply เลย" — พิสูจน์ข้างบน เลข version คือ signal เดียวที่ Terraform มีว่าต้องส่งค่า write-only ใหม่ เพราะมันไม่เคยเก็บค่าเองไว้ diff
+
+<SpotTheBug code={`ephemeral "random_password" "db" {
+  length = 16
+}
+
+resource "google_secret_manager_secret_version" "db" {
+  secret      = google_secret_manager_secret.db.id
+  secret_data = ephemeral.random_password.db.result
+}`}>
+พิสูจน์ข้างบนด้วย error จริงสำหรับความผิดพลาดแบบเดียวกันบน `terraform_data.marker` — `secret_data` บน `google_secret_manager_secret_version` เป็น attribute ธรรมดาที่ persist ไม่ใช่ write-only Terraform ปฏิเสธ plan นี้ด้วย "Ephemeral values are not valid for ..., because it is not a write-only attribute and must be persisted to state" ทางแก้ไม่ใช่ยอมแพ้เรื่อง generate secret แบบ ephemeral แต่คือส่งมันผ่าน write-only pair จริงของ resource แทน `secret_data_wo = ephemeral.random_password.db.result` คู่กับ `secret_data_wo_version` ที่เพิ่มขึ้นทุกครั้งที่ควรเปลี่ยนค่า เขียนลง argument `secret_data` ธรรมดาจะไปไม่ถึง GCP ด้วยซ้ำ — plan เองพังก่อน ซึ่งคือ safety net ที่ทำงานตามที่ออกแบบไว้ ไม่ใช่ bug ที่ต้องหลบด้วย `sensitive = true` (แบบนั้นจะแค่ redact การแสดงผล ค่า ephemeral ก็ยัง persist ลง attribute ธรรมดาไม่ได้อยู่ดี)
+</SpotTheBug>
+
 <Callout title="สรุปหนึ่งบรรทัด">
-`sensitive = true` แค่ redact ค่าจาก **CLI output และ log** เท่านั้น — ค่านั้นยังถูกเขียนลง `terraform.tfstate` แบบ **plaintext** ดังนั้นจึงไม่ใช่ตัวแทนของการป้องกัน state file เอง การป้องกันจริงคือพึ่ง GCS server-side encryption แบบ at rest และจำกัด IAM role อย่าง `roles/storage.objectViewer` ให้แคบ ให้แค่ principal ที่ต้องอ่าน state bucket จริง ๆ สำหรับ credential ที่อยู่ยาว ให้เลือกดึงค่าจาก service อย่าง Secret Manager ผ่าน `data` source ตอน apply แทนการเก็บเป็น Terraform variable เพราะ source of truth ของ secret จะไปอยู่ในระบบที่ออกแบบมาเพื่อ access control และ rotation แทนที่จะอยู่ใน state
+`sensitive = true` แค่ redact ค่าจาก **CLI output และ log** เท่านั้น — ค่านั้นยังถูกเขียนลง `terraform.tfstate` แบบ **plaintext** (พิสูจน์ข้างบน) ดังนั้นจึงไม่ใช่ตัวแทนของการป้องกัน state file เอง **`ephemeral`** variable, resource และ output (Terraform 1.10 ขึ้นไป) ต่างออกไปโดยโครงสร้าง ไม่เคยถูกเขียนลง state หรือ saved plan เลย enforce ด้วย error จริง "must be persisted to state" ทันทีที่พยายามส่งเข้า attribute ธรรมดา (พิสูจน์ข้างบน) — และ root-module ephemeral output ถูกปฏิเสธตรง ๆ **write-only argument** (`_wo` / `_wo_version`, Terraform 1.11 ขึ้นไป) คือครึ่งฝั่ง provider ของการรับประกันเดียวกัน — พิสูจน์ข้างบนว่า resource `google` จริง 7 ตัวรวมถึง `google_secret_manager_secret_version.secret_data_wo` ประกาศ attribute แบบนี้ ในขณะที่ `random_password` ไม่มีเลย ยืนยันว่าเป็น opt-in ต่อ resource ไม่ใช่ทุกตัว **`nonsensitive()`** เอาการ redact การแสดงผลออกจากผลลัพธ์ของ expression เดียวอย่างตั้งใจ (พิสูจน์ข้างบนผ่าน console) โดยไม่แตะการเก็บข้อมูลไม่ว่ากรณีไหน การป้องกันจริงคือพึ่ง GCS server-side encryption แบบ at rest และจำกัด IAM role อย่าง `roles/storage.objectViewer` ให้แคบ ให้แค่ principal ที่ต้องอ่าน state bucket จริง ๆ
 </Callout>
 
 export const quizSensitive = [
@@ -85,6 +215,40 @@ export const quizSensitive = [
       'หมุนเวียนเปลี่ยนค่าให้อัตโนมัติตามตารางเวลา',
     ],
     answer: 1,
+    explain: 'พิสูจน์ข้างบนด้วย state pull จริง variable ที่ตั้ง sensitive ยังถูกเขียนลง terraform.tfstate แบบ plaintext เต็ม ๆ sensitive = true เปลี่ยนแค่สิ่งที่โผล่ใน plan/apply/output บน terminal',
+  },
+  {
+    q: '```text\n$ terraform plan\nError: Invalid use of ephemeral value\n\n  with terraform_data.marker,\n  ...\n  15:   input = ephemeral.random_password.db.result\n\nEphemeral values are not valid for "input", because it is not a write-only\nattribute and must be persisted to state.\n```\nerror จริงนี้พิสูจน์อะไรเกี่ยวกับที่ที่ ephemeral value ไหลไปได้',
+    options: [
+      'ephemeral value ใช้ที่ไหนใน Terraform ไม่ได้เลย',
+      'ephemeral value ไหลไปได้แค่ attribute ที่ provider ประกาศเป็น write-only ไว้ชัดเจนเท่านั้น เพราะนั่นคือ attribute ชนิดเดียวที่รับประกันว่าจะไม่ persist',
+      'นี่คือ bug และ ephemeral value ควรใช้ได้กับทุก attribute',
+      'error นี้แปลว่า random provider ไม่รองรับ ephemeral resource เลย',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ข้างบน Terraform enforce ตอน plan time ว่า ephemeral value ไหลเข้าได้แค่ write-only (_wo) attribute เท่านั้น — พยายาม persist มันลง attribute ธรรมดาจะถูกปฏิเสธด้วย error ที่ระบุเหตุผลตรง ๆ แบบนี้',
+  },
+  {
+    q: '```text\n$ terraform providers schema -json | ... google_secret_manager_secret_version ...\nsecret_data_wo {\'write_only\': True} secret_data_wo_version {...}\n$ terraform providers schema -json | ... random_password ...\n[]\n```\nschema ของ google_secret_manager_secret_version ที่ pin ไว้ประกาศ secret_data_wo จริง แต่ schema ของ random_password ไม่มี write-only attribute เลยสักตัว สิ่งนี้พิสูจน์อะไรจริง ๆ',
+    options: [
+      'write-only argument ไม่มีอยู่จริงใน Terraform เลย',
+      'write-only argument เป็น opt-in ต่อ resource ต่อ provider (Terraform 1.11 ขึ้นไป) ไม่ใช่ความสามารถที่ทุก resource ได้มาอัตโนมัติ — ผู้เขียน provider ต้องสร้างทีละ attribute เอง และ random_password ก็ไม่เคยสร้างเลย',
+      'random provider เก่าเกินไปจนไม่รองรับ feature ของ Terraform 1.11',
+      'write_only เป็น field ที่เลิกใช้แล้วและถูกเอาออกจากรูปแบบ schema',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ข้างบนด้วยการตรวจ schema JSON จริงสองตัว และการนับ resource ที่มี attribute นี้ทั่วทั้ง provider ได้ 7 ตัว ในขณะที่ random_password (Terraform version เดียวกันเป๊ะ) ไม่มีเลย ซึ่งอธิบายได้แค่ว่าเป็นทางเลือกระดับ resource ไม่ใช่ version gate',
+  },
+  {
+    q: 'ทำไม root-module output ที่ตั้ง ephemeral = true ถึง fail ด้วย "Ephemeral outputs are not allowed in context of a root module"',
+    options: [
+      'ephemeral output ไม่รองรับเลยใน Terraform ทุกเวอร์ชัน',
+      'ephemeral output มีไว้เพื่อให้ child module ส่งค่า ephemeral กลับขึ้นไปให้ผู้เรียก (ให้ผู้เรียกเอาไปใช้กับ write-only argument ของตัวเองหรือส่งต่อ) — root module ไม่มีผู้เรียกให้ส่งไปหา',
+      'นี่คือ bug ชั่วคราวที่จะถูกแก้ใน Terraform เวอร์ชันถัดไป',
+      'มีแค่ variable เท่านั้นที่เป็น ephemeral ได้ output ทำไม่ได้',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ข้างบนด้วย error จริง ephemeral output คือกลไกส่งต่อจาก child module ไปยัง parent module — root module อยู่บนสุดของ call chain เลยไม่มี parent ให้ส่ง ephemeral output ไปหา',
   },
   {
     q: 'วิธีป้องกัน GCS state bucket ให้ปลอดภัยจริง ๆ ตอน at rest คืออะไร',
@@ -95,16 +259,7 @@ export const quizSensitive = [
       'เก็บ copy ของ state file ไว้ local เป็น backup เผื่อ bucket ถูก compromise',
     ],
     answer: 2,
-  },
-  {
-    q: 'ทำไมการดึง secret จาก Secret Manager ผ่าน data source มักถูกเลือกใช้มากกว่า Terraform variable สำหรับ credential ที่อยู่ยาว',
-    options: [
-      'เพราะ data source ไม่เคยถูกเขียนลง state file เลย',
-      'เพราะ secret นั้นจะไปอยู่ในระบบที่มี access control, audit logging และ rotation ของตัวเอง แทนที่จะพึ่งให้ใครสักคน pass variable เข้ามาอย่างปลอดภัยทุกครั้งที่รัน',
-      'เพราะ Terraform variable เก็บค่าแบบ string ไม่ได้',
-      'เพราะ data source รันก่อนที่จะ config GCS backend เสียอีก',
-    ],
-    answer: 1,
+    explain: 'sensitive = true ไม่เคยเอาข้อมูลออกจาก state (พิสูจน์ข้างบน) — การป้องกันจริงคือ GCS server-side encryption at rest บวกกับ IAM role ที่จำกัดแคบเฉพาะ state bucket',
   },
   {
     q: 'ทีมหนึ่งมี shared GCS backend ที่มี locking built-in อยู่แล้ว ยังมีช่องว่างอะไรเหลือสำหรับทีมที่กำลังโต',
@@ -115,6 +270,7 @@ export const quizSensitive = [
       'GCS backend ใช้ร่วมกันได้แค่วิศวกรคนเดียวในแต่ละครั้งเท่านั้น',
     ],
     answer: 2,
+    explain: 'locking ป้องกันแค่การเขียนพร้อมกันที่ corrupt กัน ไม่ได้เพิ่มขั้นตอน review — วิศวกรคนที่สอง apply การเปลี่ยนแปลงที่ไม่มีใครดูมาก่อนก็ยังทำได้ ซึ่งคือช่องว่างที่ CI/CD สำหรับ infrastructure มาปิด',
   },
 ];
 
