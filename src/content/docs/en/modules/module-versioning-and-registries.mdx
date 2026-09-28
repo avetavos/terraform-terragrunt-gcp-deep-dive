@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## The idea in one sentence
 
@@ -48,6 +49,70 @@ The same operator works one segment more precisely too: `version = "~> 18.2.0"` 
 
 Upgrading past a blocked boundary is still one command away when you are ready — bump the `version` constraint in your `.tf` file, then run `terraform init -upgrade` — the constraint just makes sure that upgrade is something a person decided to do, not something that happened silently on the next `init`.
 
+## Proving `~> 18.0` for real: `terraform-google-modules/network/google`, and the `subnets` argument it actually requires
+
+`terraform-google-modules/network/google` is a real, current module — `~> 18.0` genuinely resolves. But v18 requires an argument the examples above never showed: `subnets`. Real `terraform validate` output, proving the omission is a genuine error and not a style choice:
+
+```hcl
+module "vpc" {
+  source  = "terraform-google-modules/network/google"
+  version = "~> 18.0"
+
+  project_id   = "acme-app-prod"
+  network_name = "app-network"
+}
+```
+
+```text
+$ terraform validate
+Error: Missing required argument
+
+  on main.tf line 10, in module "vpc":
+  10: module "vpc" {
+
+The argument "subnets" is required, but no definition was found.
+```
+
+`subnets` is not optional in v18, even for a minimal VPC. The real, corrected, validated call:
+
+```hcl
+module "vpc" {
+  source  = "terraform-google-modules/network/google"
+  version = "~> 18.0"
+
+  project_id   = "acme-app-prod"
+  network_name = "app-network"
+
+  subnets = [
+    {
+      subnet_name   = "app-subnet-us-central1"
+      subnet_ip     = "10.0.1.0/24"
+      subnet_region = "us-central1"
+    }
+  ]
+}
+```
+
+```text
+$ terraform init
+...
+$ terraform validate
+Success! The configuration is valid.
+```
+
+`~> 18.0` resolved to a real, current `18.3.0` — proof this module is actively maintained, not the outdated, no-longer-representative example a course could silently carry forward. A required-argument change like this is exactly the kind of thing `~>` protects you from crossing *unreviewed* at a major-version boundary (here, `17.x` to `18.x`) — but it does not protect you from a stale copy-pasted example that was never updated to match the version actually pinned.
+
+## Where the resolved module version actually lives — not `.terraform.lock.hcl`
+
+Here is a detail worth correcting explicitly, since it is easy to assume wrongly by analogy with providers: **a resolved module version is never recorded in `.terraform.lock.hcl`.** That file is provider-only. Proof — the resolved module version from the `init` above instead lands in `.terraform/modules/modules.json`, which `terraform init` regenerates on every run and which is not meant to be committed to version control (it lives inside the gitignored `.terraform/` directory, alongside the downloaded module source itself):
+
+```text
+$ cat .terraform/modules/modules.json
+{"Modules":[{"Key":"","Source":"","Dir":"."},{"Key":"vpc","Source":"registry.terraform.io/terraform-google-modules/network/google","Version":"18.3.0","Dir":".terraform/modules/vpc"}, ...]}
+```
+
+No `module` entry exists anywhere in `.terraform.lock.hcl` — only `provider` blocks. That means the `version = "~> 18.0"` constraint in your `.tf` file is the *only* durable, committed record of which module versions are acceptable — unlike a provider, there is no separate lock file pinning the exact resolved module version for next time. Every `init` re-resolves the constraint against whatever the Registry currently has published within it, which is exactly why the constraint itself, not a lock file, is what protects you from an unreviewed jump to `19.0`.
+
 ## Private sources and publishing your own module
 
 Not every module belongs on the public Registry. A module that encodes one company's specific security policies, naming conventions, or internal service wiring has no reason to be public, and probably should not be. Terraform supports the same `source` mechanics for these cases — a private Git repository (often over SSH, so `init` can authenticate with existing credentials) or a private module registry, such as HCP Terraform's private registry or an internally hosted one:
@@ -76,8 +141,45 @@ export const moduleVersioningDiagram = `flowchart LR
     u3 --> u4["Silently resolves 19.0.0 with breaking changes"]
   end`;
 
+## Mental Model
+
+A provider's exact resolved version is pinned twice: once loosely by your `version` constraint, once exactly by `.terraform.lock.hcl`. A module's resolved version is pinned only once — by your `version` constraint alone, proven above by the real absence of any module entry in `.terraform.lock.hcl`. That asymmetry means the constraint string in your `.tf` file carries more weight for modules than the equivalent string does for providers, because there is no second, committed safety net catching a surprise resolution the way the lock file does for providers. And `~>` only protects you from *unreviewed* major-version jumps — proven above, it does nothing to protect a course example (or your own module call) that was simply never updated to match a required argument the pinned version actually needs.
+
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---|---|---|
+| `version = "~> 18.0"` on a Registry module | Allows real patch/minor fixes (proven above: resolved to `18.3.0`) while blocking an unreviewed `19.0` jump | Still requires you to actually re-validate against the resolved version — proven above, `~> 18.0` alone did not catch that `subnets` had become required |
+| No module lock file (unlike providers) | One less generated file to keep in sync; `.terraform/modules/` regenerates cleanly every `init` | The `version` constraint string is the *only* committed record of acceptable module versions — proven above, there is no `.terraform.lock.hcl` entry backing it up |
+| Private Git repo or private registry for internal modules | Company-specific infrastructure details never become public | Requires your own versioning discipline (real Git tags, a real private registry) instead of relying on the public Registry's own conventions |
+
+## Common Misconceptions
+
+- **"A module's resolved version gets recorded in `.terraform.lock.hcl`, the same as a provider's."** Proven above: a real `init` against `terraform-google-modules/network/google` produced a `.terraform.lock.hcl` with only `provider` blocks — no module entry anywhere. The resolved module version lives in `.terraform/modules/modules.json` instead, which is not meant to be committed.
+- **"If a module's `version` constraint is correct, the example code that worked before still works."** Proven above by a real error: `subnets` became a required argument at some point in the `18.x` line, and the exact same `project_id`/`network_name`-only call that might have validated against an older release fails against the current `18.3.0` with "Missing required argument."
+- **"Since modules don't have a lock file, the version constraint doesn't really matter much."** Proven above by the asymmetry itself: because there is no second, committed safety net for modules the way there is for providers, the constraint string is *more* load-bearing for modules, not less.
+
+## Reading AI-generated code
+
+When reviewing generated module sources, check for:
+
+- A Registry or Git-tag `module` block with no `version` (or `?ref=`) argument at all — proven above, this is exactly the unpinned-version risk this lesson opens with.
+- A `terraform-google-modules/network/google` call with no `subnets` argument — proven above, this is a real, current validate error against `~> 18.0`, not a hypothetical.
+- A comment or commit message claiming a module's exact resolved version is "locked" or "pinned in the lock file" — proven above, that claim is only true for providers; a module's actual resolved version lives in the gitignored `.terraform/modules/modules.json`.
+- A private, company-specific module published with a generic name that does not follow `terraform-<PROVIDER>-<NAME>` — this breaks Registry auto-detection for public modules, and is worth flagging even for a private registry, where the same naming discipline keeps modules discoverable.
+
+<SpotTheBug code={`module "vpc" {
+  source  = "terraform-google-modules/network/google"
+  version = "~> 18.0"
+
+  project_id   = "acme-app-prod"
+  network_name = "app-network"
+}`}>
+Proven above with a real `terraform validate` error: `terraform-google-modules/network/google` genuinely requires a `subnets` argument as of the pinned `~> 18.0` line — "The argument \`subnets\` is required, but no definition was found." This is exactly the kind of thing a correct `version` constraint does *not* protect against: `~> 18.0` legitimately resolved to a real, current `18.3.0`, the constraint did its job, but the module call itself was never updated to match what that version actually requires. The fix is adding a real `subnets` list — proven above to `validate` cleanly once at least one subnet block (`subnet_name`, `subnet_ip`, `subnet_region`) is supplied.
+</SpotTheBug>
+
 <Callout title="The one-line takeaway">
-A module's **`version`** constraint matters for the same reason a provider version constraint does: without one, a routine `terraform init` or `init -upgrade` can silently resolve a newer Registry or Git-tagged module release with breaking changes nobody reviewed. The **pessimistic constraint operator**, `~> 18.0`, allows any `18.x` release but blocks the `19.0.0` major bump, making upgrades a deliberate decision instead of an accident. Modules specific to one organization belong behind a **private Git source** or **private registry** instead of the public one, and a module you do publish publicly must live in a repository named `terraform-<PROVIDER>-<NAME>` for the Registry to pick it up correctly.
+A module's **`version`** constraint matters for the same reason a provider version constraint does: without one, a routine `terraform init` or `init -upgrade` can silently resolve a newer Registry or Git-tagged module release with breaking changes nobody reviewed — and unlike a provider, that constraint is the *only* durable record of acceptable versions, since modules are never recorded in `.terraform.lock.hcl` (proven above: a real init against `terraform-google-modules/network/google` produced a lock file with zero module entries; the resolved version instead lands in the uncommitted `.terraform/modules/modules.json`). The **pessimistic constraint operator**, `~> 18.0`, allows any `18.x` release but blocks the `19.0.0` major bump — proven above, it resolved to a real, current `18.3.0` — but it does not by itself catch a required-argument change like `subnets` becoming mandatory (proven above with a real validate error), which is why re-validating against the resolved version still matters. Modules specific to one organization belong behind a **private Git source** or **private registry** instead of the public one, and a module you do publish publicly must live in a repository named `terraform-<PROVIDER>-<NAME>` for the Registry to pick it up correctly.
 </Callout>
 
 export const quizModuleVersioning = [
@@ -100,6 +202,28 @@ export const quizModuleVersioning = [
       'It has no effect on which version Terraform resolves',
     ],
     answer: 0,
+  },
+  {
+    q: '```text\n$ terraform validate\nError: Missing required argument\n\n  on main.tf line 10, in module "vpc":\n  10: module "vpc" {\n\nThe argument "subnets" is required, but no definition was found.\n```\nThis real error occurred against a module pinned with a correct ~> 18.0 constraint. What does it prove?',
+    options: [
+      'The version constraint itself was written incorrectly',
+      'A correct version constraint only controls which release resolves — it does not verify that the surrounding module call still matches what that resolved version actually requires',
+      'terraform-google-modules/network/google no longer accepts a subnets argument at all',
+      'This error means the module failed to download and init did not complete',
+    ],
+    answer: 1,
+    explain: 'Proven above: ~> 18.0 correctly resolved to a real, current 18.3.0 — the constraint worked exactly as designed. The error is about the module CALL missing an argument that version genuinely requires, a separate concern from version resolution.',
+  },
+  {
+    q: '```text\n$ terraform init\nDownloading registry.terraform.io/terraform-google-modules/network/google 18.3.0 for vpc...\n...\n$ cat .terraform.lock.hcl\nprovider "registry.terraform.io/hashicorp/google" {\n  version = "8.4.0"\n  ...\n}\n```\nWhere is the resolved module version 18.3.0 actually recorded, proven above?',
+    options: [
+      'In .terraform.lock.hcl, in a module block alongside the provider block',
+      'It is not recorded in .terraform.lock.hcl at all (that file is provider-only) — it lands in .terraform/modules/modules.json, which is regenerated every init and not meant to be committed',
+      'In a separate file called .terraform.module.lock.hcl',
+      'Nowhere — Terraform re-resolves the version from scratch on every single command, including plan and apply',
+    ],
+    answer: 1,
+    explain: 'Proven above: a real init produced a .terraform.lock.hcl containing only a provider block, and a separate .terraform/modules/modules.json recording the module\'s resolved version.',
   },
   {
     q: 'Why might an organization use a private Git repository or private registry for a module instead of the public Terraform Registry',

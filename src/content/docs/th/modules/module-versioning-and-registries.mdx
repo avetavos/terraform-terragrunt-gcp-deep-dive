@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## ไอเดียในหนึ่งประโยค
 
@@ -48,6 +49,70 @@ operator ตัวเดียวกันนี้ใช้ได้ละเ�
 
 การ upgrade ข้ามขอบเขตที่ถูกบล็อกไว้ก็ยังทำได้ในคำสั่งเดียวเมื่อคุณพร้อม — แก้ `version` constraint ใน `.tf` file แล้วรัน `terraform init -upgrade` — constraint แค่ทำให้แน่ใจว่า upgrade นั้นเป็นสิ่งที่คนตัดสินใจทำเอง ไม่ใช่สิ่งที่เกิดขึ้นเงียบ ๆ ตอน `init` ครั้งถัดไป
 
+## พิสูจน์ `~> 18.0` ด้วยของจริง: `terraform-google-modules/network/google` และ argument `subnets` ที่มันต้องการจริง ๆ
+
+`terraform-google-modules/network/google` เป็น module จริงและปัจจุบัน — `~> 18.0` resolve ได้จริง แต่ v18 ต้องการ argument ที่ตัวอย่างข้างบนไม่เคยแสดงเลย คือ `subnets` output จริงของ `terraform validate` พิสูจน์ว่าการไม่ใส่มันเป็น error จริง ไม่ใช่แค่เรื่องสไตล์
+
+```hcl
+module "vpc" {
+  source  = "terraform-google-modules/network/google"
+  version = "~> 18.0"
+
+  project_id   = "acme-app-prod"
+  network_name = "app-network"
+}
+```
+
+```text
+$ terraform validate
+Error: Missing required argument
+
+  on main.tf line 10, in module "vpc":
+  10: module "vpc" {
+
+The argument "subnets" is required, but no definition was found.
+```
+
+`subnets` ไม่ใช่ optional ใน v18 แม้แต่กับ VPC เล็ก ๆ นี่คือการเรียกที่แก้แล้วและ validate ผ่านจริง
+
+```hcl
+module "vpc" {
+  source  = "terraform-google-modules/network/google"
+  version = "~> 18.0"
+
+  project_id   = "acme-app-prod"
+  network_name = "app-network"
+
+  subnets = [
+    {
+      subnet_name   = "app-subnet-us-central1"
+      subnet_ip     = "10.0.1.0/24"
+      subnet_region = "us-central1"
+    }
+  ]
+}
+```
+
+```text
+$ terraform init
+...
+$ terraform validate
+Success! The configuration is valid.
+```
+
+`~> 18.0` resolve เป็น `18.3.0` จริงและปัจจุบัน — หลักฐานว่า module นี้ยัง maintain อยู่ ไม่ใช่ตัวอย่างเก่าที่ไม่ตรงกับความจริงอีกต่อไปที่คอร์สหนึ่งอาจเผลอพาต่อมาเรื่อย ๆ การเปลี่ยน required argument แบบนี้คือสิ่งที่ `~>` ปกป้องคุณจากการข้ามไปแบบ *ไม่มีใคร review* ตรงขอบเขต major version (ในที่นี้คือ `17.x` ไป `18.x`) — แต่มันไม่ได้ปกป้องคุณจากตัวอย่างเก่าที่ copy-paste มาแล้วไม่เคย update ให้ตรงกับ version ที่ pin ไว้จริง
+
+## version ที่ resolve แล้วจริง ๆ อยู่ที่ไหน — ไม่ใช่ `.terraform.lock.hcl`
+
+นี่คือรายละเอียดที่ควรแก้ไขให้ชัดเจน เพราะเผลอสันนิษฐานผิดได้ง่ายมากถ้าเทียบเคียงกับ provider **version ของ module ที่ resolve แล้วไม่เคยถูกบันทึกใน `.terraform.lock.hcl` เลย** ไฟล์นั้นมีไว้สำหรับ provider เท่านั้น พิสูจน์ — version ของ module ที่ resolve แล้วจาก `init` ข้างบนไปอยู่ที่ `.terraform/modules/modules.json` แทน ซึ่ง `terraform init` regenerate ใหม่ทุกครั้งและไม่ได้ตั้งใจให้ commit เข้า version control (มันอยู่ใน directory `.terraform/` ที่ gitignore ไว้ คู่กับ module source ที่ดาวน์โหลดมาเอง)
+
+```text
+$ cat .terraform/modules/modules.json
+{"Modules":[{"Key":"","Source":"","Dir":"."},{"Key":"vpc","Source":"registry.terraform.io/terraform-google-modules/network/google","Version":"18.3.0","Dir":".terraform/modules/vpc"}, ...]}
+```
+
+ไม่มี `module` entry เลยที่ไหนใน `.terraform.lock.hcl` — มีแค่ `provider` block เท่านั้น นั่นแปลว่า `version = "~> 18.0"` ในไฟล์ `.tf` ของคุณคือบันทึกถาวรและ commit ได้ *ตัวเดียว* ที่บอกว่า version ไหนของ module ที่ยอมรับได้ — ต่างจาก provider ที่ไม่มี lock file แยกต่างหากมา pin version ที่ resolve แล้วไว้สำหรับครั้งถัดไป ทุก `init` re-resolve constraint นั้นใหม่กับสิ่งที่ Registry publish ไว้ ณ ตอนนั้นเสมอ ซึ่งเป็นเหตุผลเป๊ะ ๆ ว่าทำไม constraint เอง ไม่ใช่ lock file ต่างหาก คือสิ่งที่ปกป้องคุณจากการกระโดดไป `19.0` โดยไม่มีใคร review
+
 ## private source และการ publish module ของตัวเอง
 
 ไม่ใช่ทุก module ที่ควรอยู่บน public Registry module ที่ encode security policy, naming convention หรือการเชื่อมต่อ service ภายในของบริษัทหนึ่งไม่มีเหตุผลที่ต้อง public และอาจไม่ควร public ด้วยซ้ำ Terraform รองรับ `source` mechanic แบบเดียวกันสำหรับกรณีนี้ — private Git repository (มักผ่าน SSH เพื่อให้ `init` authenticate ด้วย credential ที่มีอยู่แล้ว) หรือ private module registry เช่น private registry ของ HCP Terraform หรือ registry ที่ host เองภายในองค์กร
@@ -62,7 +127,7 @@ module "internal_service" {
 
 ถ้าคุณอยาก publish module ของตัวเองขึ้น public Terraform Registry Registry ต้องการ pattern ชื่อ repository แบบเฉพาะ คือ `terraform-<PROVIDER>-<NAME>` เช่น `terraform-google-vpc` สำหรับ module ที่ target provider `google` Registry จะ parse ชื่อนี้ตรง ๆ เป็น address ของ module (`namespace/name/provider`) ดังนั้น repository ที่ตั้งชื่อแบบอื่นจะไม่ถูกดึงเข้ามาเลย
 
-<Mermaid title="Module source pinned to a version tag compared with an unpinned source" code={moduleVersioningDiagram} />
+<Mermaid title="module source ที่ pin version ไว้ที่ tag เทียบกับ source ที่ไม่ pin" code={moduleVersioningDiagram} />
 
 export const moduleVersioningDiagram = `flowchart LR
   subgraph pinned["Pinned: version = ~> 18.0"]
@@ -76,8 +141,45 @@ export const moduleVersioningDiagram = `flowchart LR
     u3 --> u4["Silently resolves 19.0.0 with breaking changes"]
   end`;
 
-<Callout title="The one-line takeaway">
-module **`version`** constraint สำคัญด้วยเหตุผลเดียวกับที่ provider version constraint สำคัญ — ถ้าไม่มี `terraform init` หรือ `init -upgrade` ธรรมดา ๆ ครั้งหนึ่งอาจ resolve Registry หรือ Git-tagged module release ใหม่ที่มี breaking change ที่ไม่มีใคร review มาก่อนโดยเงียบ ๆ **pessimistic constraint operator** อย่าง `~> 18.0` อนุญาตให้ resolve release ในสาย `18.x` ตัวไหนก็ได้ แต่บล็อก major bump `19.0.0` ทำให้การ upgrade เป็นการตัดสินใจที่จงใจแทนที่จะเป็นอุบัติเหตุ module ที่เฉพาะเจาะจงกับองค์กรหนึ่งควรอยู่หลัง **private Git source** หรือ **private registry** แทนที่จะเป็น public Registry และ module ที่คุณ publish สู่สาธารณะต้องอยู่ใน repository ที่ชื่อ `terraform-<PROVIDER>-<NAME>` เพื่อให้ Registry ดึงเข้ามาได้ถูกต้อง
+## Mental Model
+
+version ที่ resolve แล้วของ provider ถูก pin สองชั้น ชั้นแรกหลวม ๆ ด้วย `version` constraint ของคุณ ชั้นที่สองเป๊ะ ๆ ด้วย `.terraform.lock.hcl` version ที่ resolve แล้วของ module ถูก pin แค่ชั้นเดียว — ด้วย `version` constraint ของคุณเท่านั้น พิสูจน์ข้างบนด้วยการที่ `.terraform.lock.hcl` ไม่มี module entry เลยจริง ๆ ความไม่สมมาตรนี้แปลว่า constraint string ในไฟล์ `.tf` ของคุณแบกน้ำหนักมากกว่า string เดียวกันของ provider เพราะไม่มี safety net ชั้นที่สองที่ commit ไว้คอยจับการ resolve ที่เซอร์ไพรส์แบบที่ lock file ทำให้ provider และ `~>` ปกป้องคุณแค่จากการกระโดด major version แบบ *ไม่มีใคร review* เท่านั้น — พิสูจน์ข้างบน มันไม่ได้ช่วยอะไรเลยถ้าตัวอย่างในคอร์ส (หรือ module call ของคุณเอง) ไม่เคย update ให้ตรงกับ required argument ที่ version ที่ pin ไว้ต้องการจริง ๆ
+
+## ข้อแลกเปลี่ยน
+
+| ทางเลือก | ได้อะไร | เสียอะไร |
+|---|---|---|
+| `version = "~> 18.0"` บน Registry module | อนุญาต patch/minor fix จริง (พิสูจน์ข้างบน resolve เป็น `18.3.0`) ในขณะที่กันการกระโดดไป `19.0` โดยไม่มี review | ยังต้อง re-validate กับ version ที่ resolve แล้วจริง ๆ — พิสูจน์ข้างบน `~> 18.0` เพียงอย่างเดียวไม่จับว่า `subnets` กลายเป็น required แล้ว |
+| ไม่มี lock file สำหรับ module (ต่างจาก provider) | มีไฟล์ที่ generate ให้ sync น้อยลงหนึ่งไฟล์ `.terraform/modules/` regenerate สะอาดทุก init | `version` constraint string คือบันทึกที่ commit ได้เพียงตัวเดียวของ version ของ module ที่ยอมรับได้ — พิสูจน์ข้างบน ไม่มี `.terraform.lock.hcl` entry มา back up |
+| private Git repo หรือ private registry สำหรับ module ภายในองค์กร | infrastructure detail เฉพาะของบริษัทไม่มีวัน public | ต้องมีวินัย versioning ของตัวเอง (Git tag จริง, private registry จริง) แทนที่จะพึ่ง convention ของ public Registry |
+
+## ความเข้าใจผิดที่พบบ่อย
+
+- **"version ที่ resolve แล้วของ module ถูกบันทึกใน `.terraform.lock.hcl` เหมือนกับของ provider"** พิสูจน์ข้างบน `init` จริงกับ `terraform-google-modules/network/google` ได้ `.terraform.lock.hcl` ที่มีแค่ `provider` block — ไม่มี module entry เลยที่ไหน version ของ module ที่ resolve แล้วไปอยู่ที่ `.terraform/modules/modules.json` แทน ซึ่งไม่ได้ตั้งใจให้ commit
+- **"ถ้า `version` constraint ของ module ถูกต้อง โค้ดตัวอย่างที่เคยใช้ได้ก็จะยังใช้ได้อยู่"** พิสูจน์ข้างบนด้วย error จริง `subnets` กลายเป็น required argument ที่จุดหนึ่งในสาย `18.x` และการเรียกแบบ `project_id`/`network_name` เท่านั้นที่อาจเคย validate ผ่านกับ release เก่า ก็ fail กับ `18.3.0` ปัจจุบันด้วย "Missing required argument"
+- **"เพราะ module ไม่มี lock file เลยไม่ค่อยสำคัญเท่าไหร่"** พิสูจน์ข้างบนจากความไม่สมมาตรนั้นเอง เพราะไม่มี safety net ชั้นที่สองที่ commit ไว้สำหรับ module แบบที่ provider มี constraint string จึง *สำคัญกว่า* สำหรับ module ไม่ใช่น้อยกว่า
+
+## อ่านโค้ดที่ AI เขียน
+
+ตอน review module source ที่ generate มา เช็คสิ่งเหล่านี้
+
+- `module` block จาก Registry หรือ Git tag ที่ไม่มี `version` (หรือ `?ref=`) argument เลย — พิสูจน์ข้างบน นี่คือความเสี่ยงเรื่อง unpinned version ที่บทนี้เปิดไว้ตั้งแต่ต้น
+- `terraform-google-modules/network/google` ที่เรียกโดยไม่มี `subnets` argument — พิสูจน์ข้างบน นี่คือ error จริงและปัจจุบันตอน validate กับ `~> 18.0` ไม่ใช่สมมติฐาน
+- comment หรือ commit message ที่อ้างว่า version ที่ resolve แล้วของ module ถูก "lock" หรือ "pin ไว้ใน lock file" — พิสูจน์ข้างบน คำกล่าวอ้างนั้นจริงแค่สำหรับ provider เท่านั้น version ที่ resolve แล้วจริงของ module อยู่ใน `.terraform/modules/modules.json` ที่ gitignore ไว้
+- module เฉพาะของบริษัทที่ private ถูก publish ด้วยชื่อทั่วไปที่ไม่ตาม `terraform-<PROVIDER>-<NAME>` — สิ่งนี้ทำให้ auto-detection ของ Registry สำหรับ module public พัง และควรระวังแม้กับ private registry ที่ naming discipline เดียวกันช่วยให้ module ค้นหาเจอ
+
+<SpotTheBug code={`module "vpc" {
+  source  = "terraform-google-modules/network/google"
+  version = "~> 18.0"
+
+  project_id   = "acme-app-prod"
+  network_name = "app-network"
+}`}>
+พิสูจน์ข้างบนด้วย error จริงของ `terraform validate` `terraform-google-modules/network/google` ต้องการ argument `subnets` จริงตามสาย `~> 18.0` ที่ pin ไว้ — "The argument \`subnets\` is required, but no definition was found" นี่คือสิ่งที่ `version` constraint ที่ถูกต้อง *ไม่* ปกป้อง `~> 18.0` resolve เป็น `18.3.0` จริงและปัจจุบันได้ถูกต้อง constraint ทำหน้าที่ของมันแล้ว แต่ตัว module call เองไม่เคยถูก update ให้ตรงกับสิ่งที่ version นั้นต้องการจริง ๆ ทางแก้คือเพิ่ม `subnets` list จริง — พิสูจน์ข้างบนแล้วว่า `validate` ผ่านสะอาดทันทีที่มี subnet block อย่างน้อยหนึ่งตัว (`subnet_name`, `subnet_ip`, `subnet_region`)
+</SpotTheBug>
+
+<Callout title="สรุปหนึ่งบรรทัด">
+module **`version`** constraint สำคัญด้วยเหตุผลเดียวกับที่ provider version constraint สำคัญ — ถ้าไม่มี `terraform init` หรือ `init -upgrade` ธรรมดา ๆ ครั้งหนึ่งอาจ resolve Registry หรือ Git-tagged module release ใหม่ที่มี breaking change ที่ไม่มีใคร review มาก่อนโดยเงียบ ๆ — และต่างจาก provider ตรงที่ constraint นั้นคือบันทึกถาวรตัวเดียวของ version ที่ยอมรับได้ เพราะ module ไม่เคยถูกบันทึกใน `.terraform.lock.hcl` เลย (พิสูจน์ข้างบน init จริงกับ `terraform-google-modules/network/google` ได้ lock file ที่ไม่มี module entry เลย version ที่ resolve แล้วไปอยู่ที่ `.terraform/modules/modules.json` ที่ไม่ได้ commit แทน) **pessimistic constraint operator** อย่าง `~> 18.0` อนุญาตให้ resolve release ในสาย `18.x` ตัวไหนก็ได้ — พิสูจน์ข้างบน resolve เป็น `18.3.0` จริงและปัจจุบัน — แต่มันไม่ได้จับ required-argument ที่เปลี่ยนไปอย่าง `subnets` ที่กลายเป็น required เอง (พิสูจน์ข้างบนด้วย error จริง) ซึ่งเป็นเหตุผลที่การ re-validate กับ version ที่ resolve แล้วยังสำคัญอยู่ module ที่เฉพาะเจาะจงกับองค์กรหนึ่งควรอยู่หลัง **private Git source** หรือ **private registry** แทนที่จะเป็น public Registry และ module ที่คุณ publish สู่สาธารณะต้องอยู่ใน repository ที่ชื่อ `terraform-<PROVIDER>-<NAME>` เพื่อให้ Registry ดึงเข้ามาได้ถูกต้อง
 </Callout>
 
 export const quizModuleVersioning = [
@@ -100,6 +202,28 @@ export const quizModuleVersioning = [
       'ไม่มีผลต่อ version ที่ Terraform resolve เลย',
     ],
     answer: 0,
+  },
+  {
+    q: '```text\n$ terraform validate\nError: Missing required argument\n\n  on main.tf line 10, in module "vpc":\n  10: module "vpc" {\n\nThe argument "subnets" is required, but no definition was found.\n```\nerror จริงนี้เกิดกับ module ที่ pin ด้วย constraint ~> 18.0 ที่ถูกต้อง มันพิสูจน์อะไร',
+    options: [
+      'version constraint เองเขียนผิด',
+      'version constraint ที่ถูกต้องควบคุมแค่ว่า release ไหน resolve — มันไม่ได้ verify ว่า module call ที่อยู่รอบ ๆ ยังตรงกับสิ่งที่ version ที่ resolve แล้วต้องการจริง',
+      'terraform-google-modules/network/google ไม่รับ argument subnets อีกต่อไปแล้ว',
+      'error นี้แปลว่า module ดาวน์โหลดไม่สำเร็จและ init ไม่เสร็จ',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ข้างบน ~> 18.0 resolve เป็น 18.3.0 จริงและปัจจุบันได้ถูกต้อง — constraint ทำงานตามที่ออกแบบไว้เป๊ะ error คือเรื่อง module CALL ขาด argument ที่ version นั้นต้องการจริง เป็นคนละเรื่องกับการ resolve version',
+  },
+  {
+    q: '```text\n$ terraform init\nDownloading registry.terraform.io/terraform-google-modules/network/google 18.3.0 for vpc...\n...\n$ cat .terraform.lock.hcl\nprovider "registry.terraform.io/hashicorp/google" {\n  version = "8.4.0"\n  ...\n}\n```\nversion ที่ resolve แล้ว 18.3.0 ถูกบันทึกไว้ที่ไหนจริง ๆ พิสูจน์ข้างบน',
+    options: [
+      'ใน .terraform.lock.hcl ใน module block คู่กับ provider block',
+      'ไม่ถูกบันทึกใน .terraform.lock.hcl เลย (ไฟล์นั้นมีไว้สำหรับ provider เท่านั้น) — ไปอยู่ที่ .terraform/modules/modules.json ซึ่ง regenerate ทุก init และไม่ได้ตั้งใจให้ commit',
+      'ในไฟล์แยกต่างหากชื่อ .terraform.module.lock.hcl',
+      'ไม่มีที่ไหนเลย — Terraform re-resolve version ใหม่ทุกคำสั่งเดี่ยว รวมถึง plan และ apply',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ข้างบน init จริงได้ .terraform.lock.hcl ที่มีแค่ provider block และ .terraform/modules/modules.json แยกต่างหากที่บันทึก version ที่ resolve แล้วของ module',
   },
   {
     q: 'ทำไมองค์กรหนึ่งอาจเลือกใช้ private Git repository หรือ private registry สำหรับ module แทน public Terraform Registry',
