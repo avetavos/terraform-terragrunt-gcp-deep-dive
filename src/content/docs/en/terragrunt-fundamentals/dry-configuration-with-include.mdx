@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## The idea in one sentence
 
@@ -89,8 +90,131 @@ export const dryConfigDiagram = `flowchart TD
   project -->|read_terragrunt_config + find_in_parent_folders| unit
   unit --> inputsBlock["inputs: project_id, region, cidr_block"]`;
 
+## Proof: two `include` blocks with `expose = true`, real `terragrunt render`
+
+`read_terragrunt_config()` above is one way to read `project.hcl`; a second, more direct technique is a **second `include` block**, using `expose = true` on both so their contents become readable as `include.<name>.<field>`, and `merge_strategy = "no_merge"` on the non-root include so `project.hcl` only contributes its own `locals`:
+
+```hcl
+# root.hcl
+remote_state {
+  backend = "local"
+  generate = {
+    path      = "backend.tf"
+    if_exists = "overwrite_terragrunt"
+  }
+  config = {
+    path = "${get_terragrunt_dir()}/terraform.tfstate"
+  }
+}
+```
+
+```hcl
+# prod/project.hcl
+locals {
+  project_id = "acme-prod-123456"
+  region     = "us-central1"
+}
+```
+
+```hcl
+# prod/network/terragrunt.hcl
+include "root" {
+  path   = find_in_parent_folders("root.hcl")
+  expose = true
+}
+
+include "project" {
+  path           = find_in_parent_folders("project.hcl")
+  expose         = true
+  merge_strategy = "no_merge"
+}
+
+terraform {
+  source = "."
+}
+
+inputs = {
+  project_id = include.project.locals.project_id
+  region     = include.project.locals.region
+}
+```
+
+```hcl
+# prod/network/main.tf
+terraform {
+  required_providers {
+    local = { source = "hashicorp/local", version = "~> 2.5" }
+  }
+}
+variable "project_id" { type = string }
+variable "region" { type = string }
+resource "local_file" "network" {
+  filename = "${path.module}/network.txt"
+  content  = "project=${var.project_id} region=${var.region}\n"
+}
+```
+
+Real `terragrunt render --format json`, trimmed:
+
+```text
+$ terragrunt render --format json
+{
+  "inputs": { "project_id": "acme-prod-123456", "region": "us-central1" },
+  "remote_state": { "backend": "local", "config": { "path": ".../terraform.tfstate" }, ... },
+  "terraform": { "source": "." }
+}
+```
+
+`inputs.project_id` reads the real value — pulled from `include.project.locals.project_id`, which only exists because `expose = true` was set on the `project` include. A real `plan` proves the value reaches the module:
+
+```text
+$ terragrunt run --non-interactive -- plan
+STDOUT terraform:             project=acme-prod-123456 region=us-central1
+```
+
+<SpotTheBug code={`# prod/network/terragrunt.hcl
+include "root" {
+  path = find_in_parent_folders("root.hcl")
+}
+
+include "project" {
+  path = find_in_parent_folders("project.hcl")
+}
+
+terraform {
+  source = "."
+}
+
+inputs = {
+  project_id = include.project.locals.project_id
+}`}>
+Neither \`include\` block sets \`expose = true\`. Proven above, \`expose\` is exactly what makes an include's contents readable through the \`include.<name>\` reference — without it, \`include.project.locals.project_id\` does not resolve to anything usable, and this config fails at evaluation instead of silently reading a wrong value.
+</SpotTheBug>
+
+## Reading AI-generated code
+
+- A second `include` block with no `expose = true`, then code that references `include.project.locals.project_id` — proven above, `expose` is what makes `include.<name>` a readable value.
+- `merge_strategy` left at its default (deep merge) on an intermediate include meant only to contribute `locals` — a `project.hcl` that later grows a stray `remote_state` block would deep-merge it into every unit.
+- `read_terragrunt_config()` called without the extra `.locals` accessor — the return value nests under `.locals`, and code that forgets that hop gets a null instead of the value.
+
+## Mental Model
+
+`include` with `find_in_parent_folders` is a dynamic, position-independent version of copy-paste. `expose` is the difference between "merged in as blocks" (the default) and "also readable as a value" (`include.<name>.<field>`) — proven above.
+
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---|---|---|
+| A second `include` (`project`) with `expose` + `no_merge` | Scoped sharing, values reachable by name, proven above | Forgetting `expose` (proven above) silently breaks any reference to it |
+| `read_terragrunt_config()` over a second `include` | Reads any Terragrunt file without an `include` block at all | Return value nests under `.locals` — an easy, silent mistake |
+
+## Common Misconceptions
+
+- **"include always deep-merges everything from the target file."** Proven above: `merge_strategy = "no_merge"` on the `project` include means only its `locals` values are exposed.
+- **"expose = true copies the file's content physically, like generate does."** Proven above by contrast with `generate`: `expose` only makes the parsed config *readable* — nothing is written to disk.
+
 <Callout title="The one-line takeaway">
-An `include "root" { path = find_in_parent_folders("root.hcl") } ` block is how a unit inherits everything `root.hcl` defines, with `find_in_parent_folders()` walking up the directory tree so the same `include` block works no matter how deep the unit sits. Config that is narrower than the whole repository but still shared by more than one unit — like a single GCP project's settings — belongs in a smaller intermediate file such as `project.hcl`, read with a `locals` block and `read_terragrunt_config(find_in_parent_folders("project.hcl"))` rather than `include`. Whatever values a unit ends up with, from `root.hcl`, from an intermediate file, or written directly, all flow into the same `inputs = { ... }` map, which is Terragrunt's equivalent of a `.tfvars` file for that unit's underlying module.
+An `include "root" { path = find_in_parent_folders("root.hcl") } ` block is how a unit inherits everything `root.hcl` defines, with `find_in_parent_folders()` walking up the directory tree so the same `include` block works no matter how deep the unit sits. Config that is narrower than the whole repository but still shared by more than one unit — like a single GCP project's settings — belongs in a smaller intermediate file such as `project.hcl`, read either with `read_terragrunt_config(find_in_parent_folders("project.hcl"))` or with a second `include` block using `expose = true` and `merge_strategy = "no_merge"` — proven above with a real `terragrunt render` and a real `plan` resolving `include.project.locals.project_id`. Whatever values a unit ends up with, from `root.hcl`, from an intermediate file, or written directly, all flow into the same `inputs = { ... }` map, which is Terragrunt's equivalent of a `.tfvars` file for that unit's underlying module.
 </Callout>
 
 export const quizDryConfig = [
@@ -133,6 +257,28 @@ export const quizDryConfig = [
       'Terragrunt falls back to the unit own terragrunt.hcl as the root config',
     ],
     answer: 1,
+  },
+  {
+    q: 'A unit has two include blocks, "root" and "project", neither with expose = true. Code references include.project.locals.project_id. What happens, proven above?',
+    options: [
+      'It resolves correctly — expose only affects generate blocks',
+      'Both includes still deep-merge their blocks (remote_state from root still works), but include.project.locals.project_id does not resolve, since expose is what makes include.<name> readable at all',
+      'Terragrunt automatically infers expose = true whenever a locals block is present',
+      'The unit fails to parse entirely, before any blocks are merged',
+    ],
+    answer: 1,
+    explain: 'Proven above in the SpotTheBug: dropping expose = true breaks the include.project.locals.project_id reference specifically, because expose is what exposes an include parsed content as a readable value.',
+  },
+  {
+    q: 'What does a real terragrunt render show for inputs.project_id when a unit uses include "project" { expose = true, merge_strategy = "no_merge" }?',
+    options: [
+      'It shows an unresolved reference string, not a real value',
+      'It shows the real value from project.hcl locals block, proven above with a real render and a real plan using that same value',
+      'It always resolves to null since no_merge blocks all data sharing',
+      'It only resolves at apply time, never at render time',
+    ],
+    answer: 1,
+    explain: 'Proven above: render output showed project_id resolved to the real "acme-prod-123456" value, and the subsequent plan used it in the actual resource content.',
   },
 ];
 
