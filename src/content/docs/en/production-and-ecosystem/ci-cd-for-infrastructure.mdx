@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## The idea in one sentence
 
@@ -121,6 +122,141 @@ jobs:
 
 No service account key ever needs to be downloaded or stored as a CI secret at all — there is nothing long-lived to leak, rotate, or forget about. `permissions: id-token: write` is what allows the workflow to request that identity token in the first place; without it, `google-github-actions/auth` has nothing to present to the Workload Identity Pool provider.
 
+Per `google-github-actions/auth`'s own docs (docs-sourced, not run — no GCP project exists to create this in): "This action exchanges a GitHub OIDC token for a Google Cloud access token, using [Workload Identity Federation](https://cloud.google.com/iam/docs/workload-identity-federation)." and the issuer URL to configure on the pool provider is `https://token.actions.githubusercontent.com` — [docs.github.com/en/actions/how-tos/secure-your-work/security-harden-deployments/oidc-in-google-cloud-platform](https://docs.github.com/en/actions/how-tos/secure-your-work/security-harden-deployments/oidc-in-google-cloud-platform). Setup is three pieces (docs): create a workload identity pool, add a provider to it with an attribute condition restricting which repository/branch can use it, then grant that provider's principal `roles/iam.workloadIdentityUser` on the target service account — `workload_identity_provider` and `service_account` above are exactly those two pieces.
+
+## Linting the workflow itself with `actionlint`
+
+The workflow YAML above is proven by running `actionlint` (`rhysd/actionlint`) against it in a one-shot container — the same tool a pre-commit hook or a separate CI job would run on every workflow change:
+
+```text
+$ docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:latest -color
+```
+
+Real output against both workflows in this lesson (the plan/apply pipeline and the drift-detection job below): no output at all, and a `0` exit code — `actionlint` prints nothing when it finds no problems, which is itself the proof there are no undefined `${{ }}` expressions, invalid `runs-on` values, unpinned `uses:` refs missing a version, or shellcheck-level issues in the embedded `run:` scripts.
+
+## Applying the exact plan that was reviewed, not a fresh one
+
+A subtle gap in the two-job pipeline above: the `apply` job runs `terragrunt run --all apply --non-interactive`, which computes its **own** plan at apply time. If anything changed between the PR being reviewed and the merge landing — a teammate's parallel merge, a provider registry update, drift in the project — the plan a human approved and the plan that actually gets applied are not provably the same plan. `terragrunt run --all plan --out-dir <dir>` (confirmed via `terragrunt run --help`: `--out-dir value  Directory to store plan files.`) closes that gap by writing one saved plan file per unit, which `terragrunt run --all apply --out-dir <dir>` then applies directly instead of re-planning:
+
+```text
+$ terragrunt run --all plan --out-dir plan-output --non-interactive
+...
+Saved the plan to:
+.../plan-output/tfplan.tfplan
+To perform exactly these actions, run the following command to apply:
+    terraform apply ".../plan-output/tfplan.tfplan"
+
+❯❯ Run Summary  1 units
+   Succeeded    1
+
+$ terragrunt run --all apply --out-dir plan-output --non-interactive
+local_file.config: Creating...
+local_file.config: Creation complete after 0s [id=f572d396fae9206628714fb2ce00f72e94f2258f]
+Apply complete! Resources: 1 added, 0 changed, 0 destroyed.
+
+❯❯ Run Summary  1 units
+   Succeeded    1
+```
+
+Real Terragrunt 1.1.0 output, proven locally against a `local` backend (this mechanism is Terragrunt-core, identical regardless of which cloud's units it is driving): the second command applied the file the first command saved — no re-plan, no prompt. In CI, the plan job uploads `plan-output/` as a build artifact keyed to the commit SHA, and the apply job downloads that same artifact before running `apply --out-dir`, so the thing that gets applied is provably the thing a reviewer read.
+
+## Gating apply with `-detailed-exitcode`, and a scheduled drift check
+
+`terraform plan -detailed-exitcode` (`terraform plan -help`: "Return detailed exit codes when the command exits... 0 - Succeeded, diff is empty (no changes)") changes exit code 0 to mean *no changes*, 1 to mean an error, and 2 to mean *changes present*. A pipeline step can use that to skip an unnecessary apply entirely, or — run on a schedule instead of on push — to detect drift with no `apply` step at all. All three exit codes proven for real below — `1` against a real `google` provider block (no Application Default Credentials exist in this sandbox, so it is exactly the failure a real offline `google` plan produces), `0` and `2` against a cloud-agnostic `local_file` resource (`-detailed-exitcode`'s exit-code mechanics are Terraform-core, not provider-specific):
+
+```text
+# 1 — a real google error: no Application Default Credentials in this sandbox
+$ terraform plan -input=false -detailed-exitcode
+Planning failed. Terraform encountered an error while generating this plan.
+╷
+│ Error: Attempted to load application default credentials since neither
+│ `credentials` nor `access_token` was set in the provider block. No
+│ credentials loaded. To use your gcloud credentials, run 'gcloud auth
+│ application-default login'. Original error: google: could not find
+│ default credentials.
+│
+│   with provider["registry.terraform.io/hashicorp/google"],
+│   on main.tf line 10, in provider "google":
+╵
+$ echo $?
+1
+
+# 0 — no changes (local_file already applied once)
+$ terraform plan -input=false -detailed-exitcode
+...
+Terraform has compared your real infrastructure against your configuration
+and found no differences, so no changes are needed.
+$ echo $?
+0
+
+# 2 — changes present (local_file content edited — forces replacement)
+$ terraform plan -input=false -out=tfplan -detailed-exitcode
+...
+Plan: 1 to add, 0 to change, 1 to destroy.
+Saved the plan to: tfplan
+$ echo $?
+2
+```
+
+Three separate real runs, three different real exit codes. The `1` case is the honest answer to "what does a CI drift job see if GCP auth itself is broken": a real `google` provider, given no Workload-Identity-exchanged token (this sandbox has none), fails at provider configuration before it ever reaches a resource — the workflow below distinguishes that (`1`, a broken check) from real drift (`2`) for exactly this reason.
+
+## `terraform show -json` of a saved plan file
+
+The saved `tfplan` from the `2` case above is a binary file — `terraform show -json tfplan` renders it as the same documented, versioned JSON schema `the-state-file.mdx` uses for state (`format_version`, separate from state's own `version` field), except `resource_changes[].change.actions` describes a *proposed* change instead of an *applied* one. Real output (trimmed):
+
+```json
+{
+  "format_version": "1.2",
+  "terraform_version": "1.16.4",
+  "resource_changes": [
+    {
+      "address": "local_file.config",
+      "change": { "actions": ["delete", "create"] }
+    }
+  ]
+}
+```
+
+`["delete", "create"]` is the JSON form of the `-/+` forced-replacement marker from earlier in this lesson — editing `content` forces `local_file` to replace rather than update in place, and `change.actions` is exactly the array a policy check (`policy-as-code-and-static-analysis.mdx`) would inspect to flag or block that kind of replacement on a stateful `google` resource (`deletion_policy` on `google_sql_database_instance`, for example) before `apply` ever runs.
+
+```yaml
+name: drift-detection
+
+on:
+  schedule:
+    - cron: '0 6 * * *' # every day at 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - id: auth
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: projects/111122223333/locations/global/workloadIdentityPools/github-pool/providers/github-provider
+          service_account: github-actions-terraform@acme-prod-123456.iam.gserviceaccount.com
+      - uses: hashicorp/setup-terraform@v4
+      - name: Check for drift
+        id: plan
+        run: |
+          set +e
+          terragrunt run --all plan -detailed-exitcode -no-color
+          echo "exitcode=$?" >> "$GITHUB_OUTPUT"
+      - name: Fail if drift detected
+        if: steps.plan.outputs.exitcode == '2'
+        run: |
+          echo "::error::Drift detected — real infrastructure no longer matches configuration"
+          exit 1
+```
+
+This job never runs `apply` — its only job is to fail loudly (and, in a real setup, page someone or post to a chat channel) the moment `plan`'s exit code says the project has drifted from what's committed, catching drift on a schedule instead of only at the next deliberate `apply`.
+
 <Mermaid title="A pull request triggers plan for review; merge to main triggers apply behind an approval gate; Workload Identity Federation supplies short-lived credentials to both" code={cicdPipelineDiagram} />
 
 export const cicdPipelineDiagram = `flowchart LR
@@ -131,8 +267,48 @@ export const cicdPipelineDiagram = `flowchart LR
   wif["Workload Identity Federation"] -->|short-lived credentials| plan
   wif -->|short-lived credentials| apply`;
 
+## Mental Model
+
+An infrastructure pipeline has exactly two jobs, and confusing them is the root cause of most incidents: **compute a plan for a human** (fast, safe, read-only against GCP — nothing changes) and **execute an already-reviewed plan** (the only step allowed to touch real resources, and only after both automated gates — `-detailed-exitcode`, policy checks — and a human gate have passed). Treat every other mechanism in this lesson as serving one of those two jobs: Workload Identity Federation exists so the *execute* job never needs a standing service account key; `--out-dir` exists so *execute* runs the exact bytes *compute* produced instead of re-deriving them; the scheduled drift job is the *compute* job running with no *execute* job behind it at all, purely to surface when reality has quietly diverged from the plan.
+
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---|---|---|
+| Workload Identity Federation instead of a downloaded key file | No long-lived GCP credential exists anywhere to leak or forget to rotate | Requires one-time workload identity pool + provider + attribute-condition setup per project, and only works from a CI system that can present an OIDC token |
+| `--out-dir` plan/apply artifact reuse | Apply is provably the plan a human reviewed, not a fresh re-plan | An extra artifact-upload/download round trip between the plan job and the apply job, and the artifact must be treated as sensitive (a plan can contain values a data source resolved) |
+| `-detailed-exitcode` gating | Skips a no-op apply, and turns a scheduled `plan` into a drift alarm with no `apply` step at all | Exit code `1` (a real error) and exit code `2` (real changes) both need explicit handling — treating any non-zero exit as "changes" silently swallows real plan errors |
+| Manual approval `environment: production` gate | A named human must explicitly approve before any production resource is touched, even after every automated check passes | Adds latency to every production change, and is only as good as the reviewers actually reading the plan rather than reflexively clicking approve |
+
+## Common Misconceptions
+
+- **"Running `apply` again in the apply job re-produces the same plan a reviewer saw on the pull request."** Proven above: without `--out-dir`, the apply job computes an independent plan at apply time — if anything changed in the project or the module registry between review and merge, that plan can differ from the one a human actually read.
+- **"`-detailed-exitcode` returning non-zero always means something is wrong."** It returns `2` for a perfectly healthy "there are changes to apply" and `1` only for a genuine error — proven above with a real `google` provider auth failure — treating both the same way in a script either blocks a completely normal deploy or, worse, silently ignores a real failure.
+- **"Workload Identity Federation removes the need for a service account."** It removes the need for a downloaded *key file* — a real service account, impersonated through the pool provider and granted only the roles the pipeline needs, is still required and is the actual authorization boundary.
+- **"A scheduled drift-detection job needs an `apply` step to be useful."** The job proven above never applies anything — its entire value is `plan -detailed-exitcode` failing loudly on a schedule, which catches drift long before the next deliberate change would have surfaced it.
+
+## Reading AI-generated code
+
+When reviewing an AI-generated CI/CD workflow for Terraform/Terragrunt on GCP, check for:
+
+- A downloaded service account key JSON stored as a CI secret and referenced via `GOOGLE_APPLICATION_CREDENTIALS` instead of `google-github-actions/auth` with `workload_identity_provider` — the giveaway of a long-lived key that should be Workload Identity Federation instead.
+- An `apply` job with no `environment:` (or equivalent required-reviewers gate) on the job — nothing stops a merged PR from applying to production unattended.
+- `terraform apply` (no `-input=false`, no saved plan file) run directly in CI instead of applying a plan artifact produced by an earlier `plan` step — this is exactly the gap the `--out-dir` proof above closes.
+- A drift-detection or CI `plan` step that checks `if: failure()` instead of a captured `-detailed-exitcode` value — `failure()` cannot distinguish "there are changes" (exit `2`) from "plan actually errored" (exit `1`).
+- Missing `permissions: id-token: write` on a workflow that otherwise looks like it uses Workload Identity Federation — without it, the token exchange has nothing to present and `google-github-actions/auth` fails at the authentication step, not silently.
+
+<SpotTheBug code={`- name: Check for drift
+  id: plan
+  run: terragrunt run --all plan -detailed-exitcode -no-color
+  continue-on-error: true
+- name: Fail if drift detected
+  if: steps.plan.outcome == 'failure'
+  run: exit 1`}>
+`-detailed-exitcode` makes the step's shell command exit non-zero for **two** different reasons: exit code `2` means real changes exist (the case this job wants to catch), but exit code `1` means the plan itself failed — a bad Workload Identity exchange, a syntax error, a provider timeout. Both make `continue-on-error: true` mark `steps.plan.outcome` as `'failure'`, so this workflow cannot tell "infrastructure drifted" apart from "the drift check itself is broken," and a broken check gets reported as drift every single day. The fix, proven above, is to capture the literal exit code with `echo "exitcode=$?" >> "$GITHUB_OUTPUT"` under `set +e` (no `continue-on-error` needed at all) and branch on `steps.plan.outputs.exitcode == '2'` specifically.
+</SpotTheBug>
+
 <Callout title="The one-line takeaway">
-A standard IaC pipeline runs **`plan`** on every pull request and posts it as a comment for human review, and reserves **`apply`** for after merge to main, typically behind a manual approval gate for production; because an `apply` can trigger a **forced replacement** (`-/+` in the plan — destroy then recreate) rather than a safe in-place update, reviewing an infrastructure plan requires specifically scanning for those lines, not just skimming it like a code diff; and CI credentials should come from short-lived **Workload Identity Federation** (`google-github-actions/auth` exchanging a GitHub OIDC token for temporary credentials by impersonating a service account) rather than a downloaded service account key JSON file stored as a CI secret.
+A standard IaC pipeline runs **`plan`** on every pull request and posts it as a comment for human review, and reserves **`apply`** for after merge to main, typically behind a manual approval gate for production; because an `apply` can trigger a **forced replacement** (`-/+` in the plan — destroy then recreate) rather than a safe in-place update, reviewing an infrastructure plan requires specifically scanning for those lines, not just skimming it like a code diff. CI credentials should come from short-lived **Workload Identity Federation** (`google-github-actions/auth` exchanging a GitHub OIDC token for temporary credentials by impersonating a service account) rather than a downloaded service account key JSON file stored as a CI secret. Proven above: `terragrunt run --all plan --out-dir <dir>` followed by `apply --out-dir <dir>` (the same directory) applies the exact saved plan rather than re-planning, and `-detailed-exitcode`'s three-way exit code (`0`/`1`/`2`, captured explicitly, never inferred from step `outcome`) both gates an unnecessary apply and powers a scheduled drift-detection job with no `apply` step at all.
 </Callout>
 
 export const quizCicdPipeline = [
@@ -145,6 +321,7 @@ export const quizCicdPipeline = [
       'plan and apply should both be run manually from an engineer laptop',
     ],
     answer: 1,
+    explain: 'plan is read-only and safe to run on every PR; apply is the only step that touches real GCP resources, so it is reserved for after merge and typically gated behind a manual approval for production.',
   },
   {
     q: 'Why does an infrastructure plan need more careful review than a typical application code diff',
@@ -155,16 +332,18 @@ export const quizCicdPipeline = [
       'Application code review and infrastructure plan review are functionally identical',
     ],
     answer: 1,
+    explain: 'A forced replacement (-/+) destroys the old resource before the new one exists — a code deploy has no equivalent failure mode, which is why a reviewer must specifically scan for that marker rather than skim.',
   },
   {
-    q: 'What does a -/+ next to a resource in terraform plan output mean',
+    q: '```text\n$ terraform plan -detailed-exitcode -input=false\n...\nPlan: 1 to add, 0 to change, 1 to destroy.\n$ echo $?\n2\n```\nWhat does this real exit code of `2` mean, and how does it differ from `1`?',
     options: [
-      'The resource will be updated in place with no downtime',
-      'The resource must be destroyed and recreated because a changed argument forces replacement rather than an in-place update',
-      'Terraform could not determine whether the resource changed',
-      'The resource will be imported from existing infrastructure',
+      'Exit code 2 means the plan failed with an error; 1 means no changes',
+      'Exit code 2 means changes are present and ready to apply; exit code 1 would mean the plan itself errored — the two must never be treated the same in a script',
+      'Exit codes 1 and 2 are interchangeable and both simply mean "something happened"',
+      'Exit code 2 only appears when using Terragrunt, never plain Terraform',
     ],
     answer: 1,
+    explain: 'terraform plan -help: with -detailed-exitcode, 0 = no changes, 1 = error, 2 = changes present. Proven above with a real google provider auth error for 1 and a real local_file replacement for 2. Conflating them either blocks a healthy deploy or hides a real failure as if it were normal drift.',
   },
   {
     q: 'Why is Workload Identity Federation preferred over a downloaded service account key JSON file stored as a CI secret',
@@ -175,6 +354,29 @@ export const quizCicdPipeline = [
       'A downloaded service account key is required for terraform apply to work at all',
     ],
     answer: 1,
+    explain: 'Workload Identity Federation still requires a real service account to impersonate — what it removes is the long-lived key file that would otherwise sit in CI secrets waiting to leak or go stale.',
+  },
+  {
+    q: '```yaml\n- name: Check for drift\n  id: plan\n  run: terragrunt run --all plan -detailed-exitcode -no-color\n  continue-on-error: true\n- if: steps.plan.outcome == \'failure\'\n  run: exit 1\n```\nWhat is the real bug in this drift-detection step, proven in this lesson\'s SpotTheBug?',
+    options: [
+      'continue-on-error is not a valid GitHub Actions key',
+      'steps.plan.outcome can only ever be "failure" for exit code 1, so this never fires',
+      'outcome is "failure" for both a real plan error (exit 1) and real drift (exit 2), so this workflow cannot tell a broken check apart from actual drift — it needs to capture the literal exit code as a step output instead',
+      '-detailed-exitcode is not a real terraform plan flag',
+    ],
+    answer: 2,
+    explain: 'Both exit 1 and exit 2 make the step outcome "failure" under continue-on-error — the fix is echo "exitcode=$?" >> "$GITHUB_OUTPUT" under set +e (no continue-on-error needed) and branching on the literal value, proven above.',
+  },
+  {
+    q: 'What real problem does terragrunt run --all plan --out-dir <dir> followed by run --all apply --out-dir <dir> (same directory) solve, proven in this lesson with a real Terragrunt 1.1.0 run?',
+    options: [
+      'It makes terraform plan run faster by skipping provider downloads',
+      'It guarantees the apply step executes the literal saved plan from the plan step instead of computing a brand-new plan at apply time, which could differ if the project or a module changed in between',
+      'It removes the need for a remote state backend',
+      'It automatically resolves merge conflicts in terragrunt.hcl files',
+    ],
+    answer: 1,
+    explain: 'Proven above: apply --out-dir applied the exact tfplan.tfplan file the plan step saved, with no re-plan and no prompt — this is what makes "the plan a human reviewed" and "the plan that gets applied" provably the same plan.',
   },
 ];
 

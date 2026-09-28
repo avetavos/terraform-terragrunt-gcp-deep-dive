@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## ไอเดียในหนึ่งประโยค
 
@@ -121,6 +122,141 @@ jobs:
 
 ไม่ต้องมี service account key ให้ดาวน์โหลดหรือเก็บเป็น CI secret เลยสักตัว ไม่มีอะไรระยะยาวให้หลุด, หมุนเวียน, หรือลืมดูแลอีกต่อไป `permissions: id-token: write` คือสิ่งที่ทำให้ workflow ขอ identity token นั้นได้ตั้งแต่แรก ถ้าไม่มีบรรทัดนี้ `google-github-actions/auth` จะไม่มีอะไรให้ยื่นให้ Workload Identity Pool provider เลย
 
+อ้างอิงจาก docs ของ `google-github-actions/auth` เอง (มาจาก docs ไม่ได้รัน — ไม่มี GCP project ให้สร้างจริง): "This action exchanges a GitHub OIDC token for a Google Cloud access token, using [Workload Identity Federation](https://cloud.google.com/iam/docs/workload-identity-federation)." และ issuer URL ที่ต้อง config บน pool provider คือ `https://token.actions.githubusercontent.com` — [docs.github.com/en/actions/how-tos/secure-your-work/security-harden-deployments/oidc-in-google-cloud-platform](https://docs.github.com/en/actions/how-tos/secure-your-work/security-harden-deployments/oidc-in-google-cloud-platform) setup มีสามส่วน (จาก docs): สร้าง workload identity pool, เพิ่ม provider เข้าไปพร้อม attribute condition จำกัดว่า repository/branch ไหนใช้ได้บ้าง แล้ว grant `roles/iam.workloadIdentityUser` ให้ principal ของ provider นั้นบน service account เป้าหมาย — `workload_identity_provider` กับ `service_account` ข้างบนคือสองส่วนนี้เป๊ะ ๆ
+
+## Lint workflow เองด้วย `actionlint`
+
+workflow YAML ข้างบนพิสูจน์ด้วยการรัน `actionlint` (`rhysd/actionlint`) ใส่มันจริงในคอนเทนเนอร์แบบ one-shot — เครื่องมือตัวเดียวกับที่ pre-commit hook หรือ CI job แยกต่างหากจะรันทุกครั้งที่ workflow เปลี่ยน:
+
+```text
+$ docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:latest -color
+```
+
+output จริงกับทั้งสอง workflow ในบทนี้ (pipeline plan/apply กับ drift-detection job ด้านล่าง): ไม่มี output อะไรเลย และ exit code เป็น `0` — `actionlint` จะไม่พิมพ์อะไรเลยเมื่อไม่เจอปัญหา นั่นคือหลักฐานว่าไม่มี `${{ }}` expression ที่ไม่มีจริง, ค่า `runs-on` ที่ผิด, `uses:` ที่ไม่ pin version, หรือปัญหาระดับ shellcheck ใน `run:` script ที่ฝังอยู่
+
+## Apply plan เดิมที่ผ่าน review แล้ว ไม่ใช่ plan ใหม่
+
+ช่องโหว่เล็ก ๆ ใน pipeline สอง job ข้างบน: `apply` job รัน `terragrunt run --all apply --non-interactive` ซึ่งคำนวณ plan **ของตัวเอง** ตอน apply ถ้ามีอะไรเปลี่ยนระหว่างที่ PR ถูก review กับตอนที่ merge เข้าจริง — เพื่อนร่วมทีม merge อะไรคู่ขนานมา, module registry update, หรือ drift ใน project — plan ที่คนอนุมัติกับ plan ที่ apply จริงก็ไม่ใช่ plan เดียวกันแบบพิสูจน์ได้ `terragrunt run --all plan --out-dir <dir>` (ยืนยันจาก `terragrunt run --help`: `--out-dir value  Directory to store plan files.`) ปิดช่องนี้ด้วยการเขียน saved plan file หนึ่งไฟล์ต่อ unit แล้ว `terragrunt run --all apply --out-dir <dir>` ก็ apply ไฟล์นั้นตรง ๆ แทนที่จะ re-plan ใหม่
+
+```text
+$ terragrunt run --all plan --out-dir plan-output --non-interactive
+...
+Saved the plan to:
+.../plan-output/tfplan.tfplan
+To perform exactly these actions, run the following command to apply:
+    terraform apply ".../plan-output/tfplan.tfplan"
+
+❯❯ Run Summary  1 units
+   Succeeded    1
+
+$ terragrunt run --all apply --out-dir plan-output --non-interactive
+local_file.config: Creating...
+local_file.config: Creation complete after 0s [id=f572d396fae9206628714fb2ce00f72e94f2258f]
+Apply complete! Resources: 1 added, 0 changed, 0 destroyed.
+
+❯❯ Run Summary  1 units
+   Succeeded    1
+```
+
+output จริงจาก Terragrunt 1.1.0 พิสูจน์ในเครื่องกับ `local` backend (กลไกนี้เป็นของ Terragrunt-core เหมือนกันไม่ว่าจะขับเคลื่อน unit ของ cloud ไหน): คำสั่งที่สองก็ apply ไฟล์ที่คำสั่งแรก save ไว้เป๊ะ ๆ ไม่มี re-plan ไม่มี prompt ใน CI จริง plan job upload `plan-output/` เป็น build artifact ผูกกับ commit SHA แล้ว apply job download artifact เดียวกันนั้นมาก่อนรัน `apply --out-dir` สิ่งที่ apply จริงจึงพิสูจน์ได้ว่าเป็นสิ่งเดียวกับที่ reviewer อ่าน
+
+## Gate apply ด้วย `-detailed-exitcode` และเช็ค drift ตามตาราง
+
+`terraform plan -detailed-exitcode` (`terraform plan -help`: "Return detailed exit codes when the command exits... 0 - Succeeded, diff is empty (no changes)") เปลี่ยน exit code 0 ให้แปลว่า *ไม่มีอะไรเปลี่ยน*, 1 แปลว่า error, และ 2 แปลว่า *มี change* pipeline step เอาไปใช้ skip apply ที่ไม่จำเป็นได้ หรือ รันแบบ schedule แทน push ใช้ตรวจ drift โดยไม่มี `apply` step เลย พิสูจน์จริงครบทั้งสาม exit code ข้างล่างนี้ — `1` กับ `google` provider block จริง (sandbox นี้ไม่มี Application Default Credentials เลย ก็เลยเป็น error แบบเดียวกับที่ google plan แบบ offline จริงจะเจอ), `0` กับ `2` กับ resource `local_file` แบบ cloud-agnostic (กลไก exit code ของ `-detailed-exitcode` เป็นของ Terraform-core ไม่ใช่เฉพาะ provider):
+
+```text
+# 1 — error จริงจาก google: sandbox นี้ไม่มี Application Default Credentials เลย
+$ terraform plan -input=false -detailed-exitcode
+Planning failed. Terraform encountered an error while generating this plan.
+╷
+│ Error: Attempted to load application default credentials since neither
+│ `credentials` nor `access_token` was set in the provider block. No
+│ credentials loaded. To use your gcloud credentials, run 'gcloud auth
+│ application-default login'. Original error: google: could not find
+│ default credentials.
+│
+│   with provider["registry.terraform.io/hashicorp/google"],
+│   on main.tf line 10, in provider "google":
+╵
+$ echo $?
+1
+
+# 0 — ไม่มี change (local_file apply ไปแล้วรอบหนึ่ง)
+$ terraform plan -input=false -detailed-exitcode
+...
+Terraform has compared your real infrastructure against your configuration
+and found no differences, so no changes are needed.
+$ echo $?
+0
+
+# 2 — มี change (แก้ content ของ local_file — บังคับ replacement)
+$ terraform plan -input=false -out=tfplan -detailed-exitcode
+...
+Plan: 1 to add, 0 to change, 1 to destroy.
+Saved the plan to: tfplan
+$ echo $?
+2
+```
+
+รันจริงสามครั้งแยกกัน ได้ exit code จริงสามค่าต่างกัน กรณี `1` คือคำตอบตรง ๆ ของคำถาม "drift job ใน CI จะเห็นอะไรถ้า GCP auth เองพังไปแล้ว": `google` provider จริง ที่ไม่มี token จากการแลก Workload Identity เลย (sandbox นี้ไม่มี) จะ fail ตั้งแต่ configure provider ก่อนที่จะไปถึง resource ไหนเลย — workflow ข้างล่างแยกกรณีนี้ (`1` = check พังเอง) จาก drift จริง (`2`) ด้วยเหตุผลนี้เป๊ะ ๆ
+
+## `terraform show -json` ของ saved plan file
+
+`tfplan` ที่ save จากกรณี `2` ข้างบนเป็น binary file — `terraform show -json tfplan` render ออกมาเป็น JSON schema แบบเดียวกับที่ `the-state-file.mdx` ใช้กับ state (มี `format_version`, แยกจาก state's `version` field) เพียงแต่ `resource_changes[].change.actions` อธิบาย change ที่ *เสนอ* แทนที่จะเป็น change ที่ *apply แล้ว* output จริง (ตัดให้สั้น):
+
+```json
+{
+  "format_version": "1.2",
+  "terraform_version": "1.16.4",
+  "resource_changes": [
+    {
+      "address": "local_file.config",
+      "change": { "actions": ["delete", "create"] }
+    }
+  ]
+}
+```
+
+`["delete", "create"]` คือรูปแบบ JSON ของ forced-replacement marker `-/+` จากก่อนหน้านี้ในบทนี้ — แก้ `content` ทำให้ `local_file` ต้อง replace แทนที่จะ update in place และ `change.actions` ก็คือ array ตัวเดียวกับที่ policy check (`policy-as-code-and-static-analysis.mdx`) จะอ่านเพื่อ flag หรือบล็อก replacement แบบนี้กับ `google` resource ที่ stateful (เช่น `deletion_policy` บน `google_sql_database_instance`) ก่อน `apply` จะรันจริงเสียอีก
+
+```yaml
+name: drift-detection
+
+on:
+  schedule:
+    - cron: '0 6 * * *' # every day at 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - id: auth
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: projects/111122223333/locations/global/workloadIdentityPools/github-pool/providers/github-provider
+          service_account: github-actions-terraform@acme-prod-123456.iam.gserviceaccount.com
+      - uses: hashicorp/setup-terraform@v4
+      - name: Check for drift
+        id: plan
+        run: |
+          set +e
+          terragrunt run --all plan -detailed-exitcode -no-color
+          echo "exitcode=$?" >> "$GITHUB_OUTPUT"
+      - name: Fail if drift detected
+        if: steps.plan.outputs.exitcode == '2'
+        run: |
+          echo "::error::Drift detected — real infrastructure no longer matches configuration"
+          exit 1
+```
+
+job นี้ไม่รัน `apply` เลย — หน้าที่เดียวคือ fail ดัง ๆ (ของจริงคือ page คนหรือ post เข้า chat channel) ทันทีที่ exit code ของ `plan` บอกว่า project drift ไปจาก configuration แล้ว จับ drift ได้ตามตารางแทนที่จะรู้ตัวอีกทีตอน `apply` ครั้งถัดไป
+
 <Mermaid title="Pull request เรียก plan ให้ review, merge เข้า main เรียก apply หลัง approval gate, Workload Identity Federation ส่ง credential แบบ short-lived ให้ทั้งคู่" code={cicdPipelineDiagram} />
 
 export const cicdPipelineDiagram = `flowchart LR
@@ -131,8 +267,48 @@ export const cicdPipelineDiagram = `flowchart LR
   wif["Workload Identity Federation"] -->|short-lived credentials| plan
   wif -->|short-lived credentials| apply`;
 
+## Mental Model
+
+infrastructure pipeline มีหน้าที่แค่สองอย่าง และการปนกันสองอย่างนี้คือ root cause ของ incident ส่วนใหญ่: **คำนวณ plan ให้คนดู** (เร็ว ปลอดภัย อ่านอย่างเดียวจาก GCP — ไม่มีอะไรเปลี่ยนจริง) กับ **execute plan ที่ผ่าน review แล้ว** (step เดียวที่แตะ resource จริงได้ และแตะได้ก็ต่อเมื่อผ่านทั้ง automated gate — `-detailed-exitcode`, policy check — และ human gate แล้วเท่านั้น) มองกลไกอื่น ๆ ในบทนี้ว่ารับใช้สองหน้าที่นี้อย่างใดอย่างหนึ่ง: Workload Identity Federation มีไว้เพื่อให้ job *execute* ไม่ต้องมี key file แบบ standing เลย; `--out-dir` มีไว้เพื่อให้ *execute* รัน byte เดียวกับที่ *compute* สร้างไว้ ไม่ใช่คำนวณใหม่; scheduled drift job คือ job *compute* ที่ไม่มี job *execute* ตามหลังเลย มีไว้เพื่อเผยว่า reality เบี่ยงไปจาก plan อย่างเงียบ ๆ หรือเปล่าเท่านั้น
+
+## ข้อแลกเปลี่ยน
+
+| ทางเลือก | ได้อะไร | เสียอะไร |
+|---|---|---|
+| Workload Identity Federation แทน key file ที่ดาวน์โหลดมา | ไม่มี GCP credential แบบ long-lived อยู่ที่ไหนให้หลุดหรือลืม rotate | ต้อง setup workload identity pool + provider + attribute condition ต่อ project ครั้งเดียว และใช้ได้แค่กับ CI system ที่ยื่น OIDC token ได้เท่านั้น |
+| ใช้ `--out-dir` reuse plan/apply artifact | apply พิสูจน์ได้ว่าเป็น plan เดียวกับที่คนอนุมัติ ไม่ใช่ re-plan ใหม่ | ต้อง upload/download artifact เพิ่มระหว่าง plan job กับ apply job และต้อง treat artifact นั้นเป็นของ sensitive (plan อาจมีค่าที่ data source resolve มา) |
+| Gate ด้วย `-detailed-exitcode` | skip apply ที่ไม่จำเป็น และเปลี่ยน `plan` แบบ schedule ให้เป็น drift alarm โดยไม่มี `apply` step เลย | exit code `1` (error จริง) กับ `2` (change จริง) ต้องแยกจัดการชัดเจน — ถ้ามองว่า non-zero คือ "มี change" หมด จะกลืน error จริงไปเงียบ ๆ |
+| Manual approval gate `environment: production` | ต้องมีคนที่ระบุชื่อ approve ก่อน resource production จะถูกแตะ แม้ automated check ผ่านหมดแล้ว | เพิ่ม latency ให้ทุก production change และดีเท่ากับที่ reviewer อ่าน plan จริง ไม่ใช่กด approve แบบอัตโนมัติ |
+
+## ความเข้าใจผิดที่พบบ่อย
+
+- **"รัน `apply` ใหม่ใน apply job ก็ได้ plan เดียวกับที่ reviewer เห็นใน pull request"** พิสูจน์ข้างบน: ถ้าไม่มี `--out-dir` apply job จะคำนวณ plan ของตัวเองใหม่ตอน apply ถ้ามีอะไรเปลี่ยนใน project หรือ module registry ระหว่าง review กับ merge plan นั้นอาจต่างจากที่คนอ่านจริง
+- **"`-detailed-exitcode` return ค่าไม่ใช่ 0 แปลว่ามีอะไรผิดพลาดเสมอ"** มัน return `2` สำหรับ "มี change ต้อง apply" ซึ่งปกติดี และ `1` เท่านั้นที่แปลว่า error จริง พิสูจน์ข้างบนด้วย error auth จริงจาก `google` provider ถ้า script treat สองค่านี้เหมือนกัน จะบล็อก deploy ปกติ หรือแย่กว่านั้นคือเมิน error จริงไปเฉย ๆ
+- **"Workload Identity Federation ทำให้ไม่ต้องมี service account เลย"** มันทำให้ไม่ต้องมี *key file* ที่ดาวน์โหลดมาเท่านั้น service account จริง ที่ impersonate ผ่าน pool provider และ grant แค่ role ที่ pipeline ต้องใช้ ยังจำเป็นอยู่ และเป็น authorization boundary ตัวจริง
+- **"scheduled drift-detection job ต้องมี `apply` step ถึงจะมีประโยชน์"** job ที่พิสูจน์ข้างบนไม่ apply อะไรเลย — คุณค่าทั้งหมดอยู่ที่ `plan -detailed-exitcode` fail ดัง ๆ ตามตาราง ซึ่งจับ drift ได้ก่อนที่ change ครั้งถัดไปจะเผยมันออกมาเอง
+
+## อ่านโค้ดที่ AI เขียน
+
+เวลา review AI-generated CI/CD workflow สำหรับ Terraform/Terragrunt บน GCP ให้เช็ค:
+
+- service account key JSON ที่ดาวน์โหลดมาเก็บเป็น CI secret แล้วอ้างผ่าน `GOOGLE_APPLICATION_CREDENTIALS` แทนที่จะเป็น `google-github-actions/auth` กับ `workload_identity_provider` — สัญญาณของ key แบบ long-lived ที่ควรเป็น Workload Identity Federation แทน
+- `apply` job ที่ไม่มี `environment:` (หรือ required-reviewers gate เทียบเท่า) บน job นั้น — ไม่มีอะไรหยุด PR ที่ merge แล้วจาก apply เข้า production แบบไม่มีคนดูแล
+- `terraform apply` (ไม่มี `-input=false`, ไม่มี saved plan file) รันตรง ๆ ใน CI แทนที่จะ apply plan artifact จาก `plan` step ก่อนหน้า — ตรงกับช่องโหว่ที่ proof `--out-dir` ข้างบนปิดไว้พอดี
+- drift-detection หรือ CI `plan` step ที่เช็ค `if: failure()` แทนที่จะ capture ค่า `-detailed-exitcode` จริง — `failure()` แยกไม่ออกว่า "มี change" (exit `2`) กับ "plan error จริง" (exit `1`)
+- ไม่มี `permissions: id-token: write` บน workflow ที่ดูเหมือนใช้ Workload Identity Federation อยู่แล้ว — ถ้าไม่มีบรรทัดนี้ การแลก token ก็ไม่มีอะไรให้ยื่น `google-github-actions/auth` จะ fail ที่ step authenticate ไม่ใช่แบบเงียบ ๆ
+
+<SpotTheBug code={`- name: Check for drift
+  id: plan
+  run: terragrunt run --all plan -detailed-exitcode -no-color
+  continue-on-error: true
+- name: Fail if drift detected
+  if: steps.plan.outcome == 'failure'
+  run: exit 1`}>
+`-detailed-exitcode` ทำให้ shell command ของ step exit ไม่เป็นศูนย์ได้จาก **สอง** เหตุผลต่างกัน: exit code `2` แปลว่ามี change จริง (กรณีที่ job นี้อยากจับ) แต่ exit code `1` แปลว่า plan เองพัง — Workload Identity exchange ผิดพลาด, syntax error, provider timeout ทั้งคู่ทำให้ `continue-on-error: true` mark `steps.plan.outcome` เป็น `'failure'` เหมือนกัน workflow นี้เลยแยกไม่ออกว่า "infrastructure drift" กับ "drift check เองพัง" แล้ว check ที่พังก็จะถูกรายงานว่าเป็น drift ทุกวัน ทางแก้ที่พิสูจน์ข้างบนคือ capture exit code จริงด้วย `echo "exitcode=$?" >> "$GITHUB_OUTPUT"` ใต้ `set +e` (ไม่ต้องใช้ `continue-on-error` เลย) แล้ว branch ตาม `steps.plan.outputs.exitcode == '2'` โดยตรง
+</SpotTheBug>
+
 <Callout title="สรุปหนึ่งบรรทัด">
-IaC pipeline แบบมาตรฐานรัน **`plan`** ทุก pull request แล้วโพสต์เป็น comment ให้คน review และเก็บ **`apply`** ไว้หลัง merge เข้า main ปกติจะ gate ด้วย manual approval สำหรับ production เพราะ `apply` สามารถทำให้เกิด **forced replacement** (`-/+` ใน plan คือทำลายแล้วสร้างใหม่) แทนที่จะเป็น in-place update ที่ปลอดภัย การ review infrastructure plan เลยต้องสแกนหาบรรทัดพวกนั้นโดยเฉพาะ ไม่ใช่แค่อ่านผ่าน ๆ แบบ code diff และ CI credential ควรมาจาก **Workload Identity Federation** แบบ short-lived (`google-github-actions/auth` แลก GitHub OIDC token เป็น credential ชั่วคราวโดย impersonate service account) แทนที่ service account key JSON file ที่ดาวน์โหลดมาเก็บเป็น CI secret
+IaC pipeline แบบมาตรฐานรัน **`plan`** ทุก pull request แล้วโพสต์เป็น comment ให้คน review และเก็บ **`apply`** ไว้หลัง merge เข้า main ปกติจะ gate ด้วย manual approval สำหรับ production เพราะ `apply` สามารถทำให้เกิด **forced replacement** (`-/+` ใน plan คือทำลายแล้วสร้างใหม่) แทนที่จะเป็น in-place update ที่ปลอดภัย การ review infrastructure plan เลยต้องสแกนหาบรรทัดพวกนั้นโดยเฉพาะ ไม่ใช่แค่อ่านผ่าน ๆ แบบ code diff CI credential ควรมาจาก **Workload Identity Federation** แบบ short-lived (`google-github-actions/auth` แลก GitHub OIDC token เป็น credential ชั่วคราวโดย impersonate service account) แทนที่ service account key JSON file ที่ดาวน์โหลดมาเก็บเป็น CI secret พิสูจน์ข้างบน: `terragrunt run --all plan --out-dir <dir>` ตามด้วย `apply --out-dir <dir>` (directory เดียวกัน) apply plan ที่ save ไว้ตรง ๆ ไม่ใช่ re-plan ใหม่ และ exit code สามทาง (`0`/`1`/`2`) ของ `-detailed-exitcode` (capture ชัดเจน ไม่เดาจาก step `outcome`) ทั้ง gate apply ที่ไม่จำเป็นและขับเคลื่อน scheduled drift-detection job ที่ไม่มี `apply` step เลย
 </Callout>
 
 export const quizCicdPipeline = [
@@ -145,6 +321,7 @@ export const quizCicdPipeline = [
       'plan กับ apply ควรรันจาก laptop ของ engineer ด้วยมือทั้งคู่',
     ],
     answer: 1,
+    explain: 'plan อ่านอย่างเดียวและปลอดภัยที่จะรันทุก PR ส่วน apply เป็น step เดียวที่แตะ resource GCP จริง เลยเก็บไว้หลัง merge และมักถูก gate ด้วย manual approval สำหรับ production',
   },
   {
     q: 'ทำไม infrastructure plan ต้อง review ละเอียดกว่า application code diff ทั่วไป',
@@ -155,16 +332,18 @@ export const quizCicdPipeline = [
       'application code review กับ infrastructure plan review เหมือนกันทุกอย่างในทางปฏิบัติ',
     ],
     answer: 1,
+    explain: 'forced replacement (-/+) ทำลาย resource เก่าก่อนที่ resource ใหม่จะมีอยู่ — code deploy ไม่มี failure mode แบบนี้ นี่คือเหตุผลที่ reviewer ต้องสแกนหา marker นั้นโดยเฉพาะ ไม่ใช่อ่านผ่าน ๆ',
   },
   {
-    q: '-/+ ข้าง resource ใน terraform plan output หมายความว่าอะไร',
+    q: '```text\n$ terraform plan -detailed-exitcode -input=false\n...\nPlan: 1 to add, 0 to change, 1 to destroy.\n$ echo $?\n2\n```\nexit code `2` จริงตัวนี้แปลว่าอะไร ต่างจาก `1` ยังไง?',
     options: [
-      'resource นั้นจะ update in-place โดยไม่มี downtime',
-      'resource นั้นต้องถูกทำลายแล้วสร้างใหม่เพราะ argument ที่เปลี่ยนบังคับให้ replace แทนที่จะ update in-place',
-      'Terraform ตัดสินใจไม่ได้ว่า resource เปลี่ยนหรือเปล่า',
-      'resource นั้นจะ import จาก infrastructure ที่มีอยู่แล้ว',
+      'exit code 2 แปลว่า plan พังด้วย error ส่วน 1 แปลว่าไม่มี change',
+      'exit code 2 แปลว่ามี change พร้อม apply ส่วน exit code 1 แปลว่า plan เองพัง — สองค่านี้ห้าม treat เหมือนกันใน script เด็ดขาด',
+      'exit code 1 กับ 2 ใช้แทนกันได้ ทั้งคู่แปลว่า "มีอะไรบางอย่างเกิดขึ้น"',
+      'exit code 2 จะเกิดแค่ตอนใช้ Terragrunt เท่านั้น ไม่เกิดกับ Terraform เปล่า ๆ',
     ],
     answer: 1,
+    explain: 'terraform plan -help: กับ -detailed-exitcode, 0 = ไม่มี change, 1 = error, 2 = มี change พิสูจน์ข้างบนด้วย error auth จริงจาก google provider สำหรับ 1 และ local_file replacement จริงสำหรับ 2 ถ้าปนสองค่านี้ จะบล็อก deploy ปกติ หรือซ่อน error จริงให้ดูเหมือน drift ปกติ',
   },
   {
     q: 'ทำไม Workload Identity Federation ถึงดีกว่า service account key JSON file ที่ดาวน์โหลดมาเก็บเป็น CI secret',
@@ -175,6 +354,29 @@ export const quizCicdPipeline = [
       'terraform apply ต้องมี service account key ที่ดาวน์โหลดมาถึงจะทำงานได้',
     ],
     answer: 1,
+    explain: 'Workload Identity Federation ยังต้องมี service account จริงให้ impersonate — สิ่งที่มันตัดออกคือ key file แบบ long-lived ที่ปกติจะนอนอยู่ใน CI secret รอหลุดหรือเก่าไป',
+  },
+  {
+    q: '```yaml\n- name: Check for drift\n  id: plan\n  run: terragrunt run --all plan -detailed-exitcode -no-color\n  continue-on-error: true\n- if: steps.plan.outcome == \'failure\'\n  run: exit 1\n```\nbug จริงใน drift-detection step นี้คืออะไร พิสูจน์ใน SpotTheBug ของบทนี้?',
+    options: [
+      'continue-on-error ไม่ใช่ key จริงของ GitHub Actions',
+      'steps.plan.outcome เป็น "failure" ได้แค่กรณี exit code 1 เท่านั้น เลยไม่มีวัน fire',
+      'outcome เป็น "failure" ได้ทั้งกรณี plan error จริง (exit 1) และ drift จริง (exit 2) workflow นี้เลยแยกไม่ออกว่า check พังเองหรือ drift จริง — ต้อง capture exit code จริงเป็น step output แทน',
+      '-detailed-exitcode ไม่ใช่ flag จริงของ terraform plan',
+    ],
+    answer: 2,
+    explain: 'ทั้ง exit 1 และ exit 2 ทำให้ step outcome เป็น "failure" ภายใต้ continue-on-error — ทางแก้คือ echo "exitcode=$?" >> "$GITHUB_OUTPUT" ใต้ set +e (ไม่ต้องมี continue-on-error เลย) แล้ว branch ตามค่าจริง พิสูจน์ข้างบน',
+  },
+  {
+    q: 'terragrunt run --all plan --out-dir <dir> ตามด้วย run --all apply --out-dir <dir> (directory เดียวกัน) แก้ปัญหาจริงอะไร พิสูจน์ในบทนี้ด้วย Terragrunt 1.1.0 จริง?',
+    options: [
+      'ทำให้ terraform plan รันเร็วขึ้นด้วยการข้าม provider download',
+      'รับประกันว่า apply step รัน saved plan ตัวจริงจาก plan step แทนที่จะคำนวณ plan ใหม่ตอน apply ซึ่งอาจต่างกันถ้า project หรือ module เปลี่ยนไประหว่างนั้น',
+      'ตัดความจำเป็นของ remote state backend ออกไป',
+      'แก้ merge conflict ใน terragrunt.hcl ให้อัตโนมัติ',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ข้างบน: apply --out-dir apply ไฟล์ tfplan.tfplan ตัวจริงที่ plan step save ไว้ ไม่มี re-plan ไม่มี prompt — นี่คือสิ่งที่ทำให้ "plan ที่คน review" กับ "plan ที่ apply จริง" พิสูจน์ได้ว่าเป็นตัวเดียวกัน',
   },
 ];
 
