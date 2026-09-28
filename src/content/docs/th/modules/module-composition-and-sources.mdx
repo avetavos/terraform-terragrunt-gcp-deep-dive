@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## ไอเดียในหนึ่งประโยค
 
@@ -59,7 +60,7 @@ module "vpc" {
 infrastructure ที่ซับซ้อนจริง ๆ แทบไม่เคยเป็น configuration แบนราบก้อนเดียว แต่เป็น module เล็ก ๆ ที่ focus ชัดเจนหลายตัวต่อกัน โดย `output` ของ module หนึ่งกลายเป็น input `variable` ของ module ถัดไปโดยตรง ลองดู `vpc` module ที่สร้าง network กับ subnet ของตัวเอง และ `compute-instance` module ที่ต้องรู้ว่าจะ attach instance เข้ากับ network และ subnetwork ไหน
 
 ```hcl
-# modules/vpc/outputs.tf
+# Illustrative: modules/vpc/outputs.tf (the vpc module's own resources are omitted here)
 output "network_id" {
   description = "Self link of the VPC network created by this module"
   value       = google_compute_network.this.id
@@ -110,7 +111,104 @@ Terraform resolve dependency ตรงนี้ให้อัตโนมัต
 
 แต่ module จาก Registry ก็ยังเป็นโค้ดของคนอื่นที่รันใน project ของคุณด้วย credential ของคุณ ก่อนจะพึ่งพาใน production ควรอ่านให้รู้ว่า module สร้างอะไรจริง ๆ — `main.tf`, ค่า default, IAM role หรือ API ที่เปิดใช้แทนคุณ module จาก Registry ที่ดูแลดีคือ productivity lever จริง ไม่ใช่ตัวแทนของการเข้าใจว่าอะไรถูก deploy เข้า GCP project ของคุณ
 
-<Mermaid title="Root configuration wiring vpc module outputs into compute-instance module inputs" code={moduleCompositionDiagram} />
+## ประกอบข้าม configuration แยกกันด้วย terraform_remote_state
+
+ทุกอย่างข้างบนต่อ module เข้าด้วยกัน *ภายใน configuration เดียว* ที่ root มีทั้ง `module.vpc` และ `module.compute_instance` ใน `terraform apply` ครั้งเดียวกัน infrastructure จริงมักถูกแยกเป็น configuration ต่างหากจริง ๆ ที่มี state ของตัวเอง — configuration networking ของทีม platform ที่ apply ตามตารางของตัวเอง configuration ของทีม application ที่ apply แยกต่างหาก `terraform_remote_state` คือวิธีเชื่อมทั้งสองแบบ native ไม่ต้องใช้ Terragrunt เลย เป็น `data` source ที่อ่าน output ของ configuration อื่นตรง ๆ จาก state ของมัน ไม่ว่า state นั้นจะอยู่บน backend ไหนก็ตาม
+
+```hcl
+# network/main.tf — a separate configuration, applied on its own
+resource "google_compute_network" "this" {
+  name                    = "app-network"
+  auto_create_subnetworks = false
+}
+
+output "network_id" {
+  value = google_compute_network.this.id
+}
+```
+
+```hcl
+# app/main.tf — a different configuration, reading network's state
+data "terraform_remote_state" "network" {
+  backend = "gcs"
+  config = {
+    bucket = "my-company-terraform-state"
+    prefix = "network/state"
+  }
+}
+
+resource "google_compute_instance" "web" {
+  name         = "web-vm"
+  machine_type = "e2-medium"
+  zone         = "us-central1-a"
+
+  boot_disk {
+    initialize_params {
+      image = "debian-cloud/debian-12"
+    }
+  }
+
+  network_interface {
+    network = data.terraform_remote_state.network.outputs.network_id
+  }
+}
+```
+
+พิสูจน์จริงโดยไม่มี cloud credential เลย — configuration สอง config ที่ใช้ `local` backend แทน `network` กับ `app` โดย `terraform_remote_state` อ่าน state file จริงข้ามขอบเขตกัน
+
+```text
+$ cd network && terraform apply -auto-approve
+Outputs:
+
+network_id = "projects/my-project/global/networks/app-network"
+
+$ cd ../app && terraform plan
+      + content = <<-EOT
+            network_id=projects/my-project/global/networks/app-network
+        EOT
+```
+
+output ของ plan แสดงค่าจริงที่อ่านมาจาก state file ของ `network` — `data.terraform_remote_state.network.outputs.network_id` resolve ออกมาเป็น string เดียวกันเป๊ะกับที่ `apply` ของ `network` เองสร้างไว้ โดยไม่มี dependency ตรงระหว่าง source code ของทั้งสอง configuration เลย ไม่มี configuration ไหน import อีกตัว `app` แค่รู้ shape ของ output ของ `network` และรู้ว่า state ของมันอยู่ที่ไหน
+
+นี่คือกลไกที่ Terragrunt `dependency` block (อยู่ใน `terragrunt-fundamentals/dependencies-between-units.mdx`) สร้างต่อยอดขึ้นมาและมาแทนที่เป็นส่วนใหญ่สำหรับ setup multi-environment — `terraform_remote_state` คือตัวที่ทำงานกับ Terraform ธรรมดา ไม่ต้องมี Terragrunt เลย ซึ่งเป็นเหตุผลที่มันยังโผล่บ่อยมากใน codebase ที่มีมาก่อน Terragrunt หรือที่ตั้งใจไม่ใช้ Terragrunt เลย
+
+## `moved` ข้ามขอบเขต module refactor composition โดยไม่มี downtime
+
+composition ไม่ได้หยุดนิ่ง — resource ที่เริ่มอยู่ที่ root มักถูกดึงเข้าไปใน module ทีหลัง ทันทีที่ caller ตัวที่สองต้องการสิ่งเดียวกัน ถ้าปล่อยไว้เฉย ๆ refactor แบบนี้ Terraform จะอ่านว่า "address เก่าหายไป มี address ใหม่โผล่มา" ซึ่ง plan เป็น destroy-แล้ว-create `moved` block ที่ข้ามขอบเขต module บอก Terraform ว่านี่คือ object จริงตัวเดียวกัน
+
+```hcl
+# root main.tf
+moved {
+  from = google_compute_instance.web
+  to   = module.compute_instance.google_compute_instance.this
+}
+
+module "compute_instance" {
+  source = "./modules/compute-instance"
+  # ...
+}
+```
+
+พิสูจน์จริง ใช้ pattern `local_file` แบบไม่มี credential ที่คอร์สนี้ใช้ตลอดสำหรับกลไก state — resource ที่เคยอยู่ที่ root ถูกดึงเข้า module โดยมี `moved` ข้ามขอบเขต
+
+```text
+$ terraform plan
+local_file.config: Refreshing state... [id=5d54098470458257525a27f6f0b6de89e278569d]
+
+Terraform will perform the following actions:
+
+  # local_file.config has moved to module.config.local_file.this
+    resource "local_file" "this" {
+        id                   = "5d54098470458257525a27f6f0b6de89e278569d"
+        # (10 unchanged attributes hidden)
+    }
+
+Plan: 0 to add, 0 to change, 0 to destroy.
+```
+
+`Plan: 0 to add, 0 to change, 0 to destroy` คือหลักฐานที่สำคัญ การดึง resource เข้า module ซึ่งเป็นหนึ่งใน refactor ที่พบบ่อยที่สุดใน configuration ที่กำลังโต ไม่จำเป็นต้องแปลว่าต้อง recreate Compute Engine resource จริง — ตราบใดที่ `moved` block เดินทางไปพร้อมกับ refactor ใน commit เดียวกัน
+
+<Mermaid title="root configuration ส่ง output ของ vpc module เข้าไปเป็น input ของ compute-instance module" code={moduleCompositionDiagram} />
 
 export const moduleCompositionDiagram = `flowchart LR
   subgraph root["Root module"]
@@ -132,8 +230,45 @@ export const moduleCompositionDiagram = `flowchart LR
   rci --> cin1
   rci --> cin2`;
 
-<Callout title="The one-line takeaway">
-**`source`** argument บน `module` block ชี้ว่าโค้ดของ module อยู่ที่ไหน — local path สำหรับ module ที่ยังผูกกับ repository เดียว, public **Terraform Registry** สำหรับ module ของชุมชนที่ดูแลดีและ resolve ผ่าน `namespace/name/provider`, หรือ **Git URL** (pin ได้ด้วย `?ref=`) สำหรับ module ส่วนตัวหรือภายในองค์กร infrastructure จริงถูกประกอบขึ้นจาก module เล็ก ๆ ที่ focus ชัดเจนหลายตัวต่อกัน ด้วยการส่ง `output` ของ module หนึ่งเป็น input `variable` ของอีก module และ Terraform resolve dependency ระหว่างกันให้อัตโนมัติ การเลือกใช้ module จาก Registry ที่คนใช้กันเยอะอย่าง `terraform-google-modules/network/google` มักเป็นจุดเริ่มต้นที่ดีกว่าการเขียนเองตั้งแต่ศูนย์ ตราบใดที่คุณยังอ่านสิ่งที่ module สร้างก่อนจะเชื่อใจใน production
+## Mental Model
+
+composition ในบทนี้มีสองรูปแบบที่ต่างกันมาก และการแยกให้ออกสำคัญมาก `module` block ประกอบกันภายใน configuration เดียวคือการต่อสายแบบ compile-time-ish — root configuration เห็น graph เต็มของทั้งสอง module และ plan พร้อมกันใน `apply` ครั้งเดียว `terraform_remote_state` ประกอบข้าม configuration คือการต่อสายแบบ runtime ต่อ *snapshot* — `app` อ่านสิ่งที่ `network` เขียนลง state ล่าสุด ซึ่งอาจ stale ทันทีที่ `network` เปลี่ยนอีกครั้ง โดยไม่มีการ re-plan อัตโนมัติฝั่ง `app` ทั้งสองแบบใช้ได้จริงทั้งคู่ ความต่างคือ blast radius กับความ stale ไม่ใช่ความถูกต้อง `moved` ข้ามขอบเขต module คือชิ้นที่สาม มันคือสิ่งที่ทำให้คุณ migrate *ระหว่าง* สองรูปแบบนี้ได้ (ดึง resource ที่ root เข้า module หรือกลับกัน) โดยไม่ให้ Terraform อ่าน refactor นี้เป็นการเปลี่ยนแปลง infrastructure จริง
+
+## ข้อแลกเปลี่ยน
+
+| ทางเลือก | ได้อะไร | เสียอะไร |
+|---|---|---|
+| ประกอบด้วย `module` (apply ครั้งเดียว) | root config เห็นภาพเต็ม plan เดียวแสดงผลกระทบทั้งหมด | ทุก module ใน graph ถูก plan พร้อมกัน — vpc เปลี่ยนนิดเดียวอาจขยาย plan ให้กว้างไปทุกอย่างที่ต่อกับมัน |
+| `terraform_remote_state` ข้าม config | lifecycle apply แยกกันจริง — network เปลี่ยนไม่บังคับให้ app plan ตาม | อ่าน snapshot ไม่ใช่ state สด — พิสูจน์ข้างบน app เห็นแค่สิ่งที่ network apply ล่าสุดเขียนไว้ อาจ drift จนกว่าจะ re-plan |
+| `moved` ข้ามขอบเขต module | refactor resource เข้า (หรือออกจาก) module โดยไม่ destroy/recreate — พิสูจน์ข้างบน `0 to add, 0 to change, 0 to destroy` | ต้องเขียนและ commit ใน change เดียวกับ refactor เป๊ะ ไม่งั้นช่วงเวลาระหว่างนั้น plan เป็น destroy/recreate จริง |
+
+## ความเข้าใจผิดที่พบบ่อย
+
+- **"`terraform_remote_state` ให้การเชื่อมต่อแบบ live กับ state ปัจจุบันของ configuration อื่น"** พิสูจน์ข้างบน มันอ่านสิ่งที่ถูกเขียนลง state object ล่าสุด — ถ้า `network` เปลี่ยนและ apply ใหม่หลังจาก `app` plan ไปแล้ว plan ครั้งถัดไปของ `app` (ไม่ใช่ครั้งที่รันไปแล้ว) เท่านั้นที่จะเห็นค่าใหม่
+- **"ต้องมี Terragrunt ถึงจะประกอบ Terraform configuration แยกกันได้"** พิสูจน์ข้างบน `terraform_remote_state` คือ `data` source ของ Terraform ธรรมดา ไม่ต้องมี Terragrunt เลย — มันมีมาก่อน `dependency` block ของ Terragrunt เองด้วยซ้ำ และยังโผล่บ่อยมากใน codebase ที่ไม่ใช้ Terragrunt เลย
+- **"การดึง resource เข้า module เป็นเรื่อง disruptive โดยธรรมชาติ ต้อง destroy แล้ว recreate เสมอ"** พิสูจน์ข้างบนด้วยตัวอย่าง `local_file` จริง ด้วย `moved` block ที่ข้ามขอบเขต module refactor แบบเดียวกันเป๊ะ plan ออกมาเป็น `0 to add, 0 to change, 0 to destroy`
+- **"`version` constraint ของ Registry module รับประกันว่า argument ของ module ไม่เปลี่ยนระหว่าง minor version"** ไม่ได้พิสูจน์หรืออ้างแบบนี้ในบทนี้ — `~>` ยังยอม patch/minor update ภายใน constraint ได้ (พูดถึงลึกใน `module-versioning-and-registries.mdx` รวมถึง required argument ที่เปลี่ยนจริงใน `terraform-google-modules/network/google` v18) ดังนั้นการ pin version แค่ลดขอบเขตของ drift ไม่ได้กำจัดมันทั้งหมด
+
+## อ่านโค้ดที่ AI เขียน
+
+ตอน review การประกอบ module หรือการต่อสายข้าม configuration ที่ generate มา เช็คสิ่งเหล่านี้
+
+- `terraform_remote_state` data source ที่สันนิษฐานว่าสะท้อน state *ปัจจุบัน* ของ configuration อื่นเสมอ — พิสูจน์ข้างบน มันสะท้อนแค่ `apply` ล่าสุดของ configuration นั้น ไม่ใช่การอ่านแบบ live
+- resource ที่ถูกย้ายเข้า module ในโค้ดที่ generate มา โดยไม่มี `moved` block คู่กัน — พิสูจน์ข้างบน สิ่งนี้อ่านเป็น destroy-แล้ว-create ถ้าไม่มี block นั้น ความเสี่ยงเดียวกับที่ `state-management/drift-detection-and-import.mdx` พูดถึงสำหรับ refactor ภายใน configuration เดียวกัน
+- สอง Terraform configuration ที่แก้ resource จริงตัวเดียวกันผ่านคนละทาง (ตัวหนึ่งผ่าน `module` อีกตัวผ่าน `terraform_remote_state` บวก resource block) แทนที่จะให้ตัวหนึ่งเป็นเจ้าของและอีกตัวแค่อ่าน output
+- Registry module source ที่ pin ไว้โดยไม่มี `version` constraint เลย ซึ่ง `module-versioning-and-registries.mdx` พูดถึงเป็นความเสี่ยงจริงที่พิสูจน์ได้
+
+<SpotTheBug code={`# app/main.tf — refactored so the instance now launches from a module,
+# migrated from a bare resource block in the same commit
+module "compute_instance" {
+  source     = "./modules/compute-instance"
+  network_id = data.terraform_remote_state.network.outputs.network_id
+}`}>
+พิสูจน์ข้างบนด้วย plan จริง (`local_file.config` -> `module.config.local_file.this`) การดึง resource เข้า module โดยไม่มี `moved { from = ... to = ... }` block คู่กันเลย ไม่ได้อ่านเป็น refactor สำหรับ Terraform เลย — resource ที่เคยเป็น `google_compute_instance.web` ที่ root หายไป และ `module.compute_instance.google_compute_instance.this` โผล่มาเป็นตัวใหม่ ซึ่ง plan ออกมาเป็น **ลบ Compute Engine instance ที่รันอยู่ สร้างตัวใหม่** สำหรับอะไรก็ตามที่รับ traffic ผ่าน instance นั้น นั่นคือ downtime จริงและ instance ID ใหม่ ทั้งที่ผู้เขียนตั้งใจแค่จะจัดระเบียบโค้ด ทางแก้คือ `moved` block ใน commit เดียวกับ refactor — พิสูจน์ข้างบนแล้วว่าให้ `Plan: 0 to add, 0 to change, 0 to destroy` พร้อม note `has moved to` ที่ข้ามขอบเขต module แทน
+</SpotTheBug>
+
+<Callout title="สรุปหนึ่งบรรทัด">
+**`source`** argument บน `module` block ชี้ว่าโค้ดของ module อยู่ที่ไหน — local path สำหรับ module ที่ยังผูกกับ repository เดียว, public **Terraform Registry** สำหรับ module ของชุมชนที่ดูแลดีและ resolve ผ่าน `namespace/name/provider`, หรือ **Git URL** (pin ได้ด้วย `?ref=`) สำหรับ module ส่วนตัวหรือภายในองค์กร infrastructure จริงถูกประกอบขึ้นจาก module เล็ก ๆ ที่ focus ชัดเจนหลายตัวต่อกัน ด้วยการส่ง `output` ของ module หนึ่งเป็น input `variable` ของอีก module และ Terraform resolve dependency ระหว่างกันให้อัตโนมัติ composition ยังทำงาน **ข้าม configuration แยกกัน** ได้ด้วย `terraform_remote_state` (พิสูจน์ข้างบนด้วยการอ่าน state ข้ามกันจริง) คือวิธี Terraform ธรรมดาที่ไม่ต้องมี Terragrunt เลย แม้จะอ่านเป็น snapshot ไม่ใช่ state สดก็ตาม เมื่อ resource ย้ายเข้า (หรือออกจาก) module ระหว่าง refactor `moved` block ที่ข้ามขอบเขต (พิสูจน์ข้างบน `0 to add, 0 to change, 0 to destroy`) ช่วยเลี่ยงการ destroy-แล้ว-recreate จริง การเลือกใช้ module จาก Registry ที่คนใช้กันเยอะอย่าง `terraform-google-modules/network/google` มักเป็นจุดเริ่มต้นที่ดีกว่าการเขียนเองตั้งแต่ศูนย์ ตราบใดที่คุณยังอ่านสิ่งที่ module สร้างก่อนจะเชื่อใจใน production
 </Callout>
 
 export const quizModuleComposition = [
@@ -156,6 +291,28 @@ export const quizModuleComposition = [
       'อ่าน network ID จาก local state file ที่ vpc module เขียนไว้',
     ],
     answer: 1,
+  },
+  {
+    q: '```text\n$ cd network && terraform apply -auto-approve\nOutputs:\n\nnetwork_id = "projects/my-project/global/networks/app-network"\n\n$ cd ../app && terraform plan\n      + content = <<-EOT\n            network_id=projects/my-project/global/networks/app-network\n        EOT\n```\noutput จริงนี้พิสูจน์อะไรเกี่ยวกับวิธีที่ terraform_remote_state อ่าน state ของ configuration อื่น',
+    options: [
+      'มันรักษาการเชื่อมต่อเครือข่ายแบบ live กับ configuration อื่น และสะท้อนค่าปัจจุบันแบบ real time เสมอ',
+      'มันอ่านสิ่งที่ configuration นั้นเขียนลง state ล่าสุด — ในที่นี้คือ string เดียวกันเป๊ะกับที่ apply ของ network เองสร้างไว้ โดยไม่มี dependency ตรงระหว่าง source code ของสอง configuration',
+      'มันต้องมี Terragrunt ถึงจะทำงานได้เลย',
+      'มันทำงานได้แค่ตอนที่สอง configuration ใช้ backend type เดียวกันเท่านั้น',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ข้างบน plan ของ app ได้ network_id string เดียวกันเป๊ะกับที่ apply แยกต่างหากของ network เขียนลง state ของตัวเอง — เป็นการอ่าน snapshot ไม่ใช่การเชื่อมต่อ live และไม่มี Terragrunt เข้ามาเกี่ยว',
+  },
+  {
+    q: '```text\n$ terraform plan\nlocal_file.config: Refreshing state...\n  # local_file.config has moved to module.config.local_file.this\n    resource "local_file" "this" {\n        id = "5d54098470458257525a27f6f0b6de89e278569d"\n        # (10 unchanged attributes hidden)\n    }\nPlan: 0 to add, 0 to change, 0 to destroy.\n```\nHCL จริงตัวไหนที่ข้ามขอบเขต module ทำให้เกิด output นี้ตอน resource ถูกดึงเข้า module',
+    options: [
+      'removed block ที่มี destroy = false',
+      'moved block ที่มี from = local_file.config และ to = module.config.local_file.this',
+      'การ rename resource โดยไม่มีอะไรเปลี่ยนอย่างอื่น',
+      'import block ที่ชี้ไป id เดียวกัน',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ข้างบน moved block ที่ข้ามขอบเขต module ทำให้เกิดบรรทัด "has moved to" พร้อม add/change/destroy เป็นศูนย์ทั้งหมด — ถ้าไม่มีมัน การดึง resource เข้า module จะ plan เป็น destroy-แล้ว-create',
   },
   {
     q: 'query parameter ref บน Git module source ทำหน้าที่อะไร',

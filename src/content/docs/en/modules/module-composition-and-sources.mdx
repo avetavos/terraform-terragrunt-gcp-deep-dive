@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## The idea in one sentence
 
@@ -59,7 +60,7 @@ Note the double slash before `vpc` in the Git URL — everything before it is th
 Non-trivial infrastructure is essentially never one giant flat configuration. It is a handful of small, focused modules wired together, where one module's `output` becomes the very next module's input `variable`. Consider a `vpc` module that creates a network and its subnets, and a `compute-instance` module that needs to know which network and subnetwork to attach an instance to:
 
 ```hcl
-# modules/vpc/outputs.tf
+# Illustrative: modules/vpc/outputs.tf (the vpc module's own resources are omitted here)
 output "network_id" {
   description = "Self link of the VPC network created by this module"
   value       = google_compute_network.this.id
@@ -110,6 +111,103 @@ Writing a `vpc` module completely from scratch is a reasonable learning exercise
 
 That said, a Registry module is still someone else's code running in your project with your credentials. Before depending on one in production, read through what it actually creates — its `main.tf`, its default values, the IAM roles or APIs it enables on your behalf. A well-maintained Registry module is a real productivity lever, not a replacement for understanding what gets deployed into your GCP project.
 
+## Composing across separate configurations with terraform_remote_state
+
+Everything above wires modules together *inside one Terraform configuration*, where the root has both `module.vpc` and `module.compute_instance` in the same `terraform apply`. Real infrastructure is often split into genuinely separate configurations with their own state — a platform team's networking config applied on its own schedule, an application team's config applied separately. `terraform_remote_state` is the native, no-Terragrunt way to bridge them: a `data` source that reads another configuration's outputs straight out of its state, by whatever backend that state lives in.
+
+```hcl
+# network/main.tf — a separate configuration, applied on its own
+resource "google_compute_network" "this" {
+  name                    = "app-network"
+  auto_create_subnetworks = false
+}
+
+output "network_id" {
+  value = google_compute_network.this.id
+}
+```
+
+```hcl
+# app/main.tf — a different configuration, reading network's state
+data "terraform_remote_state" "network" {
+  backend = "gcs"
+  config = {
+    bucket = "my-company-terraform-state"
+    prefix = "network/state"
+  }
+}
+
+resource "google_compute_instance" "web" {
+  name         = "web-vm"
+  machine_type = "e2-medium"
+  zone         = "us-central1-a"
+
+  boot_disk {
+    initialize_params {
+      image = "debian-cloud/debian-12"
+    }
+  }
+
+  network_interface {
+    network = data.terraform_remote_state.network.outputs.network_id
+  }
+}
+```
+
+Real proof with no cloud credentials at all — two `local`-backed configurations standing in for `network` and `app`, with `terraform_remote_state` reading a real state file across the boundary:
+
+```text
+$ cd network && terraform apply -auto-approve
+Outputs:
+
+network_id = "projects/my-project/global/networks/app-network"
+
+$ cd ../app && terraform plan
+      + content = <<-EOT
+            network_id=projects/my-project/global/networks/app-network
+        EOT
+```
+
+The plan output shows the real value read out of `network`'s state file — `data.terraform_remote_state.network.outputs.network_id` resolved to the exact string `network`'s own `apply` produced, with no direct dependency between the two configurations' source code at all. Neither configuration imports the other; `app` only knows the shape of `network`'s outputs and where its state lives.
+
+This is the mechanism Terragrunt's `dependency` block (covered in `terragrunt-fundamentals/dependencies-between-units.mdx`) builds on top of and mostly replaces for multi-environment setups — `terraform_remote_state` is the one that works with plain Terraform, no Terragrunt required, which is exactly why it still shows up constantly in codebases that predate Terragrunt adoption or that intentionally avoid it.
+
+## `moved` across module boundaries: refactoring composition without downtime
+
+Composition is not static — a resource that starts at the root often gets pulled into a module later, once a second caller needs the same thing. Left alone, that refactor reads to Terraform as "the old address is gone, a new one appeared," which plans as destroy-then-create. A `moved` block, spanning the module boundary, tells Terraform these are the same real object:
+
+```hcl
+# root main.tf
+moved {
+  from = google_compute_instance.web
+  to   = module.compute_instance.google_compute_instance.this
+}
+
+module "compute_instance" {
+  source = "./modules/compute-instance"
+  # ...
+}
+```
+
+Real proof, using the same no-credentials `local_file` pattern this course uses throughout for state mechanics — a resource that existed at the root, pulled into a module, with `moved` spanning the boundary:
+
+```text
+$ terraform plan
+local_file.config: Refreshing state... [id=5d54098470458257525a27f6f0b6de89e278569d]
+
+Terraform will perform the following actions:
+
+  # local_file.config has moved to module.config.local_file.this
+    resource "local_file" "this" {
+        id                   = "5d54098470458257525a27f6f0b6de89e278569d"
+        # (10 unchanged attributes hidden)
+    }
+
+Plan: 0 to add, 0 to change, 0 to destroy.
+```
+
+`Plan: 0 to add, 0 to change, 0 to destroy` is the proof that matters: pulling a resource into a module, one of the single most common refactors in a growing configuration, does not have to mean recreating a real Compute Engine resource — as long as the `moved` block travels with the refactor in the same commit.
+
 <Mermaid title="Root configuration wiring vpc module outputs into compute-instance module inputs" code={moduleCompositionDiagram} />
 
 export const moduleCompositionDiagram = `flowchart LR
@@ -132,8 +230,45 @@ export const moduleCompositionDiagram = `flowchart LR
   rci --> cin1
   rci --> cin2`;
 
+## Mental Model
+
+Composition has two very different shapes in this lesson, and telling them apart matters. `module` blocks composing inside one configuration is compile-time-ish wiring — the root configuration sees both modules' full graphs and plans them together in one `apply`. `terraform_remote_state` composing across configurations is runtime wiring against a *snapshot* — `app` reads whatever `network` last wrote to its state, which could be stale the moment `network` changes again, with no automatic re-plan on `app`'s side. Both are real, valid ways to connect infrastructure; the difference is blast radius and staleness, not correctness. `moved` across a module boundary is the third piece: it is what lets you migrate *between* these shapes (pulling a root resource into a module, or vice versa) without Terraform reading the refactor as real infrastructure churn.
+
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---|---|---|
+| `module` composition (one `apply`) | Root config sees the full picture; a single `plan` shows every downstream effect | Every module in the graph gets planned together — a small vpc change can widen a plan that touches everything wired to it |
+| `terraform_remote_state` across configs | Genuinely separate `apply` lifecycles — a platform team's network changes do not force an app team's `plan` to run | Reads a snapshot, not live state — proven above, `app` only sees what `network`'s last `apply` wrote; it can drift out of sync until re-planned |
+| `moved` across a module boundary | Refactors a resource into (or out of) a module without destroy/recreate — proven above: `0 to add, 0 to change, 0 to destroy` | Must be written and committed in the exact same change as the refactor, or the window between them plans as a real destroy/recreate |
+
+## Common Misconceptions
+
+- **"`terraform_remote_state` gives you a live connection to the other configuration's current state."** Proven above: it reads whatever was last written to that state object — if `network` changes and re-applies after `app` has already planned, `app`'s next `plan` (not the one already run) is what picks up the new value.
+- **"You need Terragrunt to compose separate Terraform configurations together."** Proven above: `terraform_remote_state` is a plain Terraform `data` source, no Terragrunt required — it predates Terragrunt's own `dependency` block and still appears constantly in codebases that do not use Terragrunt at all.
+- **"Moving a resource into a module is inherently disruptive — you have to destroy and recreate it."** Proven above with a real `local_file` example: with a `moved` block spanning the module boundary, the exact same refactor plans as `0 to add, 0 to change, 0 to destroy`.
+- **"A Registry module's `version` constraint guarantees the module's arguments never change between minor versions."** Not proven or claimed here — `~>` still allows patch/minor updates within the constraint (covered in depth in `module-versioning-and-registries.mdx`, including a real required-argument change in `terraform-google-modules/network/google` v18), so pinning a version narrows drift but does not eliminate it.
+
+## Reading AI-generated code
+
+When reviewing generated module composition or cross-configuration wiring, check for:
+
+- A `terraform_remote_state` data source assumed to always reflect the *current* state of the other configuration — proven above, it only reflects that configuration's last `apply`, not a live read.
+- A resource moved into a module in generated code with no accompanying `moved` block — proven above, this reads as destroy-then-create without one, exactly the same risk covered for same-configuration refactors in `state-management/drift-detection-and-import.mdx`.
+- Two Terraform configurations that both directly modify the same real resource through different paths (one via a `module`, one via `terraform_remote_state` plus a resource block) instead of one owning it and the other only reading its outputs.
+- A Registry module source pinned with no `version` constraint at all, which `module-versioning-and-registries.mdx` covers as a real, provable risk.
+
+<SpotTheBug code={`# app/main.tf — refactored so the instance now launches from a module,
+# migrated from a bare resource block in the same commit
+module "compute_instance" {
+  source     = "./modules/compute-instance"
+  network_id = data.terraform_remote_state.network.outputs.network_id
+}`}>
+Proven above with a real plan (`local_file.config` -> `module.config.local_file.this`): pulling a resource into a module with no accompanying `moved { from = ... to = ... }` block does not read as a refactor to Terraform at all — the resource that used to be `google_compute_instance.web` at the root disappears, and `module.compute_instance.google_compute_instance.this` appears as brand new, which plans as **delete the running Compute Engine instance, create a new one**. For something reading traffic through that instance, that is real downtime and a new instance ID, for a change that was, in the author's intent, purely organizational. The fix is a `moved` block in the same commit as the refactor — proven above to produce `Plan: 0 to add, 0 to change, 0 to destroy` with a `has moved to` note spanning the module boundary instead.
+</SpotTheBug>
+
 <Callout title="The one-line takeaway">
-The **`source`** argument on a `module` block points at where its code lives — a local path for modules still tied to one repository, the public **Terraform Registry** for well-maintained community modules resolved by `namespace/name/provider`, or a **Git URL** (optionally pinned with `?ref=`) for private or in-house modules. Real infrastructure is composed from several small, focused modules wired together by passing one module's `output` as the next module's input `variable`, and Terraform resolves the dependency between them automatically. Reaching for a widely-used Registry module like `terraform-google-modules/network/google` is usually a better starting point than writing common infrastructure from scratch, as long as you still read what it creates before trusting it in production.
+The **`source`** argument on a `module` block points at where its code lives — a local path for modules still tied to one repository, the public **Terraform Registry** for well-maintained community modules resolved by `namespace/name/provider`, or a **Git URL** (optionally pinned with `?ref=`) for private or in-house modules. Real infrastructure is composed from several small, focused modules wired together by passing one module's `output` as the next module's input `variable`, and Terraform resolves the dependency between them automatically. Composition also works **across separate configurations**: `terraform_remote_state` (proven above with a real cross-state read) is the plain-Terraform way to bridge them, no Terragrunt required, though it reads a snapshot rather than live state. When a resource moves into (or out of) a module during a refactor, a `moved` block spanning the boundary (proven above: `0 to add, 0 to change, 0 to destroy`) avoids a real destroy-and-recreate. Reaching for a widely-used Registry module like `terraform-google-modules/network/google` is usually a better starting point than writing common infrastructure from scratch, as long as you still read what it creates before trusting it in production.
 </Callout>
 
 export const quizModuleComposition = [
@@ -156,6 +291,28 @@ export const quizModuleComposition = [
       'It reads the network ID from a local state file written by the vpc module',
     ],
     answer: 1,
+  },
+  {
+    q: '```text\n$ cd network && terraform apply -auto-approve\nOutputs:\n\nnetwork_id = "projects/my-project/global/networks/app-network"\n\n$ cd ../app && terraform plan\n      + content = <<-EOT\n            network_id=projects/my-project/global/networks/app-network\n        EOT\n```\nWhat does this real output prove about how terraform_remote_state reads another configuration state?',
+    options: [
+      'It maintains a live network connection to the other configuration and always reflects its current values in real time',
+      'It reads whatever that configuration last wrote to its state object — here, exactly the value network\'s own apply produced, with no direct source-code dependency between the two configurations',
+      'It requires Terragrunt to function at all',
+      'It only works when both configurations share the same backend type',
+    ],
+    answer: 1,
+    explain: 'Proven above: app\'s plan picked up the exact network_id string that network\'s separate apply wrote to its own state file — a snapshot read, not a live connection, and no Terragrunt involved.',
+  },
+  {
+    q: '```text\n$ terraform plan\nlocal_file.config: Refreshing state...\n  # local_file.config has moved to module.config.local_file.this\n    resource "local_file" "this" {\n        id = "5d54098470458257525a27f6f0b6de89e278569d"\n        # (10 unchanged attributes hidden)\n    }\nPlan: 0 to add, 0 to change, 0 to destroy.\n```\nWhat real HCL, spanning a module boundary, produced this output when a resource was pulled into a module?',
+    options: [
+      'A removed block with destroy = false',
+      'A moved block with from = local_file.config and to = module.config.local_file.this',
+      'Renaming the resource with no other change',
+      'An import block pointing at the same id',
+    ],
+    answer: 1,
+    explain: 'Proven above: the moved block spanning the module boundary produces the "has moved to" plan line with zero add/change/destroy — without it, pulling a resource into a module plans as destroy-then-create.',
   },
   {
     q: 'What does the ref query parameter do on a Git module source',
