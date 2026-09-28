@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## The idea in one sentence
 
@@ -62,8 +63,97 @@ export const terragruntGapDiagram = `flowchart TD
   gap --> terragrunt["Terragrunt: generates backend, provider, inputs, manages unit ordering"]
   terragrunt -->|shells out to| terraformBinary["Real terraform / tofu binary"]`;
 
+## Proof: `terraform_remote_state` versus `dependency`, both run for real
+
+Plain Terraform already has a way to read another state's outputs, with no Terragrunt at all: `terraform_remote_state`. Real two-unit proof, `network` applied first with a local backend:
+
+```hcl
+# network/main.tf
+resource "local_file" "network" {
+  filename = "${path.module}/network-id.txt"
+  content  = "network-0123456789abcdef0\n"
+}
+output "network_id" {
+  value = "network-0123456789abcdef0"
+}
+```
+
+```hcl
+# gke/main.tf
+data "terraform_remote_state" "network" {
+  backend = "local"
+  config = {
+    path = "../network/terraform.tfstate"
+  }
+}
+resource "local_file" "gke" {
+  filename = "${path.module}/gke-network-ref.txt"
+  content  = "launched into ${data.terraform_remote_state.network.outputs.network_id}\n"
+}
+```
+
+Real `apply` in `gke/`, after `network/` has already applied:
+
+```text
+$ terraform apply -auto-approve
+Apply complete! Resources: 1 added, 0 changed, 0 destroyed.
+$ cat gke-network-ref.txt
+launched into network-0123456789abcdef0
+```
+
+This genuinely works with zero Terragrunt involved. The real difference from Terragrunt's `dependency` block (terragrunt-fundamentals module) shows up the moment the upstream state does not exist yet — same `gke/main.tf`, `network/terraform.tfstate` deleted first:
+
+```text
+$ terraform plan
+Error: Unable to find remote state
+No stored state was found for the given workspace in the given backend.
+```
+
+Compare that against `dependency` + `mock_outputs`: the exact same "state does not exist yet" situation lets `plan` succeed there via a placeholder, with `apply` refusing separately and explicitly. `terraform_remote_state` has no equivalent — it hard-fails immediately, every time.
+
+## Keeping this honest: what plain Terraform can already do
+
+`-backend-config` and `-var-file` genuinely reduce duplication, real proof, one `main.tf` reused for two environments:
+
+```hcl
+# env/main.tf — the only .tf file, used for every environment
+terraform {
+  backend "local" {}
+}
+variable "environment" { type = string }
+variable "instance_count" { type = number }
+resource "local_file" "app" {
+  filename = "${path.module}/app-${var.environment}.txt"
+  content  = "environment=${var.environment} count=${var.instance_count}\n"
+}
+```
+
+```text
+$ terraform init -backend-config=../dev.backend.tfvars
+$ terraform apply -var-file=../dev.tfvars -auto-approve
+Apply complete! Resources: 1 added, 0 changed, 0 destroyed.
+$ cat app-dev.txt
+environment=dev count=1
+```
+
+What this genuinely does **not** give you: `dependency`-style cross-unit output reading with `mock_outputs` (`terraform_remote_state` is the closest plain-Terraform equivalent and it has no mock fallback, proven above), automatic multi-unit ordering (`run --all`), and a single place to change the *shape* of the backend/provider generation logic itself.
+
+<SpotTheBug code={`# gke/main.tf — applied as part of a brand-new environment's very first apply, before network exists
+data "terraform_remote_state" "network" {
+  backend = "local"
+  config = {
+    path = "../network/terraform.tfstate"
+  }
+}
+
+resource "google_container_cluster" "app" {
+  network = data.terraform_remote_state.network.outputs.network_self_link
+}`}>
+Proven above, \`terraform_remote_state\` has no mock-output mechanism at all — unlike a Terragrunt \`dependency\` block, there is no way to let this \`plan\` succeed with a placeholder while signaling \`apply\` should still refuse. The real, unavoidable result here is \`Error: Unable to find remote state\`, and the only fix within plain Terraform is manually sequencing applies.
+</SpotTheBug>
+
 <Callout title="The one-line takeaway">
-Terraform workspaces solve **DRY** reuse but leave **isolation** weak, since every workspace still shares one backend and one GCP project; directory-per-environment solves isolation with real, separate GCP projects but reintroduces duplicated backend, provider, and module-source boilerplate across every environment directory — plain Terraform has no single primitive that gives you both at once. **Terragrunt** closes that gap as a thin wrapper and orchestrator around the real `terraform`/`tofu` binary: it introduces no new resource syntax and your `.tf` module code is unchanged, but it generates backend and provider configuration from one central definition, supplies each environment's inputs to a shared module, and understands dependency ordering across independently-applied units — a layer Terraform's own single-configuration dependency graph does not cover on its own.
+Terraform workspaces solve **DRY** reuse but leave **isolation** weak, since every workspace still shares one backend and one GCP project; directory-per-environment solves isolation with real, separate GCP projects but reintroduces duplicated backend, provider, and module-source boilerplate across every environment directory — plain Terraform has no single primitive that gives you both at once. Its value is narrower than "plain Terraform can't do this at all" though — proven above, `terraform_remote_state` genuinely reads cross-unit state and `-backend-config`/`-var-file` genuinely parameterize per environment. **Terragrunt** closes that gap as a thin wrapper and orchestrator around the real `terraform`/`tofu` binary: it introduces no new resource syntax and your `.tf` module code is unchanged, but it generates backend and provider configuration from one central definition, supplies each environment's inputs to a shared module, and adds graceful **mock-output degradation** plus automatic ordering across independently-applied units — proven above with real, opposite outcomes (`terraform_remote_state` hard-fails; `dependency`'s `mock_outputs` succeeds) — a layer Terraform's own single-configuration dependency graph does not cover on its own.
 </Callout>
 
 export const quizWhyTerragrunt = [
@@ -106,6 +196,28 @@ export const quizWhyTerragrunt = [
       'Supply per-environment input variables to a shared module',
     ],
     answer: 2,
+  },
+  {
+    q: 'A plain Terraform gke/main.tf uses data "terraform_remote_state" "network" to read network outputs, on a brand-new environment where network has never been applied. What happens, proven above?',
+    options: [
+      'It falls back to a mock value automatically, the same way a Terragrunt dependency block does',
+      'terraform plan hard-fails immediately with "Error: Unable to find remote state" — there is no mock-output equivalent for terraform_remote_state',
+      'It succeeds silently with all outputs set to null',
+      'It waits and retries until network state appears',
+    ],
+    answer: 1,
+    explain: 'Proven above with a real run: deleting network/terraform.tfstate and re-running plan against gke produced a real "Unable to find remote state" error — unlike dependency + mock_outputs, there is no graceful fallback.',
+  },
+  {
+    q: 'Is it accurate to say plain Terraform "cannot" vary its configuration per environment without Terragrunt?',
+    options: [
+      'Yes, plain Terraform has no mechanism at all for per-environment configuration',
+      'No — proven above, -backend-config and -var-file let one main.tf serve multiple environments with a real init/apply, parameterizing both backend and inputs from the command line with zero Terragrunt involved',
+      'Yes, because -backend-config only works with the gcs backend',
+      'No, but only because Terragrunt is required to generate the tfvars files themselves',
+    ],
+    answer: 1,
+    explain: 'Proven above with a real terraform init -backend-config=... and terraform apply -var-file=... against one shared main.tf, producing a correctly parameterized dev deployment with no per-environment directory at all.',
   },
 ];
 

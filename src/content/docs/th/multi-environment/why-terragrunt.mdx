@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## ไอเดียในหนึ่งประโยค
 
@@ -54,7 +55,7 @@ terraform apply
 
 module ถัดไปเริ่มต่อจากตรงนี้เป๊ะ ด้วย building block จริงของ Terragrunt คือ `root.hcl`, `remote_state`, `generate`, และ `terragrunt.hcl` ของแต่ละ unit ที่เปลี่ยนตำแหน่งนี้ให้กลายเป็น setup ที่ใช้งานได้จริง
 
-<Mermaid title="Workspaces (DRY, weak isolation) and directory-per-environment (isolated, duplicated) both leave a gap that Terragrunt closes by wrapping real Terraform" code={terragruntGapDiagram} />
+<Mermaid title="Workspace (DRY, isolation อ่อน) และ directory-per-environment (isolate ดี แต่ duplicate) ต่างทิ้งช่องว่างไว้ Terragrunt ปิดช่องว่างนั้นด้วยการห่อ Terraform ตัวจริง" code={terragruntGapDiagram} />
 
 export const terragruntGapDiagram = `flowchart TD
   workspaces["Terraform workspaces: DRY, weak isolation"] --> gap["The gap: isolation AND zero duplication together"]
@@ -62,8 +63,97 @@ export const terragruntGapDiagram = `flowchart TD
   gap --> terragrunt["Terragrunt: generates backend, provider, inputs, manages unit ordering"]
   terragrunt -->|shells out to| terraformBinary["Real terraform / tofu binary"]`;
 
+## พิสูจน์: `terraform_remote_state` เทียบ `dependency` ทั้งคู่รันจริง
+
+Terraform เปล่า ๆ มีวิธีอ่าน output ของ state อื่นอยู่แล้ว ไม่ต้องมี Terragrunt เลย: `terraform_remote_state` พิสูจน์จริง two-unit `network` apply ก่อนด้วย local backend:
+
+```hcl
+# network/main.tf
+resource "local_file" "network" {
+  filename = "${path.module}/network-id.txt"
+  content  = "network-0123456789abcdef0\n"
+}
+output "network_id" {
+  value = "network-0123456789abcdef0"
+}
+```
+
+```hcl
+# gke/main.tf
+data "terraform_remote_state" "network" {
+  backend = "local"
+  config = {
+    path = "../network/terraform.tfstate"
+  }
+}
+resource "local_file" "gke" {
+  filename = "${path.module}/gke-network-ref.txt"
+  content  = "launched into ${data.terraform_remote_state.network.outputs.network_id}\n"
+}
+```
+
+`apply` จริงใน `gke/` หลังจาก `network/` apply ไปแล้ว:
+
+```text
+$ terraform apply -auto-approve
+Apply complete! Resources: 1 added, 0 changed, 0 destroyed.
+$ cat gke-network-ref.txt
+launched into network-0123456789abcdef0
+```
+
+นี่ทำงานได้จริงโดยไม่มี Terragrunt เกี่ยวข้องเลย ความต่างจริง ๆ จาก `dependency` block ของ Terragrunt (module terragrunt-fundamentals) โผล่มาทันทีที่ upstream state ยังไม่มีอยู่ — `gke/main.tf` เดิม ลบ `network/terraform.tfstate` ทิ้งก่อน:
+
+```text
+$ terraform plan
+Error: Unable to find remote state
+No stored state was found for the given workspace in the given backend.
+```
+
+เทียบกับ `dependency` + `mock_outputs`: สถานการณ์ "state ยังไม่มีอยู่" เดียวกันเป๊ะ แต่ที่นั่น `plan` สำเร็จได้ผ่าน placeholder ส่วน `apply` ปฏิเสธแยกต่างหากอย่างชัดเจน `terraform_remote_state` ไม่มีอะไรเทียบเท่าเลย — มัน hard-fail ทันที ทุกครั้ง
+
+## รักษาความตรงไปตรงมา: Terraform เปล่า ๆ ทำอะไรได้อยู่แล้วบ้าง
+
+`-backend-config` กับ `-var-file` ลด duplication ได้จริง พิสูจน์จริง `main.tf` ไฟล์เดียวใช้ซ้ำได้สอง environment:
+
+```hcl
+# env/main.tf — the only .tf file, used for every environment
+terraform {
+  backend "local" {}
+}
+variable "environment" { type = string }
+variable "instance_count" { type = number }
+resource "local_file" "app" {
+  filename = "${path.module}/app-${var.environment}.txt"
+  content  = "environment=${var.environment} count=${var.instance_count}\n"
+}
+```
+
+```text
+$ terraform init -backend-config=../dev.backend.tfvars
+$ terraform apply -var-file=../dev.tfvars -auto-approve
+Apply complete! Resources: 1 added, 0 changed, 0 destroyed.
+$ cat app-dev.txt
+environment=dev count=1
+```
+
+สิ่งที่วิธีนี้ *ไม่ได้* ให้จริง ๆ คือ: การอ่าน output ข้าม unit แบบ `dependency` พร้อม `mock_outputs` (`terraform_remote_state` คือสิ่งที่ใกล้เคียงที่สุดของ Terraform เปล่า ๆ และมันไม่มี mock fallback เลย พิสูจน์ข้างบน), การจัดลำดับหลาย unit อัตโนมัติ (`run --all`), และจุดเดียวสำหรับเปลี่ยน *รูปร่าง* ของ logic การ generate backend/provider เอง
+
+<SpotTheBug code={`# gke/main.tf — applied as part of a brand-new environment's very first apply, before network exists
+data "terraform_remote_state" "network" {
+  backend = "local"
+  config = {
+    path = "../network/terraform.tfstate"
+  }
+}
+
+resource "google_container_cluster" "app" {
+  network = data.terraform_remote_state.network.outputs.network_self_link
+}`}>
+พิสูจน์ข้างบน \`terraform_remote_state\` ไม่มีกลไก mock-output เลย — ต่างจาก Terragrunt \`dependency\` block ไม่มีทางให้ \`plan\` นี้สำเร็จด้วย placeholder พร้อมส่งสัญญาณว่า \`apply\` ควรยังปฏิเสธอยู่ ผลลัพธ์จริงที่เลี่ยงไม่ได้ตรงนี้คือ \`Error: Unable to find remote state\` และทางแก้เดียวภายใน Terraform เปล่า ๆ คือเรียง apply ด้วยมือ
+</SpotTheBug>
+
 <Callout title="สรุปหนึ่งบรรทัด">
-Terraform workspace แก้ **DRY** reuse ได้ดีแต่ **isolation** ยังอ่อน เพราะทุก workspace ยังใช้ backend เดียวและ GCP project เดียวร่วมกัน directory-per-environment แก้ isolation ได้ด้วย GCP project ที่แยกกันจริง แต่ดึง boilerplate ของ backend, provider, และ module-source ที่ซ้ำซ้อนกลับมาในทุก environment directory Terraform เปล่า ๆ ไม่มี primitive ตัวเดียวที่ให้ทั้งสองอย่างพร้อมกัน **Terragrunt** ปิดช่องว่างนั้นในฐานะ thin wrapper และ orchestrator รอบ binary `terraform`/`tofu` ตัวจริง ไม่เพิ่ม resource syntax ใหม่และโค้ด module `.tf` ของคุณไม่เปลี่ยน แต่ generate backend กับ provider configuration จากคำนิยามศูนย์กลางเดียว ส่ง input ของแต่ละ environment เข้า shared module และเข้าใจลำดับ dependency ข้าม unit ที่ apply แยกกันเป็นอิสระ ซึ่งอยู่นอก layer ที่ dependency graph ของ Terraform configuration เดียวเองไม่ครอบคลุม
+Terraform workspace แก้ **DRY** reuse ได้ดีแต่ **isolation** ยังอ่อน เพราะทุก workspace ยังใช้ backend เดียวและ GCP project เดียวร่วมกัน directory-per-environment แก้ isolation ได้ด้วย GCP project ที่แยกกันจริง แต่ดึง boilerplate ของ backend, provider, และ module-source ที่ซ้ำซ้อนกลับมาในทุก environment directory Terraform เปล่า ๆ ไม่มี primitive ตัวเดียวที่ให้ทั้งสองอย่างพร้อมกัน คุณค่าจริงของมันแคบกว่า "Terraform เปล่า ๆ ทำสิ่งนี้ไม่ได้เลย" — พิสูจน์ข้างบน `terraform_remote_state` อ่าน state ข้าม unit ได้จริง และ `-backend-config`/`-var-file` parameterize ต่อ environment ได้จริง **Terragrunt** ปิดช่องว่างนั้นในฐานะ thin wrapper และ orchestrator รอบ binary `terraform`/`tofu` ตัวจริง ไม่เพิ่ม resource syntax ใหม่และโค้ด module `.tf` ของคุณไม่เปลี่ยน แต่ generate backend กับ provider configuration จากคำนิยามศูนย์กลางเดียว ส่ง input ของแต่ละ environment เข้า shared module และเพิ่ม **graceful mock-output degradation** บวกการจัดลำดับอัตโนมัติข้าม unit ที่ apply แยกกันเป็นอิสระ — พิสูจน์ข้างบนด้วยผลลัพธ์จริงที่ตรงข้ามกัน (`terraform_remote_state` hard-fail ส่วน `mock_outputs` ของ `dependency` สำเร็จได้) ซึ่งอยู่นอก layer ที่ dependency graph ของ Terraform configuration เดียวเองไม่ครอบคลุม
 </Callout>
 
 export const quizWhyTerragrunt = [
@@ -106,6 +196,28 @@ export const quizWhyTerragrunt = [
       'ส่ง input variable ต่อ environment เข้าไปใน shared module',
     ],
     answer: 2,
+  },
+  {
+    q: 'plain Terraform gke/main.tf ใช้ data "terraform_remote_state" "network" อ่าน output ของ network บน environment ใหม่เอี่ยมที่ network ไม่เคยถูก apply เลย เกิดอะไรขึ้น พิสูจน์ข้างบน',
+    options: [
+      'fallback ไปใช้ค่า mock อัตโนมัติ เหมือน Terragrunt dependency block',
+      'terraform plan hard-fail ทันทีด้วย "Error: Unable to find remote state" — ไม่มีอะไรเทียบเท่า mock-output สำหรับ terraform_remote_state เลย',
+      'สำเร็จเงียบ ๆ โดย output ทุกตัวเป็น null',
+      'รอและ retry จนกว่า network state จะปรากฏ',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ข้างบนด้วย run จริง: ลบ network/terraform.tfstate แล้วรัน plan ของ gke ใหม่ ได้ error จริง "Unable to find remote state" — ต่างจาก dependency + mock_outputs ไม่มี fallback แบบนุ่มนวลเลย',
+  },
+  {
+    q: 'พูดว่า Terraform เปล่า ๆ "ทำไม่ได้" เรื่องปรับ configuration ต่อ environment โดยไม่มี Terragrunt ถูกต้องไหม',
+    options: [
+      'ถูก Terraform เปล่า ๆ ไม่มีกลไกอะไรเลยสำหรับ configuration ต่อ environment',
+      'ไม่ถูก — พิสูจน์ข้างบน -backend-config กับ -var-file ทำให้ main.tf ไฟล์เดียวรับใช้หลาย environment ได้ด้วย init/apply จริง parameterize ทั้ง backend และ input จาก command line โดยไม่มี Terragrunt เกี่ยวข้องเลย',
+      'ถูก เพราะ -backend-config ใช้ได้แค่กับ gcs backend เท่านั้น',
+      'ไม่ถูก แต่เพราะ Terragrunt ต้องเป็นตัว generate ไฟล์ tfvars เหล่านั้นเองเท่านั้น',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ข้างบนด้วย terraform init -backend-config=... และ terraform apply -var-file=... จริง กับ main.tf ที่ share กันไฟล์เดียว ให้ deployment dev ที่ parameterize ถูกต้องโดยไม่มี directory ต่อ environment เลย',
   },
 ];
 
