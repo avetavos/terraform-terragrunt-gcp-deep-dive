@@ -64,7 +64,7 @@ $ wc -c schema.json
 
 ## provider crash จริง ทำให้เกิดขึ้นจริง
 
-`TF_LOG_PROVIDER` (document ไว้เป็น log-level override แยกเฉพาะสำหรับ output ของ provider subprocess แยกจาก `TF_LOG` ของ Terraform Core เอง) มีไว้เพราะ logging ภายในของ provider เองเป็น stream ที่สองแยกจาก Core ตอน provider binary รันไม่ได้จริง ๆ go-plugin เองจะรายงานเอง — ทำให้เกิดขึ้นจริงที่นี่ด้วยการ truncate provider binary จริง (`local`, จาก [graph demo](/terraform-google/th/terraform-internals/the-graph-and-the-walk/) ของคอร์สนี้เอง) แล้วชี้ `dev_overrides` ไปที่ copy ที่เสียแล้ว:
+`TF_LOG_PROVIDER` (document ไว้เป็น log-level override แยกเฉพาะสำหรับ output ของ provider subprocess แยกจาก `TF_LOG` ของ Terraform Core เอง) มีไว้เพราะ logging ภายในของ provider เองเป็น stream ที่สองแยกจาก Core ตอน provider binary รันไม่ได้จริง ๆ go-plugin เองจะรายงานเอง — ทำให้เกิดขึ้นจริงที่นี่ด้วยการ truncate provider binary จริง (`local`, จาก [graph demo](/terraform-gcp/th/terraform-internals/the-graph-and-the-walk/) ของคอร์สนี้เอง) แล้วชี้ `dev_overrides` ไปที่ copy ที่เสียแล้ว:
 
 ```text
 $ terraform providers schema -json

@@ -64,7 +64,7 @@ $ wc -c schema.json
 
 ## A real provider crash, induced
 
-`TF_LOG_PROVIDER` (documented as a separate log-level override specifically for provider subprocess output, independent of `TF_LOG` for Terraform Core itself) exists because a provider's own internal logging is a second, distinct stream from Core's. When a provider binary genuinely cannot start, go-plugin itself reports it — reproduced here by truncating a real provider binary (`local`, in this course's own [graph demo](/terraform-google/en/terraform-internals/the-graph-and-the-walk/)) and pointing `dev_overrides` at the corrupted copy:
+`TF_LOG_PROVIDER` (documented as a separate log-level override specifically for provider subprocess output, independent of `TF_LOG` for Terraform Core itself) exists because a provider's own internal logging is a second, distinct stream from Core's. When a provider binary genuinely cannot start, go-plugin itself reports it — reproduced here by truncating a real provider binary (`local`, in this course's own [graph demo](/terraform-gcp/en/terraform-internals/the-graph-and-the-walk/)) and pointing `dev_overrides` at the corrupted copy:
 
 ```text
 $ terraform providers schema -json
