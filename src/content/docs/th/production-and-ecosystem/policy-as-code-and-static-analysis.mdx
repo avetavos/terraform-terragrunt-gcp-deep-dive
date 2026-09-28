@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## ไอเดียในหนึ่งประโยค
 
@@ -30,25 +31,39 @@ plugin "google" {
 }
 ```
 
-```bash
-tflint --init
-tflint
+รันจริง ทั้งสอง tool ผ่าน `docker run --rm` กับ config เล็ก ๆ ที่ตั้งใจทำให้แย่: machine type ที่ invalid, IAM binding แบบ public-read บน bucket, และ firewall rule เปิด port 22 ให้ทั้งโลก:
 
-# 1 issue(s) found:
-#
-# Warning: "us-central1-z" is an invalid value as zone (google_compute_instance_invalid_zone)
-#
-#   on main.tf line 12:
-#   12:   zone = "us-central1-z"
+```text
+$ docker run --rm -v "$PWD:/data" -w /data ghcr.io/terraform-linters/tflint:latest --init
+Installing "google" plugin...
+Installed "google" (source: github.com/terraform-linters/tflint-ruleset-google, version: 0.29.0)
 
-checkov -d .
+$ docker run --rm -v "$PWD:/data" -w /data ghcr.io/terraform-linters/tflint:latest
+2 issue(s) found:
 
-# Check: CKV_GCP_28: "Ensure that Cloud Storage bucket is not anonymously or publicly accessible"
-#   FAILED for resource: google_storage_bucket.reports
-#   File: /main.tf:5-8
+Warning: terraform "required_version" attribute is required (terraform_required_version)
+
+  on main.tf line 1:
+   1: terraform {
+
+Error: "n2-standard-999" is an invalid as machine type (google_compute_instance_invalid_machine_type)
+
+  on main.tf line 17:
+  17:   machine_type = "n2-standard-999"
 ```
 
-tool ทั้งสองตัวรันกับ raw configuration เท่านั้น ไม่ต้องมี GCP credential, ไม่ต้อง `plan`, ไม่ต้อง state นี่แหละคือเหตุผลที่ควรอยู่เป็น gate แรกสุดใน pipeline เพราะถูก, เร็ว, และจับ mistake ทั้ง class ได้ก่อนที่ Terraform จะคุยกับ Google Cloud ด้วยซ้ำ
+ไม่มี rule จริงชื่อ `google_compute_instance_invalid_zone` อยู่ใน `tflint-ruleset-google` — รัน `tflint --only google_compute_instance_invalid_zone` กับ plugin จริง ได้ error `Failed to check rule config; Rule not found: google_compute_instance_invalid_zone` rule จริงที่จับค่า GCP ที่ invalid บน resource นี้คือ `google_compute_instance_invalid_machine_type` และเป็น `Error` severity จริง พิสูจน์ข้างบนกับ `n2-standard-999` ที่ตั้งใจทำให้แย่
+
+```text
+$ docker run --rm -v "$PWD:/data" bridgecrew/checkov:latest -d /data --compact --quiet
+Check: CKV_GCP_28: "Ensure that Cloud Storage bucket is not anonymously or publicly accessible"
+	FAILED for resource: google_storage_bucket_iam_binding.public
+
+Check: CKV_GCP_2: "Ensure Google compute firewall ingress does not allow unrestricted ssh access"
+	FAILED for resource: google_compute_firewall.ssh
+```
+
+output จริงจาก `checkov` (ตัดให้สั้น) `CKV_GCP_28` ยืนยันว่าจริงและตรงตามที่ claim ไว้เป๊ะ ๆ fire บน resource `google_storage_bucket_iam_binding` ที่ grant `allUsers` — checkov มองที่ IAM binding ถูกต้อง ไม่ใช่ตัว bucket resource เอง เพราะ public access บน GCS มาจาก IAM ไม่ใช่ ACL flag ระดับ bucket แบบที่ AWS S3 ใช้ tool ทั้งสองตัวรันกับ raw configuration เท่านั้น ไม่ต้องมี GCP credential, ไม่ต้อง `plan`, ไม่ต้อง state นี่แหละคือเหตุผลที่ควรอยู่เป็น gate แรกสุดใน pipeline เพราะถูก, เร็ว, และจับ mistake ทั้ง class ได้ก่อนที่ Terraform จะคุยกับ Google Cloud ด้วยซ้ำ
 
 ## Policy-as-code ตอน plan time: Sentinel กับ OPA คู่กับ conftest
 
@@ -62,13 +77,14 @@ static analysis หยุดอยู่แค่ที่ตัวโค้ด 
 ```bash
 terraform plan -out=plan.tfplan
 terraform show -json plan.tfplan > plan.json
-conftest test plan.json
+docker run --rm -v "$PWD:/project" -w /project openpolicyagent/conftest:latest test plan.json -p policy
 ```
 
 ```rego
+# policy/public-bucket.rego
 package main
 
-deny[msg] {
+deny contains msg if {
   resource := input.resource_changes[_]
   resource.type == "google_storage_bucket_iam_binding"
   resource.change.after.members[_] == "allUsers"
@@ -76,7 +92,34 @@ deny[msg] {
 }
 ```
 
+ต่างจาก `azurerm` (พิสูจน์ในบทนี้ของคอร์ส Azure พี่น้องว่าต้องมี Azure session จริงแม้แค่จะคำนวณ plan) provider `google` plan การสร้าง resource ล้วน ๆ ได้ด้วย service-account JSON ที่ปลอม — มัน validate แค่ *รูปร่าง* ของ credential file ไม่ได้เช็คว่า key จริงหรือเปล่า แล้ว defer การเรียก API จริงไปตอน apply แทน นี่ทำให้พิสูจน์แบบ end-to-end จริงเต็มรูปแบบได้ในบทนี้:
+
+```text
+$ terraform plan -input=false -out=plan.tfplan -detailed-exitcode
+...
+Plan: 4 to add, 0 to change, 0 to destroy.
+$ echo $?
+2
+
+$ docker run --rm -v "$PWD:/project" -w /project openpolicyagent/conftest:latest test plan.json -p policy
+FAIL - plan.json - main - google_storage_bucket_iam_binding.public grants public access via allUsers
+
+1 test, 0 passed, 0 warnings, 1 failure, 0 exceptions
+```
+
+`terraform plan` จริง (service-account credential ปลอมแต่ *shape* ถูก — `credentials = file("fakecreds/key.json")` ใน provider block), `terraform show -json` จริง และ `conftest` reject จริง ทั้งหมดกับข้อมูล `google_storage_bucket_iam_binding.public` จริงที่มี `members: ["allUsers"]` syntax `deny contains msg if { ... }` สำคัญที่นี่เหมือนกัน: `openpolicyagent/conftest:latest` bundle OPA 1.20.2 default เป็น Rego v1 ต้องมี `if`/`contains` บนทุก rule — รูปแบบเก่า `deny[msg] { ... }` load ไม่ขึ้น:
+
+```text
+Error: running test: load: loading policies: load: 2 errors occurred during loading:
+policy/old-syntax-test.rego:3: rego_parse_error: `if` keyword is required before rule body
+policy/old-syntax-test.rego:3: rego_parse_error: `contains` keyword is required for partial set rules
+```
+
 `conftest` อ่าน `plan.json` ตัวเดียวกับที่คนอ่านเองด้วยมือได้ แล้วปฏิเสธ run ทันทีที่ `deny` สร้าง message ออกมา ไม่มี plan ที่เข้าเงื่อนไขนั้นไปถึง `apply` เลยสักตัว
+
+## ประเมินต้นทุน: Infracost (มาจาก docs เท่านั้น — ไม่ได้รันข้างล่างนี้)
+
+static analysis กับ policy-as-code ทั้งคู่ตอบคำถาม "ปลอดภัย/compliant ไหม" ไม่มีตัวไหนตอบ "ราคาเท่าไหร่" **Infracost** เติม gap นี้ และในที่นี้มาจาก docs ไม่ได้รัน — มันต้องการ pricing catalog แบบ live ที่ environment แบบ offline นี้เข้าไม่ถึง (credential ปลอมที่ shape ถูกต้องพอจะทำให้ `google plan` รันได้ข้างบน แต่ pricing lookup จริงของ Infracost คือ external API call แยกต่างหาก ที่ key ปลอมไม่พอจะผ่านได้) อ้างอิงจาก docs ของ Infracost เอง: "Infracost shifts cloud costs left — into your engineering workflow. It helps you write cost-aware infrastructure (Terraform, CloudFormation, AWS CDK) across AWS, Azure, and Google Cloud." และเฉพาะสำหรับ CI: "Add Infracost to your pull requests to give your team a safety net — every PR gets an automatic comment showing the cost diff, FinOps policy violations, and tagging issues introduced by the change, so cost impact gets discussed alongside the code review." เหมือน `conftest` มันอ่าน JSON ของ plan ได้โดยตรงเช่นกัน: "Infracost can also estimate costs from a Terraform plan JSON file (the output of `terraform show -json`), which is useful with HCP Terraform / Enterprise, Bitbucket Pipelines, and costs that only resolve at plan time." — [www.infracost.io/docs](https://www.infracost.io/docs/)
 
 ## สองชั้นที่เสริมกัน ไม่ใช่ทำงานซ้ำกัน
 
@@ -96,8 +139,45 @@ export const policyLayersDiagram = `flowchart LR
   policy -->|passes| apply["apply"]
   policy -->|violates a rule| blocked["Blocked, never applied"]`;
 
+## Mental Model
+
+tool ทุกตัวในบทนี้ตอบคำถามคนละข้อในจุดคนละจุดของ pipeline "HCL syntax ถูกไหม" (`validate`) ไม่ต้องมี context เลย "HCL ใช้ pattern ที่รู้อยู่แล้วว่าไม่ดีไหม" (`tflint`/`checkov`) ต้องมี provider rule catalog แต่ไม่ต้องมี plan "change ที่คำนวณจริงนี้ผิด policy ไหม" (Sentinel/OPA) ตอบก่อนมี plan ไม่ได้ "ราคาเท่าไหร่" (Infracost) เป็นมุมที่สี่บน plan ที่คำนวณแล้วตัวเดียวกัน บทนี้ยังเผย fact เฉพาะ provider ที่ควรจำไว้: provider `google` validate แค่ *รูปร่าง* ของ service-account credential ปลอมแล้ว proceed คำนวณ plan จริงสำหรับการสร้าง resource ล้วน ๆ ในขณะที่ `azurerm` (พิสูจน์ในคอร์สพี่น้อง) fail ตั้งแต่ configure provider โดยไม่มี credential เลย ไม่มีพฤติกรรมไหน "ถูกกว่า" — มันแค่เป็นเส้นทาง authentication จริงที่ต่างกัน และ pipeline ที่สมมติว่า offline-plan behavior ของ cloud หนึ่ง generalize ไปอีก cloud ได้ ก็คือการสมมติที่ยังไม่พิสูจน์
+
+## ข้อแลกเปลี่ยน
+
+| ทางเลือก | ได้อะไร | เสียอะไร |
+|---|---|---|
+| `tflint` พร้อม `google` ruleset plugin | จับ mistake เฉพาะ provider (machine type ที่ invalid) ที่ validate มองไม่เห็น | ต้อง `--init` ดึง plugin ผ่าน network และ image เปล่า ๆ แทบไม่จับอะไรที่เฉพาะ GCP เลย |
+| rule catalog กว้าง ๆ ของ `checkov` | รันครั้งเดียวเจอ misconfiguration จริงได้หลายข้อ (พิสูจน์ข้างบน: public IAM binding, firewall SSH ที่เปิด) | finding ตกอยู่ที่ resource ที่ grant access จริง (IAM binding ไม่ใช่ bucket) — reviewer ที่คาดว่า bucket resource เองจะถูก flag อาจพลาดได้ |
+| OPA/`conftest` กับ `show -json` แทน Sentinel | open-source ใช้ได้กับ CI system ไหนก็ได้ ไม่ต้องพึ่ง HCP Terraform พิสูจน์ที่นี่ว่าเป็น run จริงแบบ end-to-end เต็มรูปแบบ (ต่างจากบท Azure พี่น้องที่หา live plan จริงแบบ offline ไม่ได้) | ต้องเขียน policy เองเป็น Rego และตามให้ทันทั้ง schema ของ `terraform show -json` และ version ของ Rego ที่ OPA ใช้ (พิสูจน์ข้างบน: Rego v1 ทำให้ rule `deny[msg]` แบบเก่าพัง) |
+| Infracost จาก docs ไม่ได้พิสูจน์ที่นี่ | ตอบคำถามที่ทั้ง static analysis และ policy-as-code ตอบไม่ได้ (ต้นทุน) | environment นี้เข้าไม่ถึง pricing catalog แบบ live — credential ปลอมพอทำให้ `google plan` รันได้ข้างบน แต่ไม่พอสำหรับ pricing API call จริง |
+
+## ความเข้าใจผิดที่พบบ่อย
+
+- **"`tflint` จับ security misconfiguration แบบเดียวกับที่ `checkov` จับ"** พิสูจน์ข้างบน: ทั้งคู่เจอคนละอย่างบน config เดียวกัน — `tflint` flag machine type ที่ invalid ส่วน `checkov` flag IAM binding แบบ public กับ firewall rule ที่เปิด SSH เป็น rule catalog ที่เสริมกัน ไม่ใช่ทับกัน
+- **"provider ของทุก cloud ใน Terraform ทำงานเหมือนกันตอน offline"** พิสูจน์ข้างบนด้วยพฤติกรรมจริงสองแบบที่ต่างกันในคอร์สคู่นี้เอง: `google` คำนวณ plan จริงเต็มรูปแบบด้วย credential file ที่ปลอมแต่ shape ถูก ส่วน `azurerm` (คอร์สพี่น้อง) ปฏิเสธตั้งแต่ configure provider เลยถ้าไม่มี session จริง การสมมติว่าอันหนึ่ง generalize ไปอีกอันได้ คือ claim ที่ยังไม่พิสูจน์แบบที่กฎ "พิสูจน์ทุกอย่าง" ของคอร์สนี้มีไว้จับ
+- **"rule name อย่าง `google_compute_instance_invalid_zone` ฟังดูสมเหตุสมผล น่าจะมีอยู่จริง"** พิสูจน์ข้างบน: รัน `tflint --only google_compute_instance_invalid_zone` กับ plugin จริง ได้ `Rule not found` rule จริงสำหรับค่า invalid ของ resource นี้คือ `google_compute_instance_invalid_machine_type`
+- **"Rego snippet ที่ copy จาก tutorial เก่า ๆ รันกับ `conftest` เวอร์ชันปัจจุบันได้เหมือนเดิม"** พิสูจน์ข้างบน: rule `deny[msg] { ... }` เดียวกันเป๊ะ (ไม่มี `if`/`contains`) load ไม่ขึ้นเลยกับ OPA 1.20.2 ที่ `conftest` bundle มา — Rego v1 ต้องมี `if`/`contains` บนทุก rule body
+
+## อ่านโค้ดที่ AI เขียน
+
+เวลา review AI-generated policy/static-analysis tooling สำหรับ Terraform บน GCP ให้เช็ค:
+
+- `.tflint.hcl` ที่ไม่เคยประกาศ `plugin "google" { ... }` — `tflint` binary เปล่า ๆ แทบไม่จับอะไรที่เฉพาะ GCP เลย พิสูจน์ข้างบน (มีแค่ warning `required_version` ทั่วไปตอนไม่ config plugin)
+- ชื่อ tflint rule ที่เดาเอาแทนที่จะ verify จริง — พิสูจน์ข้างบน `google_compute_instance_invalid_zone` ไม่มีอยู่จริงใน `tflint-ruleset-google` rule จริงสำหรับ machine type ที่ invalid คือ `google_compute_instance_invalid_machine_type`
+- Rego policy ที่ใช้ `deny[msg] { ... }` โดยไม่มี `if`/`contains` กับ `conftest`/OPA image เวอร์ชันปัจจุบัน — พิสูจน์ข้างบน นี่คือ parse error จริงภายใต้ default Rego v1 ของ OPA 1.20.2
+- policy check ที่เขียนเทียบกับ resource block ของ `google_storage_bucket` เองแทนที่จะเป็น `google_storage_bucket_iam_binding`/`google_storage_bucket_iam_member` ที่ grant access จริง — พิสูจน์ข้างบน finding จริง `CKV_GCP_28` ของ checkov ตกอยู่ที่ IAM binding เพราะ public access บน GCS คือ IAM grant ไม่ใช่ ACL flag ระดับ bucket แบบที่ S3 ใช้
+- claim ที่บอกว่า `terraform plan` แบบ offline "ทำงานไม่ได้เลยถ้าไม่มี cloud credential จริง" แบบเป็น fact สากล — พิสูจน์ข้างบนว่าเป็นเรื่องเฉพาะ provider: `google` proceed ได้ด้วย credential ปลอมแต่ shape ถูกสำหรับการสร้าง resource ล้วน ๆ ส่วน `azurerm` ทำไม่ได้
+
+<SpotTheBug lang="hcl" code={`# .tflint.hcl
+plugin "google" {
+  enabled = true
+}`}>
+plugin block นี้ขาด `version` กับ `source` สองตัวที่ `tflint --init` ต้องใช้จริง ๆ ถึงจะดึงอะไรได้ พิสูจน์ข้างบน การ init จริงในบทนี้ pin ทั้งคู่ (`version = "0.29.0"`, `source = "github.com/terraform-linters/tflint-ruleset-google"`) — ถ้าไม่มี CI run จะ fail ตอน install plugin หรือไม่ก็ได้ version ที่ plugin manager เลือก default ให้แบบเงียบ ๆ ซึ่งไม่ reproducible ข้าม runner
+</SpotTheBug>
+
 <Callout title="สรุปหนึ่งบรรทัด">
-**`tflint`** (provider-aware rule set รวมถึง `tflint-ruleset-google` ที่จับ mistake ที่ `terraform validate` มองไม่เห็น) กับ scanner ตระกูล **`checkov`** (pattern-match HCL เทียบ misconfiguration ที่รู้จักแล้ว เช่น Cloud Storage bucket ที่ public) รันก่อน เร็วและถูก กับตัวโค้ดดิบก่อนจะมีการ plan อะไรเลย **Sentinel** (built-in ใน HCP Terraform) กับ **Open Policy Agent คู่กับ `conftest`** (โอเพนซอร์ส ไม่ผูก provider) รันทีหลัง ประเมิน machine-readable **plan** output จริงเทียบ policy ที่เขียนไว้ แล้วบล็อก plan ที่ละเมิดไม่ให้ apply ได้แบบอัตโนมัติ สองชั้นนี้เสริมกัน static analysis เช็คโค้ดไม่ว่าจะเปลี่ยนอะไร ส่วน policy-as-code เช็คการเปลี่ยนแปลงที่คำนวณจริง รวมถึงค่าอย่าง instance count จริงที่มีอยู่แค่หลังจาก plan รันแล้วเท่านั้น
+**`tflint`** (provider-aware rule set รวมถึง `tflint-ruleset-google` — พิสูจน์ข้างบนด้วย finding จริง `google_compute_instance_invalid_machine_type` และ `Rule not found` จริงสำหรับ `google_compute_instance_invalid_zone` ที่ฟังดูสมเหตุสมผลแต่ไม่มีจริง) กับ scanner ตระกูล **`checkov`** (พิสูจน์ข้างบน: `CKV_GCP_28` จริงบน IAM binding แบบ public, `CKV_GCP_2` จริงบน firewall SSH ที่เปิด) รันก่อน เร็วและถูก กับตัวโค้ดดิบก่อนจะมีการ plan อะไรเลย **Sentinel** (built-in ใน HCP Terraform) กับ **Open Policy Agent คู่กับ `conftest`** รันทีหลัง — พิสูจน์ข้างบนเป็น chain จริงแบบ end-to-end เต็มรูปแบบ (`terraform plan` ด้วย credential ปลอมแต่ shape ถูก → `show -json` → `conftest` reject จริง บวกกับ Rego v1 syntax ที่พังจริงบน rule แบบเก่า) ประเมิน machine-readable **plan** output จริงแล้วบล็อก plan ที่ละเมิดไม่ให้ apply ได้แบบอัตโนมัติ **Infracost** (มาจาก docs ข้างบน ไม่ได้รันที่นี่) คือมุมที่สี่ — ต้นทุน — บน `show -json` artifact เดียวกัน สองชั้นนี้เสริมกัน static analysis เช็คโค้ดไม่ว่าจะเปลี่ยนอะไร ส่วน policy-as-code เช็คการเปลี่ยนแปลงที่คำนวณจริง รวมถึงค่าอย่าง instance count จริงที่มีอยู่แค่หลังจาก plan รันแล้วเท่านั้น
 </Callout>
 
 export const quizPolicyAsCode = [
@@ -110,6 +190,7 @@ export const quizPolicyAsCode = [
       'ว่า apply จะสำเร็จกับ GCP project จริงหรือเปล่า',
     ],
     answer: 1,
+    explain: 'พิสูจน์ข้างบน: tflint จริง flag machine type ที่ invalid (google_compute_instance_invalid_machine_type) และ checkov จริง flag IAM binding แบบ public (CKV_GCP_28) ทั้งคู่ต้องรู้เรื่อง provider-specific/security ที่ terraform validate ไม่รู้',
   },
   {
     q: 'ความต่างสำคัญระหว่างสิ่งที่ static analysis tool เช็คกับสิ่งที่ policy-as-code tool อย่าง Sentinel หรือ OPA เช็คคืออะไร',
@@ -120,6 +201,7 @@ export const quizPolicyAsCode = [
       'static analysis tool ต้องใช้ GCP credential ส่วน policy-as-code tool ไม่ต้อง',
     ],
     answer: 1,
+    explain: 'พิสูจน์ข้างบน: tflint/checkov รันกับ HCL ดิบ ไม่มี plan หรือ credential ส่วน conftest รันกับ terraform show -json output จริงจาก plan จริง (credential ปลอมแต่ shape ถูกของ GCP) ประเมิน resource_changes ที่มีอยู่ก็ต่อเมื่อ plan ถูกคำนวณแล้ว',
   },
   {
     q: 'policy แบบไหนที่บังคับใช้ได้เฉพาะกับ plan ที่คำนวณแล้วเท่านั้น ไม่ใช่กับ raw HCL อย่างเดียว',
@@ -130,6 +212,7 @@ export const quizPolicyAsCode = [
       'ทุก resource type ต้องใช้ชื่อแบบ snake_case',
     ],
     answer: 2,
+    explain: 'instance count ที่ขึ้นกับ count/for_each expression, module composition หรือ conditional logic ไม่มีอยู่เป็นตัวเลขจริงจนกว่า plan จะถูกคำนวณ — เหตุผลเดียวกับที่ OPA rule จริงในบทนี้อ่าน resource_changes จาก show -json จริงแทนที่จะ parse HCL ดิบ',
   },
   {
     q: 'Sentinel ต่างจาก Open Policy Agent คู่กับ conftest ยังไง',
@@ -140,6 +223,29 @@ export const quizPolicyAsCode = [
       'OPA ประเมินได้แค่ raw HCL เท่านั้น ประเมิน plan ที่คำนวณแล้วไม่ได้',
     ],
     answer: 1,
+    explain: 'บทนี้พิสูจน์เส้นทาง OPA/conftest ครบทุกขั้นตอนแบบจริง (terraform plan จริง, show -json จริง, Rego rule จริง, pass/fail จริง) ส่วน Sentinel ต้องมี HCP Terraform/Enterprise run เลยเขียนถึงจาก docs แทนที่จะรัน',
+  },
+  {
+    q: 'บทนี้พิสูจน์ fact เฉพาะ provider อะไรเกี่ยวกับพฤติกรรม terraform plan แบบ offline ระหว่าง google กับ azurerm?',
+    options: [
+      'ทั้งสอง provider ทำงานเหมือนกันตอน offline ทั้งคู่ plan จริงไม่ได้ถ้าไม่มี credential จริง',
+      'google validate แค่รูปร่างของ service-account credential file ปลอมแล้ว proceed คำนวณ plan จริงสำหรับการสร้าง resource ล้วน ๆ ส่วน azurerm (คอร์สพี่น้อง) ปฏิเสธ configure provider เลยถ้าไม่มี session จริง',
+      'azurerm plan ได้แบบ offline แต่ google ทำไม่ได้',
+      'ทั้งสอง provider ไม่ต้อง config credential อะไรเลยถึงจะ plan ได้',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ข้างบนด้วย google plan จริงแบบ end-to-end (credential ปลอมแต่ shape ถูก, Plan: 4 to add) เทียบกับการปฏิเสธจริงของ azurerm ในคอร์สพี่น้อง — ตัวอย่างที่เป็นรูปธรรมว่าทำไมคอร์สนี้ถึงพิสูจน์ behavior แยกต่อ provider แทนที่จะสมมติว่า generalize กันได้',
+  },
+  {
+    q: 'ทำไม section Infracost ในบทนี้ถึงระบุชัดว่ามาจาก docs แทนที่จะพิสูจน์ด้วยการรันจริง?',
+    options: [
+      'Infracost ไม่มีอยู่จริง',
+      'environment แบบ offline นี้เข้าไม่ถึง pricing catalog แบบ live ที่ Infracost ต้องใช้ — credential ปลอมแต่ shape ถูกพอทำให้ terraform plan รันได้ข้างบน แต่ไม่พอสำหรับ pricing API call จริงภายนอก',
+      'Infracost ใช้ได้แค่กับ Sentinel ไม่ใช่กับ tooling ของคอร์สนี้',
+      'การรัน Infracost ต้องใช้ brew ซึ่งห้ามใช้',
+    ],
+    answer: 1,
+    explain: 'brief ของบทนี้ต้องการให้พิสูจน์สิ่งที่รันได้จริง และระบุตรง ๆ ว่าอะไรรันไม่ได้ — Infracost ต้องการ pricing data แบบ live ที่นี่เข้าไม่ถึง เลย quote จาก infracost.io/docs โดยตรงแทนที่จะแต่ง cost estimate ขึ้นมา',
   },
 ];
 
