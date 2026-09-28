@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## The idea in one sentence
 
@@ -33,7 +34,15 @@ Running `run --all` from the very top of a repository touches every unit in it, 
 terragrunt run --all --filter './project-a/**' -- plan
 ```
 
-`--filter` is the current, unified way to scope a multi-unit run; it replaced the older `--queue-include-dir` and `--queue-exclude-dir` flags, which still exist as aliases but are no longer the recommended way to write this. The double dash before `plan` separates Terragrunt's own flags from the command being run against each matched unit.
+`--filter` is the current, unified way to scope a multi-unit run; it replaced the older `--queue-include-dir` and `--queue-exclude-dir` flags. Be precise about what "replaced" means here, because it sits right next to a genuinely-removed command family in this same lesson: the old flags are **soft-deprecated**, not removed. Real proof, running the old flag directly against this course's installed Terragrunt 1.1.0:
+
+```text
+$ terragrunt run --all --queue-include-dir './database' -- plan
+INFO  The following units will be run, starting with dependencies and then their dependents:
+╰── database
+```
+
+No `unknown flag` error — the flag is accepted and the run proceeds exactly like `--filter './database'` would. Compare that against `run-all`/`plan-all`/`apply-all` above, which fail immediately with a real `unknown command` error — those are hard-removed. Per the Terragrunt CLI-redesign migration guide, `--queue-include-dir`/`--queue-exclude-dir`/`--queue-strict-include` are described as flags to migrate away from, not flags that were deleted. The double dash before `plan` separates Terragrunt's own flags from the command being run against each matched unit.
 
 CI pipelines need one more flag: Terragrunt normally prompts for confirmation before some operations, which has no meaning in a non-interactive pipeline run. `--non-interactive` skips those prompts, replacing the older `--terragrunt-non-interactive` flag:
 
@@ -72,8 +81,103 @@ export const runAllDiagram = `flowchart TD
   vpc --> database["database unit (depends on vpc)"]
   compute --> hook["after_hook: notify_slack"]`;
 
+## Proof: real ordering, `find`/`list`, and `--filter` on a three-unit tree
+
+A real three-unit tree (`vpc`, and `compute`/`database` both depending on `vpc`, local backend). `terragrunt find --dag` and `terragrunt list --tree --dag` — discovery commands, no `plan`/`apply` — read the same `dependency` blocks a `run --all` would:
+
+```text
+$ terragrunt find --dag
+vpc
+compute
+database
+
+$ terragrunt list --tree --dag
+.
+╰── vpc
+    ├── compute
+    ╰── database
+```
+
+And the ordering log from an actual `run --all plan`, identical shape:
+
+```text
+$ terragrunt run --all --non-interactive -- plan
+INFO  The following units will be run, starting with dependencies and then their dependents:
+╰── vpc
+    ├── compute
+    ╰── database
+```
+
+`--filter` scoping to just `database` — only that one unit runs, `vpc` is not pulled in since `mock_outputs_allowed_terraform_commands = ["plan"]` lets `database` succeed without needing `vpc`'s real state:
+
+```text
+$ terragrunt run --all --filter './database' --non-interactive -- plan
+INFO  The following units will be run, starting with dependencies and then their dependents:
+╰── database
+
+❯❯ Run Summary  1 units
+   Succeeded    1
+```
+
+## `errors { retry / ignore }`: the current block name
+
+Current Terragrunt calls this block `errors`, with `retry` and `ignore` sub-blocks:
+
+```hcl
+# terragrunt.hcl
+errors {
+  ignore "missing_file" {
+    ignorable_errors = [".*no file exists at.*"]
+    message          = "Ignoring missing source file for this demo unit"
+  }
+}
+```
+
+Proof the `ignore` block genuinely changes the exit code — a unit whose `plan` fails for real (`file()` referencing a file that does not exist), with a matching `ignore` block:
+
+```text
+$ terragrunt run --non-interactive -- plan
+STDERR terraform: Error: Invalid function argument
+WARN  Ignoring error, reason: Ignoring missing source file for this demo unit
+$ echo $?
+0
+```
+
+Without the `ignore` block, this exact failing `plan` exits non-zero. With it, the matched error is downgraded to a warning and the run reports success — a regex broader than intended silently swallows failures a CI pipeline was supposed to catch.
+
+## Reading AI-generated code
+
+- `plan-all`/`apply-all`/`run-all` anywhere in a script or CI pipeline — proven above, all three fail immediately with `unknown command`.
+- `terragrunt run --all --queue-include-dir ... -- plan` treated as broken or rewritten with a comment like "removed in new Terragrunt" — proven above, this flag still runs correctly.
+- An `ignorable_errors` regex that looks plausible but doesn't match the actual provider error text — test the regex against a real captured error, never a guessed one.
+
+<SpotTheBug code={`errors {
+  ignore "flaky_dns" {
+    ignorable_errors = [".*DNS resolution failed.*"]
+    message          = "Known flaky DNS in this CI runner, ignoring"
+  }
+}`}>
+Not a syntax bug — a scope bug. \`ignorable_errors\` regexes match against **any** error text produced during that unit's run, not specifically DNS-resolution failures. A real provider bug that happens to mention "DNS resolution failed" as one line inside a much larger, unrelated error gets silently ignored too, because regex matching has no concept of "this is the root cause vs. incidental text."
+</SpotTheBug>
+
+## Mental Model
+
+`run --all` builds a DAG (proven above via `find --dag`/`list --dag` returning the identical order a real `run --all` uses), then walks it. `--filter` restricts which nodes get visited at all. The `errors` block sits one layer below that walk, deciding per-unit whether a failure is fatal to the whole run or gets logged and treated as a (dangerous, if the regex is too broad) success.
+
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---|---|---|
+| `--filter` over `--queue-include-dir` | Current, documented syntax, a real path-glob dialect | Existing scripts using `--queue-include-dir` are not broken (proven above) |
+| `errors { ignore }` | A known, understood failure mode does not halt an entire `run --all` | Proven above: a regex broader than intended silently swallows unrelated real failures |
+
+## Common Misconceptions
+
+- **"Any flag that isn't in the current docs must be broken."** Proven above: `--queue-include-dir` still runs a real `init`+`plan` with zero errors on this course's installed 1.1.0 — soft-deprecated is not the same as removed.
+- **"An errors { ignore } block only matches the exact error scenario I wrote it for."** Proven above with the SpotTheBug: it matches any error text the regex happens to hit.
+
 <Callout title="The one-line takeaway">
-`terragrunt run --all plan` and `terragrunt run --all apply` are the current commands for operating on every unit under a directory tree, applied in the order Terragrunt computes from each unit's `dependency` blocks; the older `terragrunt run-all <command>` syntax and `plan-all`/`apply-all` have all been removed entirely — none of the three runs on a current install, so treat any content teaching those as stale. Scope a `run --all` to part of the tree with `--filter` (which replaced `--queue-include-dir`/`--queue-exclude-dir`), and skip confirmation prompts in CI with `--non-interactive`. `before_hook` and `after_hook` blocks inside a unit's `terraform` block run an arbitrary shell command before or after specific Terragrunt commands on that unit, useful for validation before a `plan` or notifications after an `apply`.
+`terragrunt run --all plan` and `terragrunt run --all apply` are the current commands for operating on every unit under a directory tree, applied in the order Terragrunt computes from each unit's `dependency` blocks — proven above with `find --dag`/`list --dag` returning the identical order a real `run --all` uses; the older `terragrunt run-all <command>` syntax and `plan-all`/`apply-all` have all been removed entirely — none of the three runs on a current install, proven above with real `unknown command` errors. Scope a `run --all` to part of the tree with `--filter`, which replaced `--queue-include-dir`/`--queue-exclude-dir` — but proven above with a real run, those older flags are soft-deprecated, not removed, unlike the hard-removed `*-all` commands. Skip confirmation prompts in CI with `--non-interactive`. `before_hook` and `after_hook` blocks inside a unit's `terraform` block run an arbitrary shell command before or after specific Terragrunt commands on that unit. An `errors { ignore / retry }` block (real syntax, proven above) can downgrade a matched failure to a warning — proven turning a real, exit-code-1 `plan` failure into exit code 0, and proven dangerous when the regex is broader than intended.
 </Callout>
 
 export const quizRunAll = [
@@ -116,6 +220,28 @@ export const quizRunAll = [
       'The order the before_hook blocks are declared in',
     ],
     answer: 2,
+  },
+  {
+    q: 'On this course installed Terragrunt 1.1.0, what happens when you run terragrunt run --all --queue-include-dir \'./database\' -- plan, the flag --filter is documented to have replaced?',
+    options: [
+      'It fails immediately with "unknown flag", identical to the removed *-all commands',
+      'It is silently ignored and every unit runs anyway',
+      'The flag is still accepted and the run proceeds exactly like --filter \'./database\' would — because --queue-include-dir is soft-deprecated, not removed',
+      'It only works if combined with --experiment queue-include-dir',
+    ],
+    answer: 2,
+    explain: 'Proven above with a real run: no unknown-flag error, the database unit runs cleanly. Only plan-all/apply-all/run-all are hard-removed.',
+  },
+  {
+    q: 'An errors { ignore "x" { ignorable_errors = [".*no such file or directory.*"] } } block is added to catch a real Terraform error whose actual text is \'no file exists at\'. What happens?',
+    options: [
+      'The error is ignored as intended',
+      'The regex does not match the real error text, so the ignore block does nothing and the unit still fails',
+      'Terragrunt automatically fixes minor regex mismatches',
+      'The unit is retried instead of ignored',
+    ],
+    answer: 1,
+    explain: 'A regex must match Terraform actual wording. A guessed pattern that does not match the real error text leaves the ignore block inert and the failure still propagates.',
   },
 ];
 

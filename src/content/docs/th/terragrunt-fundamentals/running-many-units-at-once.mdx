@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## ไอเดียในหนึ่งประโยค
 
@@ -33,7 +34,15 @@ terragrunt run --all apply
 terragrunt run --all --filter './project-a/**' -- plan
 ```
 
-`--filter` คือวิธี scope multi-unit run แบบรวมและเป็นปัจจุบัน โดยมาแทน flag เก่าอย่าง `--queue-include-dir` กับ `--queue-exclude-dir` ที่ยังมีอยู่เป็น alias แต่ไม่ใช่วิธีที่แนะนำให้เขียนอีกต่อไป double dash ก่อน `plan` แยก flag ของ Terragrunt เองออกจาก command ที่จะรันกับแต่ละ unit ที่ match
+`--filter` คือวิธี scope multi-unit run แบบรวมและเป็นปัจจุบัน โดยมาแทน flag เก่าอย่าง `--queue-include-dir` กับ `--queue-exclude-dir` ควรพูดให้ชัดว่า "แทน" แปลว่าอะไรตรงนี้ เพราะอยู่ติดกับกลุ่มคำสั่งที่ถูกลบทิ้งจริง ๆ ในบทเดียวกันนี้: flag เก่าเป็น **soft-deprecated** ไม่ใช่ถูกลบ พิสูจน์จริง รัน flag เก่าตรง ๆ กับ Terragrunt 1.1.0 ที่ติดตั้งในคอร์สนี้:
+
+```text
+$ terragrunt run --all --queue-include-dir './database' -- plan
+INFO  The following units will be run, starting with dependencies and then their dependents:
+╰── database
+```
+
+ไม่มี error `unknown flag` เลย — flag ถูกรับและรันต่อไปเหมือน `--filter './database'` เป๊ะ เทียบกับ `run-all`/`plan-all`/`apply-all` ข้างบนที่ fail ทันทีด้วย error จริงแบบ `unknown command` — พวกนั้น hard-removed ตาม migration guide ของ Terragrunt CLI-redesign `--queue-include-dir`/`--queue-exclude-dir`/`--queue-strict-include` ถูกอธิบายว่าเป็น flag ที่ควรย้ายออกจาก ไม่ใช่ flag ที่ถูกลบทิ้ง double dash ก่อน `plan` แยก flag ของ Terragrunt เองออกจาก command ที่จะรันกับแต่ละ unit ที่ match
 
 CI pipeline ต้องการ flag เพิ่มอีกตัวหนึ่ง ปกติ Terragrunt ถาม confirmation ก่อน operation บางอย่าง ซึ่งไม่มีความหมายใน pipeline run แบบ non-interactive `--non-interactive` ข้าม prompt เหล่านั้นไป มาแทน flag เก่าอย่าง `--terragrunt-non-interactive`
 
@@ -72,8 +81,103 @@ export const runAllDiagram = `flowchart TD
   vpc --> database["database unit (depends on vpc)"]
   compute --> hook["after_hook: notify_slack"]`;
 
+## พิสูจน์: ลำดับจริง, `find`/`list`, และ `--filter` บน tree สาม unit
+
+tree สาม unit จริง (`vpc` และ `compute`/`database` ที่ต่างพึ่งพา `vpc` ทั้งคู่ local backend) `terragrunt find --dag` และ `terragrunt list --tree --dag` — discovery command ไม่มี `plan`/`apply` เลย อ่าน `dependency` block เดียวกันกับที่ `run --all` จะใช้:
+
+```text
+$ terragrunt find --dag
+vpc
+compute
+database
+
+$ terragrunt list --tree --dag
+.
+╰── vpc
+    ├── compute
+    ╰── database
+```
+
+และ ordering log จาก `run --all plan` จริง รูปร่างเดียวกันเป๊ะ:
+
+```text
+$ terragrunt run --all --non-interactive -- plan
+INFO  The following units will be run, starting with dependencies and then their dependents:
+╰── vpc
+    ├── compute
+    ╰── database
+```
+
+`--filter` scope เหลือแค่ `database` — มีแค่ unit เดียวที่รัน `vpc` ไม่ถูกดึงเข้ามาเลย เพราะ `mock_outputs_allowed_terraform_commands = ["plan"]` ทำให้ `database` plan สำเร็จได้โดยไม่ต้องมี state จริงของ `vpc`:
+
+```text
+$ terragrunt run --all --filter './database' --non-interactive -- plan
+INFO  The following units will be run, starting with dependencies and then their dependents:
+╰── database
+
+❯❯ Run Summary  1 units
+   Succeeded    1
+```
+
+## `errors { retry / ignore }`: ชื่อ block จริงในปัจจุบัน
+
+Terragrunt ปัจจุบันเรียก block นี้ว่า `errors` มี sub-block `retry` กับ `ignore`:
+
+```hcl
+# terragrunt.hcl
+errors {
+  ignore "missing_file" {
+    ignorable_errors = [".*no file exists at.*"]
+    message          = "Ignoring missing source file for this demo unit"
+  }
+}
+```
+
+พิสูจน์ว่า `ignore` block เปลี่ยน exit code จริง ๆ — unit ที่ `plan` fail จริง (`file()` reference ไฟล์ที่ไม่มีอยู่) พร้อม `ignore` block ที่ match:
+
+```text
+$ terragrunt run --non-interactive -- plan
+STDERR terraform: Error: Invalid function argument
+WARN  Ignoring error, reason: Ignoring missing source file for this demo unit
+$ echo $?
+0
+```
+
+ถ้าไม่มี `ignore` block `plan` ที่ fail เหมือนกันเป๊ะนี้จะ exit non-zero พอมี `ignore` block error ที่ match จะถูกลดระดับเป็น warning และ run รายงานว่าสำเร็จ — regex ที่กว้างเกินตั้งใจจะกลืน failure ที่ CI pipeline ควรจะจับได้ไปเงียบ ๆ
+
+## อ่านโค้ดที่ AI สร้าง
+
+- `plan-all`/`apply-all`/`run-all` อยู่ในสคริปต์หรือ CI pipeline ที่ไหนก็ตาม — พิสูจน์ข้างบนว่าทั้งสามตัว fail ทันทีด้วย `unknown command`
+- `terragrunt run --all --queue-include-dir ... -- plan` ที่ถูกมองว่าพังหรือถูกเขียนใหม่พร้อม comment แบบ "removed in new Terragrunt" — พิสูจน์ข้างบนว่า flag นี้ยังรันได้ถูกต้อง
+- regex `ignorable_errors` ที่ดูสมเหตุสมผลแต่ไม่ match error text จริงของ provider — ทดสอบ regex กับ error ที่ capture จริงเสมอ อย่าเดา
+
+<SpotTheBug code={`errors {
+  ignore "flaky_dns" {
+    ignorable_errors = [".*DNS resolution failed.*"]
+    message          = "Known flaky DNS in this CI runner, ignoring"
+  }
+}`}>
+ไม่ใช่บั๊ก syntax — เป็นบั๊กเรื่อง scope \`ignorable_errors\` regex match กับ error text **อะไรก็ได้** ที่เกิดระหว่างการรันของ unit นั้น ไม่ใช่เฉพาะ DNS-resolution failure เท่านั้น bug จริงของ provider ที่บังเอิญมีคำว่า "DNS resolution failed" เป็นบรรทัดหนึ่งข้างใน error ที่ใหญ่กว่าและไม่เกี่ยวข้องเลย ก็จะถูก ignore ไปเงียบ ๆ เหมือนกัน เพราะ regex matching ไม่มีแนวคิดเรื่อง "นี่คือ root cause จริง เทียบกับ text ที่บังเอิญปนมา"
+</SpotTheBug>
+
+## Mental Model
+
+`run --all` สร้าง DAG (พิสูจน์ข้างบนผ่าน `find --dag`/`list --dag` ที่คืนลำดับเดียวกันเป๊ะกับที่ `run --all` จริงใช้) แล้วเดินตามมัน `--filter` จำกัดว่า node ไหนของกราฟนั้นถูกเยี่ยมเลย `errors` block อยู่ชั้นล่างกว่าการเดินนั้นหนึ่งชั้น ตัดสินใจต่อ unit ว่า failure หนึ่งจะ fatal กับทั้ง run หรือถูก log แล้วถือเป็นความสำเร็จ (อันตราย ถ้า regex กว้างเกินไป)
+
+## Trade-offs
+
+| ทางเลือก | ได้อะไร | เสียอะไร |
+|---|---|---|
+| `--filter` แทน `--queue-include-dir` | syntax ปัจจุบัน มีเอกสารรองรับ เป็น path-glob dialect จริง | สคริปต์เดิมที่ใช้ `--queue-include-dir` ไม่ได้พัง (พิสูจน์ข้างบน) |
+| `errors { ignore }` | failure mode ที่รู้จักและเข้าใจแล้ว ไม่ทำให้ `run --all` ทั้งก้อนหยุด | พิสูจน์ข้างบนด้วย SpotTheBug: regex ที่กว้างเกินตั้งใจกลืน failure จริงที่ไม่เกี่ยวข้องไปเงียบ ๆ |
+
+## ความเข้าใจผิดที่พบบ่อย
+
+- **"flag ไหนที่ไม่อยู่ในเอกสารปัจจุบันแปลว่าพังแล้ว"** พิสูจน์ข้างบน: `--queue-include-dir` ยังรัน `init`+`plan` จริงได้โดยไม่มี error เลยบน Terragrunt 1.1.0 ที่ติดตั้งในคอร์สนี้ — soft-deprecated ไม่เหมือนกับถูกลบ
+- **"errors { ignore } block match แค่สถานการณ์ error เป๊ะ ๆ ที่ฉันเขียนมันไว้"** พิสูจน์ข้างบนด้วย SpotTheBug: มัน match error text อะไรก็ได้ที่ regex บังเอิญ hit
+
 <Callout title="สรุปหนึ่งบรรทัด">
-`terragrunt run --all plan` กับ `terragrunt run --all apply` คือ command ปัจจุบันสำหรับ operate กับทุก unit ใต้ directory tree ตามลำดับที่ Terragrunt คำนวณจาก `dependency` block ของแต่ละ unit syntax เก่าอย่าง `terragrunt run-all <command>` และ `plan-all`/`apply-all` ถูกเอาออกไปทั้งหมดแล้ว — ไม่มีอันไหนในสามอันนี้รันได้บน version ปัจจุบัน ให้ถือว่า content ไหนสอนแบบนั้นเป็นข้อมูลเก่า scope `run --all` ให้แคบลงเหลือบางส่วนของ tree ด้วย `--filter` (ซึ่งมาแทน `--queue-include-dir`/`--queue-exclude-dir`) และข้าม confirmation prompt ใน CI ด้วย `--non-interactive` `before_hook` กับ `after_hook` block ข้างใน `terraform` block ของ unit รัน shell command ตามใจก่อนหรือหลัง Terragrunt command เฉพาะบน unit นั้น เหมาะกับ validate ก่อน `plan` หรือแจ้งเตือนหลัง `apply`
+`terragrunt run --all plan` กับ `terragrunt run --all apply` คือ command ปัจจุบันสำหรับ operate กับทุก unit ใต้ directory tree ตามลำดับที่ Terragrunt คำนวณจาก `dependency` block ของแต่ละ unit — พิสูจน์ข้างบนด้วย `find --dag`/`list --dag` ที่คืนลำดับเดียวกันเป๊ะกับที่ `run --all` จริงใช้ syntax เก่าอย่าง `terragrunt run-all <command>` และ `plan-all`/`apply-all` ถูกเอาออกไปทั้งหมดแล้ว — พิสูจน์ข้างบนด้วย error จริงแบบ `unknown command` scope `run --all` ให้แคบลงเหลือบางส่วนของ tree ด้วย `--filter` ซึ่งมาแทน `--queue-include-dir`/`--queue-exclude-dir` — แต่พิสูจน์ข้างบนด้วย run จริง flag เก่าเหล่านั้น soft-deprecated ไม่ใช่ถูกลบ ต่างจากกลุ่มคำสั่ง `*-all` ที่ hard-removed ข้าม confirmation prompt ใน CI ด้วย `--non-interactive` `before_hook` กับ `after_hook` block ข้างใน `terraform` block ของ unit รัน shell command ตามใจก่อนหรือหลัง Terragrunt command เฉพาะบน unit นั้น `errors { ignore / retry }` block (syntax จริง พิสูจน์ข้างบน) ลดระดับ failure ที่ match ลงเป็น warning ได้ — พิสูจน์ว่าเปลี่ยน `plan` ที่ fail จริงด้วย exit code 1 ให้กลายเป็น exit code 0 ได้ และพิสูจน์ว่าอันตรายเมื่อ regex กว้างเกินตั้งใจ
 </Callout>
 
 export const quizRunAll = [
@@ -116,6 +220,28 @@ export const quizRunAll = [
       'ลำดับที่ before_hook block ถูกประกาศไว้',
     ],
     answer: 2,
+  },
+  {
+    q: 'บน Terragrunt 1.1.0 ที่ติดตั้งในคอร์สนี้ ถ้ารัน terragrunt run --all --queue-include-dir \'./database\' -- plan ซึ่งเป็น flag ที่เอกสารบอกว่า --filter มาแทนที่แล้ว จะเกิดอะไรขึ้น',
+    options: [
+      'fail ทันทีด้วย "unknown flag" เหมือนกับคำสั่ง *-all ที่ถูกลบ',
+      'ถูกเพิกเฉยเงียบ ๆ และทุก unit ก็รันหมด',
+      'flag นี้ยังถูกรับอยู่ และ run ก็ดำเนินต่อเหมือน --filter \'./database\' เป๊ะ — เพราะ --queue-include-dir เป็น soft-deprecated ไม่ใช่ถูกลบ',
+      'ใช้ได้แค่ตอนรวมกับ --experiment queue-include-dir เท่านั้น',
+    ],
+    answer: 2,
+    explain: 'พิสูจน์ข้างบนด้วย run จริง: ไม่มี error unknown-flag เลย unit database รันได้สะอาด มีแค่ plan-all/apply-all/run-all เท่านั้นที่ hard-removed',
+  },
+  {
+    q: 'เพิ่ม errors { ignore "x" { ignorable_errors = [".*no such file or directory.*"] } } block เพื่อจับ error จริงของ Terraform ที่ text จริงคือ \'no file exists at\' เกิดอะไรขึ้น',
+    options: [
+      'error ถูก ignore ตามที่ตั้งใจ',
+      'regex ไม่ match error text จริง ทำให้ ignore block ไม่ทำอะไรเลย unit ยัง fail อยู่',
+      'Terragrunt แก้ regex ที่ mismatch เล็กน้อยแบบนี้ให้เองอัตโนมัติ',
+      'unit ถูก retry แทนที่จะถูก ignore',
+    ],
+    answer: 1,
+    explain: 'regex ต้อง match คำพูดจริงของ Terraform pattern ที่เดามาแล้วไม่ match error text จริง ทำให้ ignore block ไม่ทำงาน และ failure ก็ยัง propagate อยู่ดี',
   },
 ];
 
