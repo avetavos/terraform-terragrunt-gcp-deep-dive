@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## The idea in one sentence
 
@@ -75,6 +76,103 @@ variable "db_password" {
 
 `object({...})` is worth calling out: it is a typed, fixed-shape structure — every key you list is required (unless you give it a default with `optional()`), and Terraform rejects a caller-supplied value that has the wrong shape at plan time, well before any GCP API call happens.
 
+## Optional object attributes with `optional()`
+
+Listing every key as required makes an object type brittle — a caller who only cares about `database_version` still has to spell out every other field. `optional(<type>, <default>)` inside an `object({...})` marks an attribute as not-required and supplies its own default, independent of the variable's own top-level `default`:
+
+```hcl
+variable "db_config" {
+  type = object({
+    database_version = string
+    tier              = optional(string, "db-custom-1-3840")
+    disk_size_gb      = optional(number, 20)
+    availability_type = optional(string, "ZONAL")
+  })
+  default = {
+    database_version = "POSTGRES_15"
+  }
+}
+```
+
+A `terraform console` session against this exact block, evaluating `var.db_config` with only `database_version` set — Terraform fills in every omitted `optional()` attribute from its own default:
+
+```text
+$ echo 'var.db_config' | terraform console
+{
+  "availability_type" = "ZONAL"
+  "database_version" = "POSTGRES_15"
+  "disk_size_gb" = 20
+  "tier" = "db-custom-1-3840"
+}
+```
+
+This is different from the plain `object({...})` shown above: without `optional()`, a caller who omits `tier` gets a hard "attribute is required" error at plan time. With it, the object is genuinely partially-required — only `database_version` must be supplied, and every other attribute has its own independent fallback.
+
+## Type-mismatch errors happen before any provider is called
+
+A caller passing the wrong shape of value for a `type` never reaches the Google provider — Terraform's own type-checking rejects it first, with the exact variable and location named:
+
+```hcl
+variable "instance_count" {
+  type = number
+}
+```
+
+```text
+# terraform.tfvars: instance_count = "not-a-number"
+$ terraform plan
+Planning failed. Terraform encountered an error while generating this plan.
+
+╷
+│ Error: Invalid value for input variable
+│
+│   on terraform.tfvars line 1:
+│    1: instance_count = "not-a-number"
+│
+│ The given value is not suitable for var.instance_count declared at
+│ main.tf:1,1-26: a number is required.
+╵
+```
+
+## `nullable = false`: forbidding null, but only sometimes
+
+`nullable = false` says a caller may not pass `null` for this variable — but what happens next depends on whether the variable also has a `default`. Proven with the identical block, two different tfvars files:
+
+```hcl
+variable "zone" {
+  type     = string
+  nullable = false
+  default  = "us-central1-a"
+}
+```
+
+```text
+# terraform.tfvars: zone = null
+$ terraform plan
+Changes to Outputs:
+  + zone = "us-central1-a"
+```
+
+With a `default` present, an explicit `null` is silently replaced by the default — no error at all. Remove the `default` and the exact same `null` becomes a real error instead:
+
+```text
+# same variable, no default, terraform.tfvars: zone = null
+$ terraform plan
+Planning failed. Terraform encountered an error while generating this plan.
+
+╷
+│ Error: Required variable not set
+│
+│   on terraform.tfvars line 1:
+│    1: zone = null
+│
+│ The given value is not suitable for var.zone defined at
+│ main.tf:1,1-26: required variable may not be set to null.
+╵
+```
+
+`nullable = false` alone does not mean "always error on null" — it means "null is never the *final* value," and a `default` is exactly how Terraform resolves a null away instead of rejecting it.
+
 The `sensitive = true` argument on `db_password` only affects **display**. Terraform masks the value in `plan`/`apply` output and in the CLI as `(sensitive value)`. It does not encrypt or omit the value from the state file — the state-management module already covered this: state stores every attribute of every managed resource in plain text inside the JSON, including values that came from a sensitive variable. Treat `sensitive = true` as a display protection for terminals and CI logs, not as a substitute for a properly access-controlled remote backend.
 
 ## Validating a variable with a validation block
@@ -105,6 +203,79 @@ variable "environment" {
 
 Without that first `validation` block, passing `zone = "not-a-real-zone"` would sail through `terraform plan` and only fail once Terraform actually calls the Google provider to create a resource in that zone — a much slower feedback loop, and a much less specific error message than "zone must look like a GCP zone." The `can()` wrapper turns a `regex()` failure into `false` instead of an outright error, which is exactly what a `condition` expression needs: it must always evaluate to `true` or `false`, never raise.
 
+## Cross-variable validation (Terraform 1.9+)
+
+Before 1.9, a `validation` block's `condition` could only reference the variable it was attached to. Terraform 1.9 lifted that restriction: a `condition` may now reference *other* variables in the same module, which is what an `min`/`max`-shaped pair of inputs actually needs:
+
+```hcl
+variable "min_instances" {
+  type    = number
+  default = 5
+}
+
+variable "max_instances" {
+  type = number
+  validation {
+    condition     = var.max_instances >= var.min_instances
+    error_message = "max_instances (${var.max_instances}) must be >= min_instances (${var.min_instances})."
+  }
+}
+```
+
+Real failure, `max_instances = 2` against the `min_instances` default of `5`:
+
+```text
+$ terraform plan
+╷
+│ Error: Invalid value for variable
+│
+│   on terraform.tfvars line 1:
+│    1: max_instances = 2
+│     ├────────────────
+│     │ var.max_instances is 2
+│     │ var.min_instances is 5
+│
+│ max_instances (2) must be >= min_instances (5).
+│
+│ This was checked by the validation rule at variables.tf:8,3-13.
+╵
+```
+
+Note the extra context block Terraform prints — `var.max_instances is 2` / `var.min_instances is 5` — naming every variable the condition actually referenced. A single-variable `validation` never prints this, because there is nothing else to attribute the failure to.
+
+## Ephemeral values flowing into a place that must persist
+
+`sensitive = true` hides a value from output but still writes it to state. **`ephemeral = true`** (Terraform 1.10+) actually keeps it out: the value is available while the operation runs and is omitted from both state and the plan file. The trade-off is that an ephemeral value can only flow into places that also refuse to persist it — a write-only resource argument, another ephemeral variable or resource, a provider block, or a provisioner. Assigning one to an ordinary resource argument is a real, caught-before-apply error, not a lint warning:
+
+```hcl
+variable "session_token" {
+  type      = string
+  ephemeral = true
+  default   = "demo-token"
+}
+
+resource "local_file" "leak" {
+  filename = "${path.module}/leak.txt"
+  content  = var.session_token
+}
+```
+
+```text
+$ terraform validate
+╷
+│ Error: Invalid use of ephemeral value
+│
+│   with local_file.leak,
+│   on main.tf line 15, in resource "local_file" "leak":
+│   15:   content  = var.session_token
+│
+│ Ephemeral values are not valid for "content", because it is not a
+│ write-only attribute and must be persisted to state.
+╵
+```
+
+Terraform catches this statically at `validate` time — it never even reaches the Google provider, because the `content` argument's schema is not marked write-only, and Terraform already knows every non-write-only argument gets persisted to state. The Secrets and Credential Management lesson shows the matching correct pattern with a write-only argument on the receiving end.
+
 ## Setting variable values, and who wins
 
 Terraform lets you set a value for the same variable from several places at once, and it resolves conflicts with a strict, well-defined precedence. From highest priority (wins) to lowest:
@@ -129,6 +300,28 @@ terraform apply
 
 If `zone` is set in `terraform.tfvars`, again in `prod.auto.tfvars`, and again via `-var` on the command line, the `-var` value wins — Terraform does not merge scalar values across sources, it picks the highest-priority one that exists. Collection types like maps and objects are the exception worth remembering later: some tooling merges nested values rather than fully overriding, but for the plain sources above, a defined value at a higher-priority source simply replaces a lower-priority one for that variable.
 
+All five levels, proven in order against one `variable "zone" { default = "us-central1-a" }`, adding one higher-priority source at a time:
+
+```text
+$ terraform plan                                          # 1. default only
+  + zone = "us-central1-a"
+
+$ terraform plan                                          # 2. terraform.tfvars now present
+  + zone = "from-terraform-tfvars"
+
+$ terraform plan                                          # 3. zzz.auto.tfvars now also present
+  + zone = "from-auto-tfvars"
+
+$ TF_VAR_zone="from-env-var" terraform plan                # 4. env var too -- auto.tfvars still wins
+  + zone = "from-auto-tfvars"
+
+$ TF_VAR_zone="from-env-var" \
+  terraform plan -var="zone=from-cli-var"                  # 5. -var beats everything
+  + zone = "from-cli-var"
+```
+
+Step 4 is the one worth pausing on: `TF_VAR_*` does **not** outrank an `*.auto.tfvars` file, even though the env var was set *after* the file already existed — precedence is about source kind, not about which command you typed last. With no tfvars files present at all, the same `TF_VAR_zone` does beat the `default` on its own, confirming `TF_VAR_*` sits above `default` and below every tfvars-file source.
+
 <Mermaid title="Multiple value sources resolve to one value per variable, by precedence" code={precedenceDiagram} />
 
 export const precedenceDiagram = `flowchart LR
@@ -139,8 +332,62 @@ export const precedenceDiagram = `flowchart LR
   e["default in the variable block"] --> r
   r --> res["google_compute_instance.web"]`;
 
+## Mental Model
+
+Every input variable resolution is really two separate questions Terraform answers in order: *which source wins* (the precedence chain, resolved before any HCL in the module runs), and *is the winning value acceptable* (`type`, `nullable`, `validation`, in that order, all before the Google provider is ever invoked). `ephemeral` and write-only arguments add a third axis orthogonal to both: not "what value" or "is it valid," but "may this value ever touch disk." Keeping these three questions separate explains every proof above — a cross-variable `validation` failure names the *other* variable because the condition genuinely read it; `nullable = false` with a `default` doesn't error because "acceptable value" resolution runs after null-to-default substitution, not before.
+
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---|---|---|
+| `validation` block (incl. cross-variable, 1.9+) | Fails fast at `plan` time with a specific message (proven above) instead of a confusing provider-level error | Every rule is checked on every plan; a rule that calls an expensive function (`can(regex(...))` on a huge string) adds real, repeated cost |
+| `ephemeral = true` | Value never touches state or the plan file — genuinely gone after the operation (proven: rejected before it can leak into `content`) | Can only flow into write-only arguments, other ephemeral values, provider blocks, or provisioners — an ordinary resource argument is a hard error, not a fallback |
+| `nullable = false` + `default` | Callers can pass `null` and quietly get the default instead of juggling `coalesce()` themselves (proven above) | Silent substitution can hide a caller's mistake — a `null` that was meant to *mean* something now means "default" |
+| `optional()` on object attributes | Only genuinely-required keys are required; every other key gets its own independent default (proven via `terraform console`) | A typo'd optional key name is silently accepted as an *extra* unknown attribute only if the object type is later widened — the harness/`validate` still catches unknown attributes today |
+
+## Common Misconceptions
+
+- **"`-var="x=null"` clears a string variable to null."** Proven above (nullable proofs): for a `string`-typed variable, `-var` treats `null` as HCL, but a caller who instead writes `-var="x=null"` inside a shell that has already stripped quoting can end up passing the *literal three-character string* `"null"`, not the `null` value — the SpotTheBug below shows the exact difference in real plan output.
+- **"`nullable = false` always rejects `null`."** Proven above: with a `default` present, `null` is silently replaced by the default with no error at all; only a `nullable = false` variable *without* a default rejects `null`, with "required variable may not be set to null."
+- **"`sensitive = true` keeps a value out of the state file."** It does not — proven in the state-management module: state stores every attribute in plain text regardless of `sensitive`. Only `ephemeral = true` (and write-only arguments) actually keep a value out of state, and only for the arguments that accept them.
+- **"`TF_VAR_*` environment variables are checked before file-based tfvars, since env vars feel more 'live'."** Proven above: `TF_VAR_*` sits *below* `terraform.tfvars` and `*.auto.tfvars` in precedence, not above.
+
+## Reading AI-generated code
+
+- A `validation` block whose `condition` references another variable but was written before verifying the target Terraform version supports it (1.9+) — check `terraform version`, not the model's assumption.
+- `-var` used to "unset" a variable to `null` — proven below this is not guaranteed for a `string`-typed variable; a real `null` requires an actual HCL `null` literal (a `-var-file` or `.tfvars` entry), not a quoted shell string.
+- `nullable = false` added to a variable "to make it required," without checking whether a `default` is also present — proven above, the two together silently substitute the default instead of erroring.
+- An `object({...})` type with every attribute required, when the surrounding prose says "most fields are optional" — check for missing `optional()` wrappers.
+- `sensitive = true` treated as sufficient secret handling — proven elsewhere in this course that state still stores the raw value; only `ephemeral`/write-only genuinely avoids persistence.
+- A generated `ephemeral = true` variable assigned straight into an ordinary resource argument (e.g. `content`, `labels`, any argument that isn't write-only) — this is a real `terraform validate` error, not something that only surfaces at apply.
+
+<SpotTheBug code={`variable "zone" {
+  type     = string
+  nullable = false
+  default  = "us-central1-a"
+}
+
+# CI job "clears" the variable between runs:
+# terraform plan -var="zone=null"`}>
+This does not clear the variable to `null` — for a `string`-typed variable, `-var="zone=null"` passes the literal three-character string `"null"`, not the `null` value. Proven with the exact same block:
+
+```text
+$ terraform plan -var="zone=null"
+  + zone = "null"
+```
+
+Compare that to passing a real `null` through a `.tfvars` file (`zone = null`, an HCL literal, not a quoted shell string), which correctly falls back to the default:
+
+```text
+$ terraform plan   # terraform.tfvars: zone = null
+  + zone = "us-central1-a"
+```
+
+The fix is a real HCL `null` (a `-var-file`/`.tfvars` entry — only a non-string type or an explicit `null` literal in a file is unambiguous), never a bare `-var` flag when the goal is an actual null.
+</SpotTheBug>
+
 <Callout title="The one-line takeaway">
-A **`variable`** block declares a typed, named input with an optional **`default`**, and `sensitive = true` masks it from CLI output only — the value is still stored in plain text in **state**. A **`validation`** block adds a **`condition`** and a custom **`error_message`** so a bad input fails fast and clearly at `plan` time instead of deep inside a provider call. When the same variable gets a value from more than one place, Terraform resolves it by strict precedence: **`-var`/`-var-file`** beats **`*.auto.tfvars`**, which beats **`terraform.tfvars`**, which beats **`TF_VAR_*`** environment variables, which beats the variable's own **`default`**.
+A **`variable`** block declares a typed, named input with an optional **`default`**, and `sensitive = true` masks it from CLI output only — the value is still stored in plain text in **state**. A **`validation`** block adds a **`condition`** (which may reference other variables since **1.9**) and a custom **`error_message`** so a bad input fails fast and clearly at `plan` time instead of deep inside a provider call. **`ephemeral = true`** (1.10+) keeps a value out of state and the plan file entirely, but only flows into write-only arguments, other ephemeral values, provider blocks, or provisioners — proven above as a real `validate`-time error otherwise. **`nullable = false`** rejects `null` only when there is no `default`; with one, `null` is silently replaced. **`optional()`** inside an `object({...})` gives individual attributes their own default, proven via `terraform console`. When the same variable gets a value from more than one place, Terraform resolves it by strict precedence, proven above end to end: **`-var`/`-var-file`** beats **`*.auto.tfvars`**, which beats **`terraform.tfvars`**, which beats **`TF_VAR_*`** environment variables, which beats the variable's own **`default`**.
 </Callout>
 
 export const quizInputVariables = [
@@ -153,6 +400,7 @@ export const quizInputVariables = [
       'It automatically converts the value to the correct type',
     ],
     answer: 1,
+    explain: 'A validation block runs its condition at plan time and shows the custom error_message immediately -- proven above with the cross-variable max_instances >= min_instances example, which failed with a specific message before any provider was ever called.',
   },
   {
     q: 'If a variable has a value in terraform.tfvars, in a TF_VAR_ environment variable, and passed via -var on the command line, which value does Terraform use?',
@@ -163,6 +411,7 @@ export const quizInputVariables = [
       'The terraform.tfvars value, because files are more explicit than flags',
     ],
     answer: 2,
+    explain: 'Proven above end to end: -var/-var-file is the highest-priority source, above *.auto.tfvars, terraform.tfvars, TF_VAR_*, and finally the default.',
   },
   {
     q: 'What does sensitive = true on a variable actually protect?',
@@ -173,6 +422,7 @@ export const quizInputVariables = [
       'It prevents the value from being used in any resource argument',
     ],
     answer: 1,
+    explain: 'sensitive = true only affects CLI display. State still stores the raw value in plain text -- only ephemeral = true or a write-only argument actually keeps a value out of state.',
   },
   {
     q: 'Between *.auto.tfvars files and terraform.tfvars, which one wins if both set the same variable?',
@@ -183,6 +433,40 @@ export const quizInputVariables = [
       'They are merged field by field regardless of type',
     ],
     answer: 2,
+    explain: 'Proven above: with both files present, the *.auto.tfvars value won over terraform.tfvars. auto.tfvars files are loaded in lexical order of filename when there is more than one.',
+  },
+  {
+    q: '```hcl\nvariable "max_instances" {\n  type = number\n  validation {\n    condition     = var.max_instances >= var.min_instances\n    error_message = "max_instances must be >= min_instances."\n  }\n}\n```\nWhich Terraform version introduced the ability for a validation condition to reference a DIFFERENT variable like this?',
+    options: [
+      'This has always been allowed, since Terraform 0.12',
+      'Terraform 1.9 -- before that, a validation condition could only reference the variable it was attached to',
+      'Terraform 1.5, alongside the import block',
+      'It is still not allowed in any released version',
+    ],
+    answer: 1,
+    explain: 'Cross-variable validation shipped in Terraform 1.9. Proven above: the exact block runs on 1.16.4 and fails with a message naming both var.max_instances and var.min_instances.',
+  },
+  {
+    q: '```hcl\nvariable "session_token" {\n  type      = string\n  ephemeral = true\n  default   = "demo-token"\n}\n\nresource "local_file" "leak" {\n  filename = "out.txt"\n  content  = var.session_token\n}\n```\nWhat happens when you run terraform validate on this configuration?',
+    options: [
+      'It passes -- ephemeral only affects apply, not validate',
+      'A real error: "Ephemeral values are not valid for \\"content\\", because it is not a write-only attribute and must be persisted to state"',
+      'It silently drops the content argument',
+      'It only warns, and apply proceeds normally',
+    ],
+    answer: 1,
+    explain: 'Proven above with this exact configuration: terraform validate rejects it immediately, because content is an ordinary (non-write-only) argument and Terraform statically knows it would have to persist an ephemeral value to state.',
+  },
+  {
+    q: 'A variable is declared with nullable = false and a default value. A caller explicitly passes null for it in a .tfvars file. What happens?',
+    options: [
+      'terraform plan fails with "required variable may not be set to null"',
+      'The explicit null is silently replaced by the default -- no error at all',
+      'Terraform crashes with an internal error',
+      'The variable becomes an empty string regardless of its declared type',
+    ],
+    answer: 1,
+    explain: 'Proven above: nullable = false only errors on null when there is NO default. With a default present, an explicit null is quietly substituted with the default value instead.',
   },
 ];
 

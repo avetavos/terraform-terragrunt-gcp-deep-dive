@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## ไอเดียในหนึ่งประโยค
 
@@ -75,6 +76,103 @@ variable "db_password" {
 
 `object({...})` ควรพูดถึงแยกไว้ต่างหาก เป็น structure ที่มี type และรูปร่างตายตัว ทุก key ที่ list ไว้ต้อง required (เว้นแต่จะใส่ default ผ่าน `optional()`) และ Terraform ปฏิเสธค่าที่ caller ส่งมาผิดรูปร่างตั้งแต่ตอน plan ก่อนที่จะไปเรียก GCP API เลยด้วยซ้ำ
 
+## Optional attribute ใน object ด้วย `optional()`
+
+การ list ทุก key เป็น required ทำให้ object type เปราะ — caller ที่สนใจแค่ `database_version` ก็ยังต้องใส่ทุก field ที่เหลือครบ `optional(<type>, <default>)` ข้างใน `object({...})` ทำเครื่องหมายว่า attribute นั้นไม่ required และมี default ของตัวเอง แยกจาก `default` ระดับบนสุดของ variable:
+
+```hcl
+variable "db_config" {
+  type = object({
+    database_version = string
+    tier              = optional(string, "db-custom-1-3840")
+    disk_size_gb      = optional(number, 20)
+    availability_type = optional(string, "ZONAL")
+  })
+  default = {
+    database_version = "POSTGRES_15"
+  }
+}
+```
+
+session `terraform console` จริงกับ block นี้เป๊ะ ๆ evaluate `var.db_config` โดยใส่แค่ `database_version` — Terraform เติมทุก attribute ที่เว้นไว้จาก `optional()` ให้เองตาม default:
+
+```text
+$ echo 'var.db_config' | terraform console
+{
+  "availability_type" = "ZONAL"
+  "database_version" = "POSTGRES_15"
+  "disk_size_gb" = 20
+  "tier" = "db-custom-1-3840"
+}
+```
+
+ต่างจาก `object({...})` เปล่า ๆ ข้างบน — ถ้าไม่มี `optional()` caller ที่ไม่ใส่ `tier` จะเจอ error "attribute is required" ทันทีตอน plan แต่มี `optional()` แล้ว object จะ required แค่บางส่วนจริง ๆ — มีแค่ `database_version` ที่ต้องใส่ ส่วน attribute อื่นมี fallback ของตัวเองแยกกัน
+
+## Type-mismatch error เกิดก่อนที่จะไปถึง provider
+
+caller ที่ส่งค่าผิดรูปร่างสำหรับ `type` จะไม่มีทางไปถึง Google provider เลย — type-checking ของ Terraform เองปฏิเสธก่อน พร้อมระบุ variable และตำแหน่งชัดเจน:
+
+```hcl
+variable "instance_count" {
+  type = number
+}
+```
+
+```text
+# terraform.tfvars: instance_count = "not-a-number"
+$ terraform plan
+Planning failed. Terraform encountered an error while generating this plan.
+
+╷
+│ Error: Invalid value for input variable
+│
+│   on terraform.tfvars line 1:
+│    1: instance_count = "not-a-number"
+│
+│ The given value is not suitable for var.instance_count declared at
+│ main.tf:1,1-26: a number is required.
+╵
+```
+
+## `nullable = false`: ห้าม null แต่ไม่เสมอไป
+
+`nullable = false` บอกว่า caller ห้ามส่ง `null` มาให้ variable นี้ — แต่สิ่งที่เกิดขึ้นจริงขึ้นกับว่ามี `default` ด้วยหรือเปล่า พิสูจน์ด้วย block เดียวกันเป๊ะ ๆ กับ tfvars สองไฟล์ที่ต่างกัน:
+
+```hcl
+variable "zone" {
+  type     = string
+  nullable = false
+  default  = "us-central1-a"
+}
+```
+
+```text
+# terraform.tfvars: zone = null
+$ terraform plan
+Changes to Outputs:
+  + zone = "us-central1-a"
+```
+
+พอมี `default` อยู่ `null` ที่ส่งมาชัด ๆ จะถูกแทนที่ด้วย default แบบเงียบ ๆ ไม่ error เลย เอา `default` ออกแล้วใช้ `null` ตัวเดียวกันเป๊ะ ๆ จะกลายเป็น error จริงแทน:
+
+```text
+# same variable, no default, terraform.tfvars: zone = null
+$ terraform plan
+Planning failed. Terraform encountered an error while generating this plan.
+
+╷
+│ Error: Required variable not set
+│
+│   on terraform.tfvars line 1:
+│    1: zone = null
+│
+│ The given value is not suitable for var.zone defined at
+│ main.tf:1,1-26: required variable may not be set to null.
+╵
+```
+
+`nullable = false` เฉย ๆ ไม่ได้แปลว่า "error ทุกครั้งที่เจอ null" — มันแปลว่า "null ไม่มีทางเป็นค่าสุดท้าย" และ `default` คือกลไกที่ Terraform ใช้ resolve null ออกไปแทนที่จะปฏิเสธ
+
 `sensitive = true` บน `db_password` มีผลแค่กับการ **แสดงผล** เท่านั้น Terraform จะซ่อนค่าใน output ของ `plan`/`apply` และใน CLI ให้เป็น `(sensitive value)` แต่ไม่ได้เข้ารหัสหรือตัดค่าออกจาก state file — module เรื่อง state management พูดไปแล้วว่า state เก็บทุก attribute ของทุก resource ที่ manage อยู่เป็น plain text ในไฟล์ JSON รวมถึงค่าที่มาจาก sensitive variable ด้วย ให้มอง `sensitive = true` เป็นแค่การป้องกันตอนแสดงผลบน terminal กับ CI log ไม่ใช่ตัวแทนของ remote backend ที่ควบคุม access ได้ดีอยู่แล้ว
 
 ## ตรวจสอบ variable ด้วย validation block
@@ -105,6 +203,79 @@ variable "environment" {
 
 ถ้าไม่มี `validation` block แรก การส่ง `zone = "not-a-real-zone"` จะผ่าน `terraform plan` ไปเฉย ๆ แล้วไปพังตอน Terraform เรียก Google provider จริง ๆ เพื่อสร้าง resource ใน zone นั้น — feedback loop ช้ากว่ามาก และ error message ก็เฉพาะเจาะจงน้อยกว่า "zone must look like a GCP zone" มาก `can()` ที่ wrap ไว้ทำหน้าที่แปลง error จาก `regex()` ให้กลายเป็น `false` แทนที่จะ error ตรง ๆ ซึ่งตรงกับสิ่งที่ `condition` expression ต้องการพอดี เพราะต้อง evaluate ออกมาเป็น `true` หรือ `false` เสมอ ห้าม raise error
 
+## Cross-variable validation (Terraform 1.9 ขึ้นไป)
+
+ก่อน 1.9 `condition` ของ `validation` block อ้างได้แค่ variable ตัวที่มันติดอยู่เท่านั้น Terraform 1.9 ยกเลิกข้อจำกัดนี้ — `condition` อ้าง variable *ตัวอื่น* ใน module เดียวกันได้แล้ว ซึ่งตรงกับที่คู่ input แบบ `min`/`max` ต้องการพอดี:
+
+```hcl
+variable "min_instances" {
+  type    = number
+  default = 5
+}
+
+variable "max_instances" {
+  type = number
+  validation {
+    condition     = var.max_instances >= var.min_instances
+    error_message = "max_instances (${var.max_instances}) must be >= min_instances (${var.min_instances})."
+  }
+}
+```
+
+error จริงเมื่อ `max_instances = 2` เทียบกับ default ของ `min_instances` ที่ 5:
+
+```text
+$ terraform plan
+╷
+│ Error: Invalid value for variable
+│
+│   on terraform.tfvars line 1:
+│    1: max_instances = 2
+│     ├────────────────
+│     │ var.max_instances is 2
+│     │ var.min_instances is 5
+│
+│ max_instances (2) must be >= min_instances (5).
+│
+│ This was checked by the validation rule at variables.tf:8,3-13.
+╵
+```
+
+สังเกต context block พิเศษที่ Terraform print เพิ่ม — `var.max_instances is 2` / `var.min_instances is 5` — ระบุ variable ทุกตัวที่ condition อ้างถึงจริง ๆ `validation` แบบ variable เดียวไม่มีทาง print แบบนี้ เพราะไม่มีอะไรอื่นให้ attribute error ไปหา
+
+## ค่า ephemeral ที่ไหลไปที่ที่ต้อง persist
+
+`sensitive = true` ซ่อนค่าจาก output แต่ยังเขียนลง state อยู่ดี ส่วน **`ephemeral = true`** (Terraform 1.10 ขึ้นไป) กันออกจริง ค่าใช้ได้ระหว่างที่ operation รันอยู่ และถูกตัดออกจากทั้ง state และ plan file ข้อแลกเปลี่ยนคือค่า ephemeral ไหลไปได้แค่ที่ที่ไม่เก็บค่าเหมือนกัน — write-only argument ของ resource, ephemeral variable หรือ resource ตัวอื่น, provider block หรือ provisioner การเอาไป assign ให้ argument ปกติของ resource เป็น error จริงที่จับได้ก่อน apply ไม่ใช่แค่ lint warning:
+
+```hcl
+variable "session_token" {
+  type      = string
+  ephemeral = true
+  default   = "demo-token"
+}
+
+resource "local_file" "leak" {
+  filename = "${path.module}/leak.txt"
+  content  = var.session_token
+}
+```
+
+```text
+$ terraform validate
+╷
+│ Error: Invalid use of ephemeral value
+│
+│   with local_file.leak,
+│   on main.tf line 15, in resource "local_file" "leak":
+│   15:   content  = var.session_token
+│
+│ Ephemeral values are not valid for "content", because it is not a
+│ write-only attribute and must be persisted to state.
+╵
+```
+
+Terraform จับตั้งแต่ตอน `validate` แบบ static เลย — ไม่ทันได้ไปถึง Google provider ด้วยซ้ำ เพราะ schema ของ argument `content` ไม่ได้ mark ว่าเป็น write-only และ Terraform รู้อยู่แล้วว่า argument ที่ไม่ใช่ write-only ทุกตัวจะถูกเก็บลง state บทเรื่อง Secrets and Credential Management แสดง pattern ที่ถูกต้องคู่กับ write-only argument ที่ปลายทาง
+
 ## ตั้งค่า variable และใครชนะ
 
 Terraform ยอมให้ตั้งค่า variable ตัวเดียวกันจากหลายที่พร้อมกัน แล้วแก้ conflict ด้วยลำดับความสำคัญที่ตายตัว เรียงจากสำคัญที่สุด (ชนะ) ไปน้อยที่สุด:
@@ -129,7 +300,29 @@ terraform apply
 
 ถ้า `zone` ถูกตั้งไว้ใน `terraform.tfvars`, ตั้งอีกทีใน `prod.auto.tfvars`, แล้วตั้งอีกทีผ่าน `-var` บน command line ค่าจาก `-var` จะชนะ Terraform ไม่ได้ merge ค่าแบบ scalar ข้ามแหล่งกัน แต่เลือกแหล่งที่ priority สูงสุดที่มีค่าอยู่เท่านั้น collection type อย่าง map กับ object เป็นข้อยกเว้นที่ควรจำไว้สำหรับบทหลัง ๆ — เครื่องมือบางตัว merge ค่าที่ nested กันแทนที่จะ override ทั้งก้อน แต่สำหรับแหล่งข้อมูลปกติข้างบนนี้ ค่าที่ประกาศไว้ในแหล่งที่ priority สูงกว่าจะแทนที่ค่าจากแหล่งที่ priority ต่ำกว่าไปเลยสำหรับ variable ตัวนั้น
 
-<Mermaid title="Multiple value sources resolve to one value per variable, by precedence" code={precedenceDiagram} />
+พิสูจน์ครบทั้งห้าระดับตามลำดับ ด้วย `variable "zone" { default = "us-central1-a" }` ตัวเดียว เติมแหล่งที่ priority สูงกว่าไปทีละแหล่ง:
+
+```text
+$ terraform plan                                          # 1. default only
+  + zone = "us-central1-a"
+
+$ terraform plan                                          # 2. terraform.tfvars now present
+  + zone = "from-terraform-tfvars"
+
+$ terraform plan                                          # 3. zzz.auto.tfvars now also present
+  + zone = "from-auto-tfvars"
+
+$ TF_VAR_zone="from-env-var" terraform plan                # 4. env var too -- auto.tfvars still wins
+  + zone = "from-auto-tfvars"
+
+$ TF_VAR_zone="from-env-var" \
+  terraform plan -var="zone=from-cli-var"                  # 5. -var beats everything
+  + zone = "from-cli-var"
+```
+
+step 4 คือจุดที่ควรหยุดคิดสักนิด — `TF_VAR_*` **ไม่** ชนะไฟล์ `*.auto.tfvars` ถึงแม้ env var จะถูกตั้งค่า *หลัง* ไฟล์นั้นมีอยู่แล้วก็ตาม — precedence คือเรื่องของ "ประเภทแหล่งข้อมูล" ไม่ใช่ "คำสั่งไหนพิมพ์ล่าสุด" ถ้าไม่มีไฟล์ tfvars เลย `TF_VAR_zone` ตัวเดียวกันจะชนะ `default` ได้ ยืนยันว่า `TF_VAR_*` อยู่เหนือ `default` แต่อยู่ใต้ทุกแหล่งที่เป็นไฟล์ tfvars
+
+<Mermaid title="หลายแหล่งข้อมูลถูก resolve เหลือค่าเดียวต่อ variable ตามลำดับความสำคัญ" code={precedenceDiagram} />
 
 export const precedenceDiagram = `flowchart LR
   a["-var / -var-file (CLI flag)"] --> r["Resolved value of var.zone"]
@@ -139,8 +332,62 @@ export const precedenceDiagram = `flowchart LR
   e["default in the variable block"] --> r
   r --> res["google_compute_instance.web"]`;
 
-<Callout title="The one-line takeaway">
-**`variable`** block ประกาศ input ที่มี type และชื่อ พร้อม **`default`** ที่เป็น optional และ `sensitive = true` ซ่อนค่าจาก CLI output เท่านั้น — ค่ายังถูกเก็บเป็น plain text ใน **state** อยู่ดี **`validation`** block เพิ่ม **`condition`** กับ **`error_message`** แบบ custom ทำให้ input ที่ผิดพังเร็วและชัดเจนตอน `plan` แทนที่จะพังลึก ๆ ใน provider call เวลา variable ตัวเดียวกันได้ค่าจากหลายที่ Terraform แก้ด้วยลำดับความสำคัญตายตัว: **`-var`/`-var-file`** ชนะ **`*.auto.tfvars`** ซึ่งชนะ **`terraform.tfvars`** ซึ่งชนะ environment variable **`TF_VAR_*`** ซึ่งชนะ **`default`** ของ variable เอง
+## Mental Model
+
+ทุกครั้งที่ resolve input variable จริง ๆ คือการตอบสองคำถามแยกกันตามลำดับ: *แหล่งไหนชนะ* (precedence chain ที่ resolve เสร็จก่อน HCL ใน module จะรันด้วยซ้ำ) กับ *ค่าที่ชนะนั้นยอมรับได้ไหม* (`type`, `nullable`, `validation` ตามลำดับนี้ ก่อนที่จะไปถึง Google provider เลย) `ephemeral` กับ write-only argument เพิ่มแกนที่สามที่ตั้งฉากกับสองแกนแรก — ไม่ใช่ "ค่าอะไร" หรือ "valid ไหม" แต่คือ "ค่านี้มีสิทธิ์แตะ disk ได้หรือเปล่า" การแยกสามคำถามนี้ออกจากกันอธิบายทุก proof ข้างบน — cross-variable `validation` ที่ fail ระบุชื่อ variable *ตัวอื่น* เพราะ condition อ่านมันจริง ๆ; `nullable = false` ที่มี `default` ไม่ error เพราะขั้น "ค่ายอมรับได้ไหม" รันหลังจากแทน null ด้วย default ไปแล้ว ไม่ใช่ก่อน
+
+## ข้อแลกเปลี่ยน
+
+| ตัวเลือก | ได้อะไร | เสียอะไร |
+|---|---|---|
+| `validation` block (รวม cross-variable, 1.9+) | พังเร็วตอน `plan` พร้อม message เฉพาะเจาะจง (พิสูจน์ข้างบน) แทนที่จะพังลึก ๆ ใน provider | ทุก rule ถูกเช็คทุกครั้งที่ plan — rule ที่เรียก function แพง ๆ (`can(regex(...))` กับ string ยาว ๆ) มี cost จริงที่ซ้ำทุกครั้ง |
+| `ephemeral = true` | ค่าไม่แตะ state หรือ plan file เลย — หายไปจริงหลัง operation จบ (พิสูจน์: ถูกปฏิเสธก่อนจะไปรั่วเข้า `content`) | ไหลไปได้แค่ write-only argument, ephemeral value ตัวอื่น, provider block, หรือ provisioner — argument ปกติของ resource คือ error จริง ไม่ใช่ fallback |
+| `nullable = false` + `default` | caller ส่ง `null` ได้และได้ default แบบเงียบ ๆ โดยไม่ต้องเขียน `coalesce()` เอง (พิสูจน์ข้างบน) | การแทนค่าแบบเงียบ ๆ อาจซ่อนความผิดพลาดของ caller ไว้ — `null` ที่ตั้งใจสื่อความหมายบางอย่างกลายเป็นแค่ "ใช้ default" |
+| `optional()` บน object attribute | เฉพาะ key ที่ required จริง ๆ เท่านั้นที่ต้องใส่ key อื่นมี default ของตัวเองแยกกัน (พิสูจน์ผ่าน `terraform console`) | ถ้า optional key พิมพ์ชื่อผิด จะถูกรับเป็น attribute เกินที่ไม่รู้จักก็ต่อเมื่อ object type ถูกขยายทีหลังเท่านั้น — วันนี้ `validate`/harness ยังจับ unknown attribute ได้อยู่ |
+
+## ความเข้าใจผิดที่พบบ่อย
+
+- **"`-var="x=null"` เคลียร์ string variable ให้เป็น null ได้"** พิสูจน์ข้างบน (proof เรื่อง nullable): สำหรับ variable type `string`, `-var` จะรับ `null` เป็น HCL ก็จริง แต่ caller ที่พิมพ์ `-var="x=null"` ใน shell ที่ strip quote ไปแล้วอาจจบลงด้วยการส่ง *string สามตัวอักษรตามตัวอักษร* `"null"` ไม่ใช่ค่า `null` จริง — SpotTheBug ข้างล่างโชว์ความต่างชัด ๆ ด้วย plan output จริง
+- **"`nullable = false` ปฏิเสธ `null` เสมอ"** พิสูจน์ข้างบน: ถ้ามี `default` อยู่ `null` จะถูกแทนที่ด้วย default แบบเงียบ ๆ ไม่ error เลย มีแค่ `nullable = false` ที่*ไม่มี*default เท่านั้นที่ปฏิเสธ `null` ด้วย "required variable may not be set to null"
+- **"`sensitive = true` ทำให้ค่าไม่เข้า state file"** ไม่จริง — พิสูจน์ในโมดูล state-management ว่า state เก็บทุก attribute เป็น plain text ไม่ว่าจะ `sensitive` หรือเปล่า มีแค่ `ephemeral = true` (กับ write-only argument) เท่านั้นที่กันค่าไม่ให้เข้า state ได้จริง และกันได้แค่กับ argument ที่รองรับ
+- **"environment variable `TF_VAR_*` ถูกเช็คก่อนไฟล์ tfvars เพราะ env var รู้สึก 'สด' กว่า"** พิสูจน์ข้างบน: `TF_VAR_*` อยู่*ต่ำกว่า* `terraform.tfvars` กับ `*.auto.tfvars` ใน precedence ไม่ใช่สูงกว่า
+
+## อ่านโค้ดที่ AI เขียน
+
+- `validation` block ที่ condition อ้าง variable ตัวอื่น แต่ไม่เคยเช็คว่า Terraform version รองรับไหม (1.9+) — เช็ค `terraform version` จริง อย่าเชื่อสมมติฐานของ model
+- `-var` ที่ใช้ "unset" variable ให้เป็น `null` — พิสูจน์ข้างล่างว่าสำหรับ variable type `string` นี่ไม่การันตี — `null` จริงต้องมาจาก HCL literal `null` จริง ๆ (ผ่าน `-var-file` หรือ entry ใน `.tfvars`) ไม่ใช่ quoted string ใน shell
+- `nullable = false` ที่ใส่เพื่อ "บังคับ required" โดยไม่เช็คว่ามี `default` ด้วยหรือเปล่า — พิสูจน์ข้างบนว่าถ้ามีทั้งคู่ Terraform จะแทน default แบบเงียบ ๆ ไม่ error
+- `object({...})` ที่ทุก attribute เป็น required ทั้งที่ prose บอกว่า "field ส่วนใหญ่ optional" — เช็คว่าขาด `optional()` wrapper หรือเปล่า
+- `sensitive = true` ที่ถูกมองว่าเพียงพอสำหรับจัดการ secret — พิสูจน์แล้วในคอร์สนี้ว่า state ยังเก็บค่าดิบอยู่ มีแค่ `ephemeral`/write-only เท่านั้นที่กันการ persist ได้จริง
+- ตัวแปร `ephemeral = true` ที่ generate มาแล้วถูก assign เข้า argument ปกติของ resource ตรง ๆ (เช่น `content`, `labels`, argument ไหนก็ตามที่ไม่ใช่ write-only) — นี่คือ error จริงตอน `terraform validate` ไม่ใช่อะไรที่เพิ่งไปโผล่ตอน apply
+
+<SpotTheBug code={`variable "zone" {
+  type     = string
+  nullable = false
+  default  = "us-central1-a"
+}
+
+# CI job "clears" the variable between runs:
+# terraform plan -var="zone=null"`}>
+โค้ดนี้ไม่ได้เคลียร์ variable ให้เป็น `null` — สำหรับ variable type `string`, `-var="zone=null"` ส่ง string สามตัวอักษรตามตัวอักษร `"null"` ไม่ใช่ค่า `null` จริง พิสูจน์ด้วย block เดียวกันเป๊ะ ๆ:
+
+```text
+$ terraform plan -var="zone=null"
+  + zone = "null"
+```
+
+เทียบกับการส่ง `null` จริงผ่านไฟล์ `.tfvars` (`zone = null` เป็น HCL literal ไม่ใช่ quoted string ใน shell) ซึ่ง fallback ไปที่ default ได้ถูกต้อง:
+
+```text
+$ terraform plan   # terraform.tfvars: zone = null
+  + zone = "us-central1-a"
+```
+
+ทางแก้คือใช้ HCL `null` จริง (entry ใน `-var-file`/`.tfvars` — มีแค่ type อื่นที่ไม่ใช่ string หรือ `null` literal ในไฟล์เท่านั้นที่ไม่กำกวม) ไม่ใช่ bare `-var` flag เมื่อเป้าหมายคือ null จริง ๆ
+</SpotTheBug>
+
+<Callout title="สรุปหนึ่งบรรทัด">
+**`variable`** block ประกาศ input ที่มี type และชื่อ พร้อม **`default`** ที่เป็น optional และ `sensitive = true` ซ่อนค่าจาก CLI output เท่านั้น — ค่ายังถูกเก็บเป็น plain text ใน **state** อยู่ดี **`validation`** block เพิ่ม **`condition`** (อ้าง variable ตัวอื่นได้ตั้งแต่ **1.9**) กับ **`error_message`** แบบ custom ทำให้ input ที่ผิดพังเร็วและชัดเจนตอน `plan` แทนที่จะพังลึก ๆ ใน provider call **`ephemeral = true`** (1.10+) กันค่าไม่ให้เข้า state และ plan file เลย แต่ไหลไปได้แค่ write-only argument, ephemeral value ตัวอื่น, provider block, หรือ provisioner — พิสูจน์ข้างบนว่านอกนั้นคือ error จริงตอน `validate` **`nullable = false`** ปฏิเสธ `null` ก็ต่อเมื่อไม่มี `default` — ถ้ามี `null` จะถูกแทนแบบเงียบ ๆ **`optional()`** ข้างใน `object({...})` ให้ attribute แต่ละตัวมี default ของตัวเอง พิสูจน์ผ่าน `terraform console` เวลา variable ตัวเดียวกันได้ค่าจากหลายที่ Terraform แก้ด้วยลำดับความสำคัญตายตัว พิสูจน์ครบทุกขั้นข้างบน: **`-var`/`-var-file`** ชนะ **`*.auto.tfvars`** ซึ่งชนะ **`terraform.tfvars`** ซึ่งชนะ environment variable **`TF_VAR_*`** ซึ่งชนะ **`default`** ของ variable เอง
 </Callout>
 
 export const quizInputVariables = [
@@ -153,6 +400,7 @@ export const quizInputVariables = [
       'แปลง type ของค่าให้ถูกต้องอัตโนมัติ',
     ],
     answer: 1,
+    explain: 'validation block รัน condition ตอน plan และโชว์ error_message ที่ custom ทันที — พิสูจน์ข้างบนด้วยตัวอย่าง cross-variable max_instances >= min_instances ที่ fail พร้อม message เฉพาะเจาะจงก่อนจะไปเรียก provider เลย',
   },
   {
     q: 'ถ้า variable ตัวหนึ่งมีค่าใน terraform.tfvars, ใน TF_VAR_ environment variable, และส่งผ่าน -var บน command line Terraform จะใช้ค่าไหน',
@@ -163,6 +411,7 @@ export const quizInputVariables = [
       'ค่าจาก terraform.tfvars เพราะไฟล์ explicit กว่า flag',
     ],
     answer: 2,
+    explain: 'พิสูจน์ครบทุกขั้นข้างบน: -var/-var-file คือแหล่งที่ priority สูงสุด เหนือ *.auto.tfvars, terraform.tfvars, TF_VAR_*, และ default ตามลำดับ',
   },
   {
     q: 'sensitive = true บน variable ป้องกันอะไรจริง ๆ',
@@ -173,6 +422,7 @@ export const quizInputVariables = [
       'ห้ามนำค่านั้นไปใช้ใน resource argument ใด ๆ',
     ],
     answer: 1,
+    explain: 'sensitive = true มีผลแค่กับการแสดงผลบน CLI เท่านั้น state ยังเก็บค่าดิบเป็น plain text — มีแค่ ephemeral = true หรือ write-only argument เท่านั้นที่กันค่าไม่ให้เข้า state ได้จริง',
   },
   {
     q: 'ระหว่างไฟล์ *.auto.tfvars กับ terraform.tfvars ถ้าตั้ง variable ตัวเดียวกัน อันไหนชนะ',
@@ -183,6 +433,40 @@ export const quizInputVariables = [
       'ถูก merge กันทีละ field ไม่ว่า type จะเป็นอะไร',
     ],
     answer: 2,
+    explain: 'พิสูจน์ข้างบน: พอมีทั้งสองไฟล์ ค่าจาก *.auto.tfvars ชนะ terraform.tfvars ไฟล์ auto.tfvars จะโหลดตามลำดับตัวอักษรของชื่อไฟล์เวลามีมากกว่าหนึ่ง',
+  },
+  {
+    q: '```hcl\nvariable "max_instances" {\n  type = number\n  validation {\n    condition     = var.max_instances >= var.min_instances\n    error_message = "max_instances must be >= min_instances."\n  }\n}\n```\nTerraform version ไหนที่เริ่มให้ validation condition อ้าง variable ตัวอื่นแบบนี้ได้',
+    options: [
+      'ทำได้มาตั้งแต่ Terraform 0.12 แล้ว',
+      'Terraform 1.9 — ก่อนหน้านั้น validation condition อ้างได้แค่ variable ตัวที่มันติดอยู่เท่านั้น',
+      'Terraform 1.5 พร้อมกับ import block',
+      'ยังทำไม่ได้ในทุก version ที่ release แล้ว',
+    ],
+    answer: 1,
+    explain: 'Cross-variable validation เปิดตัวใน Terraform 1.9 พิสูจน์ข้างบน: block เดียวกันเป๊ะ ๆ รันบน 1.16.4 แล้ว fail พร้อม message ระบุทั้ง var.max_instances และ var.min_instances',
+  },
+  {
+    q: '```hcl\nvariable "session_token" {\n  type      = string\n  ephemeral = true\n  default   = "demo-token"\n}\n\nresource "local_file" "leak" {\n  filename = "out.txt"\n  content  = var.session_token\n}\n```\nรัน terraform validate กับ config นี้จะเกิดอะไรขึ้น',
+    options: [
+      'ผ่านฉลุย — ephemeral มีผลแค่ตอน apply ไม่เกี่ยวกับ validate',
+      'error จริง: "Ephemeral values are not valid for \\"content\\", because it is not a write-only attribute and must be persisted to state"',
+      'ตัด argument content ทิ้งแบบเงียบ ๆ',
+      'แค่ warn แล้ว apply ผ่านตามปกติ',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ข้างบนด้วย config เดียวกันเป๊ะ ๆ: terraform validate ปฏิเสธทันที เพราะ content เป็น argument ปกติ (ไม่ใช่ write-only) และ Terraform รู้ล่วงหน้าแบบ static ว่าต้อง persist ephemeral value ลง state',
+  },
+  {
+    q: 'variable ตัวหนึ่งประกาศ nullable = false พร้อม default caller ส่ง null มาชัด ๆ ผ่านไฟล์ .tfvars จะเกิดอะไรขึ้น',
+    options: [
+      'terraform plan fail ด้วย "required variable may not be set to null"',
+      'null ที่ส่งมาชัด ๆ ถูกแทนที่ด้วย default แบบเงียบ ๆ — ไม่ error เลย',
+      'Terraform crash ด้วย internal error',
+      'variable กลายเป็น empty string ไม่ว่า type ที่ประกาศไว้จะเป็นอะไร',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ข้างบน: nullable = false จะ error ตอนเจอ null ก็ต่อเมื่อไม่มี default เท่านั้น ถ้ามี default อยู่ null ที่ส่งมาชัด ๆ จะถูกแทนที่ด้วย default แบบเงียบ ๆ แทน',
   },
 ];
 
