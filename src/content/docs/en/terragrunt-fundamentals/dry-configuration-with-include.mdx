@@ -92,7 +92,7 @@ export const dryConfigDiagram = `flowchart TD
 
 ## Proof: two `include` blocks with `expose = true`, real `terragrunt render`
 
-`read_terragrunt_config()` above is one way to read `project.hcl`; a second, more direct technique is a **second `include` block**, using `expose = true` on both so their contents become readable as `include.<name>.<field>`, and `merge_strategy = "no_merge"` on the non-root include so `project.hcl` only contributes its own `locals`:
+`read_terragrunt_config()` above is one way to read `project.hcl`; a second, more direct technique is a **second `include` block**, using `expose = true` on both so their contents become readable as `include.NAME.FIELD`, and `merge_strategy = "no_merge"` on the non-root include so `project.hcl` only contributes its own `locals`:
 
 ```hcl
 # root.hcl
@@ -188,18 +188,18 @@ terraform {
 inputs = {
   project_id = include.project.locals.project_id
 }`}>
-Neither \`include\` block sets \`expose = true\`. Proven above, \`expose\` is exactly what makes an include's contents readable through the \`include.<name>\` reference — without it, \`include.project.locals.project_id\` does not resolve to anything usable, and this config fails at evaluation instead of silently reading a wrong value.
+Neither `include` block sets `expose = true`. Proven above, `expose` is exactly what makes an include's contents readable through the `include.NAME` reference — without it, `include.project.locals.project_id` does not resolve to anything usable, and this config fails at evaluation instead of silently reading a wrong value.
 </SpotTheBug>
 
 ## Reading AI-generated code
 
-- A second `include` block with no `expose = true`, then code that references `include.project.locals.project_id` — proven above, `expose` is what makes `include.<name>` a readable value.
+- A second `include` block with no `expose = true`, then code that references `include.project.locals.project_id` — proven above, `expose` is what makes `include.NAME` a readable value.
 - `merge_strategy` left at its default (deep merge) on an intermediate include meant only to contribute `locals` — a `project.hcl` that later grows a stray `remote_state` block would deep-merge it into every unit.
 - `read_terragrunt_config()` called without the extra `.locals` accessor — the return value nests under `.locals`, and code that forgets that hop gets a null instead of the value.
 
 ## Mental Model
 
-`include` with `find_in_parent_folders` is a dynamic, position-independent version of copy-paste. `expose` is the difference between "merged in as blocks" (the default) and "also readable as a value" (`include.<name>.<field>`) — proven above.
+`include` with `find_in_parent_folders` is a dynamic, position-independent version of copy-paste. `expose` is the difference between "merged in as blocks" (the default) and "also readable as a value" (`include.NAME.FIELD`) — proven above.
 
 ## Trade-offs
 
@@ -262,7 +262,7 @@ export const quizDryConfig = [
     q: 'A unit has two include blocks, "root" and "project", neither with expose = true. Code references include.project.locals.project_id. What happens, proven above?',
     options: [
       'It resolves correctly — expose only affects generate blocks',
-      'Both includes still deep-merge their blocks (remote_state from root still works), but include.project.locals.project_id does not resolve, since expose is what makes include.<name> readable at all',
+      'Both includes still deep-merge their blocks (remote_state from root still works), but include.project.locals.project_id does not resolve, since expose is what makes include.NAME readable at all',
       'Terragrunt automatically infers expose = true whenever a locals block is present',
       'The unit fails to parse entirely, before any blocks are merged',
     ],

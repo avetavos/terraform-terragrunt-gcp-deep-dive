@@ -149,7 +149,7 @@ data "terraform_remote_state" "network" {
 resource "google_container_cluster" "app" {
   network = data.terraform_remote_state.network.outputs.network_self_link
 }`}>
-พิสูจน์ข้างบน \`terraform_remote_state\` ไม่มีกลไก mock-output เลย — ต่างจาก Terragrunt \`dependency\` block ไม่มีทางให้ \`plan\` นี้สำเร็จด้วย placeholder พร้อมส่งสัญญาณว่า \`apply\` ควรยังปฏิเสธอยู่ ผลลัพธ์จริงที่เลี่ยงไม่ได้ตรงนี้คือ \`Error: Unable to find remote state\` และทางแก้เดียวภายใน Terraform เปล่า ๆ คือเรียง apply ด้วยมือ
+พิสูจน์ข้างบน `terraform_remote_state` ไม่มีกลไก mock-output เลย — ต่างจาก Terragrunt `dependency` block ไม่มีทางให้ `plan` นี้สำเร็จด้วย placeholder พร้อมส่งสัญญาณว่า `apply` ควรยังปฏิเสธอยู่ ผลลัพธ์จริงที่เลี่ยงไม่ได้ตรงนี้คือ `Error: Unable to find remote state` และทางแก้เดียวภายใน Terraform เปล่า ๆ คือเรียง apply ด้วยมือ
 </SpotTheBug>
 
 <Callout title="สรุปหนึ่งบรรทัด">

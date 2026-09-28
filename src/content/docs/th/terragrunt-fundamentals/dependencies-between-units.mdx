@@ -187,33 +187,33 @@ dependency "vpc" {
 inputs = {
   network_id = dependency.vpc.outputs.network_id
 }`}>
-บั๊กคือ \`"apply"\` ที่อยู่ใน \`mock_outputs_allowed_terraform_commands\` ควบคู่กับ \`"plan"\` พิสูจน์ข้างบนว่าการจำกัด list เหลือแค่ \`["plan"]\` คือตัวที่ทำให้ \`apply\` ปฏิเสธไม่รันด้วย error จริง จนกว่า \`vpc\` จะถูก apply จริง ๆ — ถ้ามี \`"apply"\` รวมอยู่ \`terragrunt apply\` บน \`compute\` จะสำเร็จเงียบ ๆ โดยใช้ \`network_id = "mock-network-id"\` ต่อ infrastructure จริงของ GCP เข้ากับค่า placeholder แทนที่จะเป็น network จริง
+บั๊กคือ `"apply"` ที่อยู่ใน `mock_outputs_allowed_terraform_commands` ควบคู่กับ `"plan"` พิสูจน์ข้างบนว่าการจำกัด list เหลือแค่ `["plan"]` คือตัวที่ทำให้ `apply` ปฏิเสธไม่รันด้วย error จริง จนกว่า `vpc` จะถูก apply จริง ๆ — ถ้ามี `"apply"` รวมอยู่ `terragrunt apply` บน `compute` จะสำเร็จเงียบ ๆ โดยใช้ `network_id = "mock-network-id"` ต่อ infrastructure จริงของ GCP เข้ากับค่า placeholder แทนที่จะเป็น network จริง
 </SpotTheBug>
 
 ## อ่านโค้ดที่ AI สร้าง
 
-- \`mock_outputs_allowed_terraform_commands\` ที่มี \`"apply"\` รวมอยู่ด้วย — พิสูจน์ข้างบนว่า guardrail เฉพาะนี้มีไว้เพื่อหยุด \`apply\` ไม่ให้รันกับข้อมูลปลอม
-- \`mock_outputs\` ที่มีอยู่แต่ไม่มี \`mock_outputs_allowed_terraform_commands\` เลย — mock ไม่ถูกใช้เลย \`plan\` ครั้งแรกบน environment ใหม่ล้วนจะ fail ด้วย error "detected no outputs" เป๊ะ ๆ แบบที่พิสูจน์ข้างบน
-- \`dependencies { paths = [...] }\` block ที่โค้ดข้างในพยายามอ่าน \`dependencies.vpc.something\` — attribute นั้นไม่มีอยู่บน \`dependencies\` block เลย มีแค่ \`dependency\` (เอกพจน์) เท่านั้นที่ expose \`.outputs\`
+- `mock_outputs_allowed_terraform_commands` ที่มี `"apply"` รวมอยู่ด้วย — พิสูจน์ข้างบนว่า guardrail เฉพาะนี้มีไว้เพื่อหยุด `apply` ไม่ให้รันกับข้อมูลปลอม
+- `mock_outputs` ที่มีอยู่แต่ไม่มี `mock_outputs_allowed_terraform_commands` เลย — mock ไม่ถูกใช้เลย `plan` ครั้งแรกบน environment ใหม่ล้วนจะ fail ด้วย error "detected no outputs" เป๊ะ ๆ แบบที่พิสูจน์ข้างบน
+- `dependencies { paths = [...] }` block ที่โค้ดข้างในพยายามอ่าน `dependencies.vpc.something` — attribute นั้นไม่มีอยู่บน `dependencies` block เลย มีแค่ `dependency` (เอกพจน์) เท่านั้นที่ expose `.outputs`
 
 ## Mental Model
 
-\`dependency\` block คือตัวแทนของ cross-module reference ที่ Terraform ให้ฟรีภายใน state เดียว — พิสูจน์ข้างบนว่ามันทำงานด้วยการ shell out ไปเรียก \`terraform output -json\` กับอีก unit จริง ๆ ก่อนที่ \`plan\`/\`apply\` ของ unit นี้จะเริ่มด้วยซ้ำ
+`dependency` block คือตัวแทนของ cross-module reference ที่ Terraform ให้ฟรีภายใน state เดียว — พิสูจน์ข้างบนว่ามันทำงานด้วยการ shell out ไปเรียก `terraform output -json` กับอีก unit จริง ๆ ก่อนที่ `plan`/`apply` ของ unit นี้จะเริ่มด้วยซ้ำ
 
 ## Trade-offs
 
 | ทางเลือก | ได้อะไร | เสียอะไร |
 |---|---|---|
-| \`dependency\` block แทนการใช้ Terraform state เดียวร่วมกัน | state แยกอิสระต่อ unit \`run --all\` ยังได้ลำดับที่ถูกต้อง พิสูจน์ข้างบน | มี \`terraform output\` shell-out เพิ่มต่อ dependency ต่อ run |
-| \`mock_outputs\` scope ด้วย \`mock_outputs_allowed_terraform_commands\` | \`plan\`/CI บน environment ที่ apply ไปแค่บางส่วนไม่ fail แข็ง | พิสูจน์ข้างบน: ตั้ง allow-list ผิด แลกจาก fail ที่ดังและถูกต้อง เป็น fail เงียบ ๆ ที่ผิด |
+| `dependency` block แทนการใช้ Terraform state เดียวร่วมกัน | state แยกอิสระต่อ unit `run --all` ยังได้ลำดับที่ถูกต้อง พิสูจน์ข้างบน | มี `terraform output` shell-out เพิ่มต่อ dependency ต่อ run |
+| `mock_outputs` scope ด้วย `mock_outputs_allowed_terraform_commands` | `plan`/CI บน environment ที่ apply ไปแค่บางส่วนไม่ fail แข็ง | พิสูจน์ข้างบน: ตั้ง allow-list ผิด แลกจาก fail ที่ดังและถูกต้อง เป็น fail เงียบ ๆ ที่ผิด |
 
 ## ความเข้าใจผิดที่พบบ่อย
 
-- **"dependency block link state ของสอง unit เข้าด้วยกัน"** พิสูจน์ข้างบน: Terraform ไม่เห็น \`vpc\` เลยตอน plan \`compute\` Terragrunt resolve ค่าก่อน ผ่าน \`terraform output\` call แยกต่างหาก
-- **"mock_outputs ถูกใช้อัตโนมัติทุกครั้งที่ state จริงของ dependency หายไป"** พิสูจน์ข้างบนด้วย error จริงของ apply: mock ถูกใช้แค่กับ command ที่ list ไว้ใน \`mock_outputs_allowed_terraform_commands\` ตรง ๆ เท่านั้น
+- **"dependency block link state ของสอง unit เข้าด้วยกัน"** พิสูจน์ข้างบน: Terraform ไม่เห็น `vpc` เลยตอน plan `compute` Terragrunt resolve ค่าก่อน ผ่าน `terraform output` call แยกต่างหาก
+- **"mock_outputs ถูกใช้อัตโนมัติทุกครั้งที่ state จริงของ dependency หายไป"** พิสูจน์ข้างบนด้วย error จริงของ apply: mock ถูกใช้แค่กับ command ที่ list ไว้ใน `mock_outputs_allowed_terraform_commands` ตรง ๆ เท่านั้น
 
 <Callout title="สรุปหนึ่งบรรทัด">
-\`dependency "vpc" { config_path = "../vpc" }\` block คือวิธีที่ unit หนึ่งอ่าน output ของอีก unit เป็น \`dependency.vpc.outputs.<name>\` ข้าม state boundary ที่ module composition ธรรมดาของ Terraform ข้ามไม่ได้ แล้วส่งค่านั้นตรงเข้า \`inputs\` ของ unit ที่อ่าน — พิสูจน์ข้างบนด้วย \`terraform output\` call จริงที่สลับจากค่า mock เป็นค่าจริงทันทีที่ dependency ถูก apply ค่า \`mock_outputs\` ที่ scope ด้วย \`mock_outputs_allowed_terraform_commands\` ทำให้ \`plan\` บน unit ที่พึ่งพาสำเร็จได้ก่อนที่จะ apply unit ที่พึ่งพาจริง ส่วน \`apply\` จริงยังต้องการ output จริงอยู่ดี — พิสูจน์ข้างบนด้วย error จริงแบบ "detected no outputs" ของ Terragrunt เพราะทุก \`dependency\` block เรียกชื่อ unit ที่พึ่งพาตรง ๆ Terragrunt จึงคำนวณลำดับ apply ที่ถูกต้องทั่วทั้ง tree ของ unit ได้เอง โดยไม่มีใครต้อง hard-code ลำดับนั้น — พิสูจน์ข้างบนด้วย ordering log จริง
+`dependency "vpc" { config_path = "../vpc" }` block คือวิธีที่ unit หนึ่งอ่าน output ของอีก unit เป็น `dependency.vpc.outputs.NAME` ข้าม state boundary ที่ module composition ธรรมดาของ Terraform ข้ามไม่ได้ แล้วส่งค่านั้นตรงเข้า `inputs` ของ unit ที่อ่าน — พิสูจน์ข้างบนด้วย `terraform output` call จริงที่สลับจากค่า mock เป็นค่าจริงทันทีที่ dependency ถูก apply ค่า `mock_outputs` ที่ scope ด้วย `mock_outputs_allowed_terraform_commands` ทำให้ `plan` บน unit ที่พึ่งพาสำเร็จได้ก่อนที่จะ apply unit ที่พึ่งพาจริง ส่วน `apply` จริงยังต้องการ output จริงอยู่ดี — พิสูจน์ข้างบนด้วย error จริงแบบ "detected no outputs" ของ Terragrunt เพราะทุก `dependency` block เรียกชื่อ unit ที่พึ่งพาตรง ๆ Terragrunt จึงคำนวณลำดับ apply ที่ถูกต้องทั่วทั้ง tree ของ unit ได้เอง โดยไม่มีใครต้อง hard-code ลำดับนั้น — พิสูจน์ข้างบนด้วย ordering log จริง
 </Callout>
 
 export const quizDependency = [

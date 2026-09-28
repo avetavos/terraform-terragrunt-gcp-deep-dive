@@ -157,7 +157,7 @@ $ echo $?
     message          = "Known flaky DNS in this CI runner, ignoring"
   }
 }`}>
-ไม่ใช่บั๊ก syntax — เป็นบั๊กเรื่อง scope \`ignorable_errors\` regex match กับ error text **อะไรก็ได้** ที่เกิดระหว่างการรันของ unit นั้น ไม่ใช่เฉพาะ DNS-resolution failure เท่านั้น bug จริงของ provider ที่บังเอิญมีคำว่า "DNS resolution failed" เป็นบรรทัดหนึ่งข้างใน error ที่ใหญ่กว่าและไม่เกี่ยวข้องเลย ก็จะถูก ignore ไปเงียบ ๆ เหมือนกัน เพราะ regex matching ไม่มีแนวคิดเรื่อง "นี่คือ root cause จริง เทียบกับ text ที่บังเอิญปนมา"
+ไม่ใช่บั๊ก syntax — เป็นบั๊กเรื่อง scope `ignorable_errors` regex match กับ error text **อะไรก็ได้** ที่เกิดระหว่างการรันของ unit นั้น ไม่ใช่เฉพาะ DNS-resolution failure เท่านั้น bug จริงของ provider ที่บังเอิญมีคำว่า "DNS resolution failed" เป็นบรรทัดหนึ่งข้างใน error ที่ใหญ่กว่าและไม่เกี่ยวข้องเลย ก็จะถูก ignore ไปเงียบ ๆ เหมือนกัน เพราะ regex matching ไม่มีแนวคิดเรื่อง "นี่คือ root cause จริง เทียบกับ text ที่บังเอิญปนมา"
 </SpotTheBug>
 
 ## Mental Model
@@ -169,15 +169,15 @@ $ echo $?
 | ทางเลือก | ได้อะไร | เสียอะไร |
 |---|---|---|
 | `--filter` แทน `--queue-include-dir` | syntax ปัจจุบัน มีเอกสารรองรับ เป็น path-glob dialect จริง | สคริปต์เดิมที่ใช้ `--queue-include-dir` ไม่ได้พัง (พิสูจน์ข้างบน) |
-| `errors { ignore }` | failure mode ที่รู้จักและเข้าใจแล้ว ไม่ทำให้ `run --all` ทั้งก้อนหยุด | พิสูจน์ข้างบนด้วย SpotTheBug: regex ที่กว้างเกินตั้งใจกลืน failure จริงที่ไม่เกี่ยวข้องไปเงียบ ๆ |
+| ``errors { ignore }`` | failure mode ที่รู้จักและเข้าใจแล้ว ไม่ทำให้ `run --all` ทั้งก้อนหยุด | พิสูจน์ข้างบนด้วย SpotTheBug: regex ที่กว้างเกินตั้งใจกลืน failure จริงที่ไม่เกี่ยวข้องไปเงียบ ๆ |
 
 ## ความเข้าใจผิดที่พบบ่อย
 
 - **"flag ไหนที่ไม่อยู่ในเอกสารปัจจุบันแปลว่าพังแล้ว"** พิสูจน์ข้างบน: `--queue-include-dir` ยังรัน `init`+`plan` จริงได้โดยไม่มี error เลยบน Terragrunt 1.1.0 ที่ติดตั้งในคอร์สนี้ — soft-deprecated ไม่เหมือนกับถูกลบ
-- **"errors { ignore } block match แค่สถานการณ์ error เป๊ะ ๆ ที่ฉันเขียนมันไว้"** พิสูจน์ข้างบนด้วย SpotTheBug: มัน match error text อะไรก็ได้ที่ regex บังเอิญ hit
+- **"`errors { ignore }` block match แค่สถานการณ์ error เป๊ะ ๆ ที่ฉันเขียนมันไว้"** พิสูจน์ข้างบนด้วย SpotTheBug: มัน match error text อะไรก็ได้ที่ regex บังเอิญ hit
 
 <Callout title="สรุปหนึ่งบรรทัด">
-`terragrunt run --all plan` กับ `terragrunt run --all apply` คือ command ปัจจุบันสำหรับ operate กับทุก unit ใต้ directory tree ตามลำดับที่ Terragrunt คำนวณจาก `dependency` block ของแต่ละ unit — พิสูจน์ข้างบนด้วย `find --dag`/`list --dag` ที่คืนลำดับเดียวกันเป๊ะกับที่ `run --all` จริงใช้ syntax เก่าอย่าง `terragrunt run-all <command>` และ `plan-all`/`apply-all` ถูกเอาออกไปทั้งหมดแล้ว — พิสูจน์ข้างบนด้วย error จริงแบบ `unknown command` scope `run --all` ให้แคบลงเหลือบางส่วนของ tree ด้วย `--filter` ซึ่งมาแทน `--queue-include-dir`/`--queue-exclude-dir` — แต่พิสูจน์ข้างบนด้วย run จริง flag เก่าเหล่านั้น soft-deprecated ไม่ใช่ถูกลบ ต่างจากกลุ่มคำสั่ง `*-all` ที่ hard-removed ข้าม confirmation prompt ใน CI ด้วย `--non-interactive` `before_hook` กับ `after_hook` block ข้างใน `terraform` block ของ unit รัน shell command ตามใจก่อนหรือหลัง Terragrunt command เฉพาะบน unit นั้น `errors { ignore / retry }` block (syntax จริง พิสูจน์ข้างบน) ลดระดับ failure ที่ match ลงเป็น warning ได้ — พิสูจน์ว่าเปลี่ยน `plan` ที่ fail จริงด้วย exit code 1 ให้กลายเป็น exit code 0 ได้ และพิสูจน์ว่าอันตรายเมื่อ regex กว้างเกินตั้งใจ
+`terragrunt run --all plan` กับ `terragrunt run --all apply` คือ command ปัจจุบันสำหรับ operate กับทุก unit ใต้ directory tree ตามลำดับที่ Terragrunt คำนวณจาก `dependency` block ของแต่ละ unit — พิสูจน์ข้างบนด้วย `find --dag`/`list --dag` ที่คืนลำดับเดียวกันเป๊ะกับที่ `run --all` จริงใช้ syntax เก่าอย่าง `terragrunt run-all COMMAND` และ `plan-all`/`apply-all` ถูกเอาออกไปทั้งหมดแล้ว — พิสูจน์ข้างบนด้วย error จริงแบบ `unknown command` scope `run --all` ให้แคบลงเหลือบางส่วนของ tree ด้วย `--filter` ซึ่งมาแทน `--queue-include-dir`/`--queue-exclude-dir` — แต่พิสูจน์ข้างบนด้วย run จริง flag เก่าเหล่านั้น soft-deprecated ไม่ใช่ถูกลบ ต่างจากกลุ่มคำสั่ง `*-all` ที่ hard-removed ข้าม confirmation prompt ใน CI ด้วย `--non-interactive` `before_hook` กับ `after_hook` block ข้างใน `terraform` block ของ unit รัน shell command ตามใจก่อนหรือหลัง Terragrunt command เฉพาะบน unit นั้น `errors { ignore / retry }` block (syntax จริง พิสูจน์ข้างบน) ลดระดับ failure ที่ match ลงเป็น warning ได้ — พิสูจน์ว่าเปลี่ยน `plan` ที่ fail จริงด้วย exit code 1 ให้กลายเป็น exit code 0 ได้ และพิสูจน์ว่าอันตรายเมื่อ regex กว้างเกินตั้งใจ
 </Callout>
 
 export const quizRunAll = [

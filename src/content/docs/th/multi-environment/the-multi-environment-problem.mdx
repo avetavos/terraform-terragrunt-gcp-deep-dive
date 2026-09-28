@@ -111,7 +111,7 @@ resource "google_compute_instance" "app" {
     environment = "prod"
   }
 }`}>
-resource block นี้เหมือนกันเป๊ะ ถูก generate ออกมาให้ทั้งสาม directory — รวมทั้ง \`dev/main.tf\` และ \`staging/main.tf\` ที่ hardcode \`environment = "prod"\` ไว้ใน labels ด้วย นี่คือ artifact แบบ copy-paste ที่สมจริง block นี้ถูกเขียนครั้งเดียวสำหรับ prod แล้ว copy ไปอีกสอง directory โดยไม่มีใครอัปเดตค่าเดียวที่ควรต่างกันตาม environment cost report กับ resource filter ทุกตัวที่ key ด้วย label นั้นตอนนี้ misattribute spend ของ dev กับ staging ไปเป็น prod เงียบ ๆ และไม่มีอะไรใน Terraform เองจับได้เลย — config นี้เป็น HCL ที่ valid สมบูรณ์แบบและ apply ผ่านสะอาดทั้งสามที่
+resource block นี้เหมือนกันเป๊ะ ถูก generate ออกมาให้ทั้งสาม directory — รวมทั้ง `dev/main.tf` และ `staging/main.tf` ที่ hardcode `environment = "prod"` ไว้ใน labels ด้วย นี่คือ artifact แบบ copy-paste ที่สมจริง block นี้ถูกเขียนครั้งเดียวสำหรับ prod แล้ว copy ไปอีกสอง directory โดยไม่มีใครอัปเดตค่าเดียวที่ควรต่างกันตาม environment cost report กับ resource filter ทุกตัวที่ key ด้วย label นั้นตอนนี้ misattribute spend ของ dev กับ staging ไปเป็น prod เงียบ ๆ และไม่มีอะไรใน Terraform เองจับได้เลย — config นี้เป็น HCL ที่ valid สมบูรณ์แบบและ apply ผ่านสะอาดทั้งสามที่
 </SpotTheBug>
 
 ## Mental Model

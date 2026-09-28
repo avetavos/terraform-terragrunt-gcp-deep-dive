@@ -187,33 +187,33 @@ dependency "vpc" {
 inputs = {
   network_id = dependency.vpc.outputs.network_id
 }`}>
-The bug is \`"apply"\` sitting in \`mock_outputs_allowed_terraform_commands\` alongside \`"plan"\`. Proven above, restricting the list to \`["plan"]\` is what makes \`apply\` refuse to run with a real error until \`vpc\` has genuinely been applied — with \`"apply"\` included, \`terragrunt apply\` on \`compute\` succeeds silently using \`network_id = "mock-network-id"\`, wiring real GCP infrastructure to a placeholder value instead of the real network.
+The bug is `"apply"` sitting in `mock_outputs_allowed_terraform_commands` alongside `"plan"`. Proven above, restricting the list to `["plan"]` is what makes `apply` refuse to run with a real error until `vpc` has genuinely been applied — with `"apply"` included, `terragrunt apply` on `compute` succeeds silently using `network_id = "mock-network-id"`, wiring real GCP infrastructure to a placeholder value instead of the real network.
 </SpotTheBug>
 
 ## Reading AI-generated code
 
-- \`mock_outputs_allowed_terraform_commands\` including \`"apply"\` — proven above, that specific safety refusal exists precisely to stop \`apply\` from running against fake data.
-- \`mock_outputs\` present with no \`mock_outputs_allowed_terraform_commands\` at all — the mock is never used, so a fresh environment's first \`plan\` fails with the exact "detected no outputs" error proven above.
-- A \`dependencies { paths = [...] }\` block where code then tries to read \`dependencies.vpc.something\` — that attribute never exists on a \`dependencies\` block; only \`dependency\` (singular) exposes \`.outputs\`.
+- `mock_outputs_allowed_terraform_commands` including `"apply"` — proven above, that specific safety refusal exists precisely to stop `apply` from running against fake data.
+- `mock_outputs` present with no `mock_outputs_allowed_terraform_commands` at all — the mock is never used, so a fresh environment's first `plan` fails with the exact "detected no outputs" error proven above.
+- A `dependencies { paths = [...] }` block where code then tries to read `dependencies.vpc.something` — that attribute never exists on a `dependencies` block; only `dependency` (singular) exposes `.outputs`.
 
 ## Mental Model
 
-A \`dependency\` block is Terragrunt's stand-in for the cross-module reference Terraform gives you for free inside one state — proven above, it works by shelling out to \`terraform output -json\` against the other unit before this unit's own \`plan\`/\`apply\` ever starts.
+A `dependency` block is Terragrunt's stand-in for the cross-module reference Terraform gives you for free inside one state — proven above, it works by shelling out to `terraform output -json` against the other unit before this unit's own `plan`/`apply` ever starts.
 
 ## Trade-offs
 
 | Choice | Benefit | Cost |
 |---|---|---|
-| \`dependency\` blocks instead of one shared Terraform state | Independent state per unit; \`run --all\` still gets correct ordering, proven above | An extra \`terraform output\` shell-out per dependency per run |
-| \`mock_outputs\` scoped by \`mock_outputs_allowed_terraform_commands\` | \`plan\`/CI on a partially-applied environment doesn't hard-fail | Proven above: getting the allow-list wrong silently trades a loud, correct failure for a quiet, wrong one |
+| `dependency` blocks instead of one shared Terraform state | Independent state per unit; `run --all` still gets correct ordering, proven above | An extra `terraform output` shell-out per dependency per run |
+| `mock_outputs` scoped by `mock_outputs_allowed_terraform_commands` | `plan`/CI on a partially-applied environment doesn't hard-fail | Proven above: getting the allow-list wrong silently trades a loud, correct failure for a quiet, wrong one |
 
 ## Common Misconceptions
 
-- **"A dependency block links two units' state together."** Proven above: Terraform never sees \`vpc\` at all when planning \`compute\`. Terragrunt resolves the value first, via a separate \`terraform output\` call.
-- **"mock_outputs are used automatically whenever a dependency's real state is missing."** Proven above with the real apply error: mocks are only used for commands explicitly listed in \`mock_outputs_allowed_terraform_commands\`.
+- **"A dependency block links two units' state together."** Proven above: Terraform never sees `vpc` at all when planning `compute`. Terragrunt resolves the value first, via a separate `terraform output` call.
+- **"mock_outputs are used automatically whenever a dependency's real state is missing."** Proven above with the real apply error: mocks are only used for commands explicitly listed in `mock_outputs_allowed_terraform_commands`.
 
 <Callout title="The one-line takeaway">
-A `dependency "vpc" { config_path = "../vpc" }` block is how one unit reads another unit's outputs as `dependency.vpc.outputs.<name>` across the separate-state boundary that ordinary Terraform module composition cannot cross, feeding that value straight into the reading unit's own `inputs` — proven above with a real `terraform output` call that flips from a mock value to a real one the instant `vpc` is applied. `mock_outputs`, scoped to specific commands with `mock_outputs_allowed_terraform_commands`, lets a `plan` on the dependent unit succeed even before the depended-on unit has actually been applied, while a real `apply` still demands the real output — proven above with Terragrunt's real "detected no outputs" error. Because every `dependency` block names the unit it depends on explicitly, Terragrunt can compute the correct apply order across an entire tree of units on its own, without anyone hard-coding that sequence — proven above in a real ordering log.
+A `dependency "vpc" { config_path = "../vpc" }` block is how one unit reads another unit's outputs as `dependency.vpc.outputs.NAME` across the separate-state boundary that ordinary Terraform module composition cannot cross, feeding that value straight into the reading unit's own `inputs` — proven above with a real `terraform output` call that flips from a mock value to a real one the instant `vpc` is applied. `mock_outputs`, scoped to specific commands with `mock_outputs_allowed_terraform_commands`, lets a `plan` on the dependent unit succeed even before the depended-on unit has actually been applied, while a real `apply` still demands the real output — proven above with Terragrunt's real "detected no outputs" error. Because every `dependency` block names the unit it depends on explicitly, Terragrunt can compute the correct apply order across an entire tree of units on its own, without anyone hard-coding that sequence — proven above in a real ordering log.
 </Callout>
 
 export const quizDependency = [

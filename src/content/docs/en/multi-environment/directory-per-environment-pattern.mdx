@@ -189,7 +189,7 @@ resource "google_compute_instance" "app" {
     }
   }
 }`}>
-Proven above with real \`terraform validate\` errors: this module references \`var.instance_count\`, \`var.environment\`, and \`var.machine_type\` with no matching \`variable\` blocks anywhere in the file — three real "Reference to undeclared input variable" errors — and the \`google_compute_instance\` resource has no \`network_interface\` block, a fourth real error. A module that "looks complete" because it has a \`count\`, a computed \`name\`, and a \`boot_disk\` is still missing two entire categories of required configuration that only \`terraform validate\` catches reliably.
+Proven above with real `terraform validate` errors: this module references `var.instance_count`, `var.environment`, and `var.machine_type` with no matching `variable` blocks anywhere in the file — three real "Reference to undeclared input variable" errors — and the `google_compute_instance` resource has no `network_interface` block, a fourth real error. A module that "looks complete" because it has a `count`, a computed `name`, and a `boot_disk` is still missing two entire categories of required configuration that only `terraform validate` catches reliably.
 </SpotTheBug>
 
 ## `terragrunt stack`: generating a whole tree of units from one catalog

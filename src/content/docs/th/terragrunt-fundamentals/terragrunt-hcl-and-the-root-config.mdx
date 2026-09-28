@@ -226,7 +226,7 @@ remote_state {
     prefix = "terraform.tfstate"
   }
 }`}>
-บั๊กสองตัว พิสูจน์ทั้งคู่ข้างบน อันแรก \`prefix = "terraform.tfstate"\` คือ literal string ไม่ใช่ \`"${path_relative_to_include()}/terraform.tfstate"\` — พิสูจน์ข้างบน ไม่มี function call นี้ ทุก unit ที่ include root นี้จะ resolve ไปที่ GCS object prefix เดียวกันเป๊ะ แอบ share state file เดียวกัน อันที่สอง \`project\` กับ \`location\` หายไปจาก \`config\` ทั้งคู่ — พิสูจน์ข้างบนจาก quote เอกสาร auto-create bucket ต้องมีทั้งสองตัว ถ้าไม่มี run แรกกับ bucket ที่ยังไม่มีอยู่จะ fail แทนที่จะ bootstrap ให้ และ failure mode จะดูเหมือน error "bucket not found" ที่ไม่เกี่ยวกันเลย แทนที่จะชี้ไปที่สองคีย์ที่หายไป
+บั๊กสองตัว พิสูจน์ทั้งคู่ข้างบน อันแรก `prefix = "terraform.tfstate"` คือ literal string ไม่ใช่ `"${path_relative_to_include()}/terraform.tfstate"` — พิสูจน์ข้างบน ไม่มี function call นี้ ทุก unit ที่ include root นี้จะ resolve ไปที่ GCS object prefix เดียวกันเป๊ะ แอบ share state file เดียวกัน อันที่สอง `project` กับ `location` หายไปจาก `config` ทั้งคู่ — พิสูจน์ข้างบนจาก quote เอกสาร auto-create bucket ต้องมีทั้งสองตัว ถ้าไม่มี run แรกกับ bucket ที่ยังไม่มีอยู่จะ fail แทนที่จะ bootstrap ให้ และ failure mode จะดูเหมือน error "bucket not found" ที่ไม่เกี่ยวกันเลย แทนที่จะชี้ไปที่สองคีย์ที่หายไป
 </SpotTheBug>
 
 ## Mental Model
@@ -245,7 +245,7 @@ remote_state {
 
 - **"ทุก key ข้างใน remote_state.config จบลงใน backend.tf ที่ generate มา"** พิสูจน์ข้างบน: `project` กับ `location` ถูก Terragrunt ใช้ไปทั้งหมดสำหรับ auto-create logic ของตัวเอง ไม่เคยโผล่ใน `terraform { backend "gcs" {} }` block จริงเลย มีแค่ `bucket` กับ `prefix` เท่านั้น
 - **"GCS ต้องมี lock-table setting แยกเหมือน backend บางเจ้า"** ไม่จริง — GCS จัดการ state locking เองอยู่แล้ว ไม่มี argument แบบ `dynamodb_table` ที่ไหนเลยใน `remote_state.config` ที่โชว์ข้างบน
-- **"generate เขียนตรงเข้า unit directory ของฉันเลย"** พิสูจน์ข้างบน `backend.tf` จริงที่บทนี้ capture มาอยู่ใน `.terragrunt-cache/<hash>/<hash>/backend.tf` ไม่ใช่ source directory ที่คุณแก้ไข
+- **"generate เขียนตรงเข้า unit directory ของฉันเลย"** พิสูจน์ข้างบน `backend.tf` จริงที่บทนี้ capture มาอยู่ใน `.terragrunt-cache/HASH/HASH/backend.tf` ไม่ใช่ source directory ที่คุณแก้ไข
 
 <Callout title="สรุปหนึ่งบรรทัด">
 Terragrunt **unit** คือ directory เดียวที่มี `terragrunt.hcl` และ state ของตัวเอง ห่อ Terraform module ไว้หนึ่งตัว ส่วน shared parent config อยู่ชั้นบนขึ้นไปหนึ่งชั้น ตอนนี้ตั้งชื่อตาม convention ว่า **`root.hcl`** (ไม่ใช่ `terragrunt.hcl`) เพื่อไม่ให้สับสนระหว่าง "ไฟล์ root ที่ share กัน" กับ "ไฟล์ของ unit นี้เอง" โดยเฉพาะ repo เก่าที่ยังเรียกว่า `terragrunt.hcl` ก็ยังใช้งานได้ปกติ `root.hcl` ประกาศ `remote_state` block พร้อม `generate` sub-block ทำให้ทุก unit ได้ GCS **backend.tf** ที่เหมือนกันทุกตัว มาจากที่เดียวกัน (ไม่ต้องมี lock-table setting แยก) และผ่าน `generate "provider"` block ระดับบนสุด ก็ได้ **provider.tf** ด้วย แทนที่จะต้อง copy-paste boilerplate นี้ลงทุก unit เอง — พิสูจน์ข้างบนด้วย `terragrunt render` จริงและเนื้อหา `backend.tf` ที่ generate จริง ไฟล์นั้นมีแค่ `bucket`/`prefix` — พิสูจน์ข้างบน `project`/`location` ถูก Terragrunt ใช้ไปทั้งหมดสำหรับ GCS auto-create logic ของตัวเอง ไม่เคยไปถึง backend block ของ Terraform เลย ส่วน `terragrunt.hcl` ของแต่ละ unit ก็เหลือแค่ต้องมี `terraform { source = ... }` block ชี้ไปที่ module จริงที่ควรรัน

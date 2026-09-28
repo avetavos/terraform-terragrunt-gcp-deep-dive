@@ -157,7 +157,7 @@ Without the `ignore` block, this exact failing `plan` exits non-zero. With it, t
     message          = "Known flaky DNS in this CI runner, ignoring"
   }
 }`}>
-Not a syntax bug — a scope bug. \`ignorable_errors\` regexes match against **any** error text produced during that unit's run, not specifically DNS-resolution failures. A real provider bug that happens to mention "DNS resolution failed" as one line inside a much larger, unrelated error gets silently ignored too, because regex matching has no concept of "this is the root cause vs. incidental text."
+Not a syntax bug — a scope bug. `ignorable_errors` regexes match against **any** error text produced during that unit's run, not specifically DNS-resolution failures. A real provider bug that happens to mention "DNS resolution failed" as one line inside a much larger, unrelated error gets silently ignored too, because regex matching has no concept of "this is the root cause vs. incidental text."
 </SpotTheBug>
 
 ## Mental Model
@@ -169,15 +169,15 @@ Not a syntax bug — a scope bug. \`ignorable_errors\` regexes match against **a
 | Choice | Benefit | Cost |
 |---|---|---|
 | `--filter` over `--queue-include-dir` | Current, documented syntax, a real path-glob dialect | Existing scripts using `--queue-include-dir` are not broken (proven above) |
-| `errors { ignore }` | A known, understood failure mode does not halt an entire `run --all` | Proven above: a regex broader than intended silently swallows unrelated real failures |
+| ``errors { ignore }`` | A known, understood failure mode does not halt an entire `run --all` | Proven above: a regex broader than intended silently swallows unrelated real failures |
 
 ## Common Misconceptions
 
 - **"Any flag that isn't in the current docs must be broken."** Proven above: `--queue-include-dir` still runs a real `init`+`plan` with zero errors on this course's installed 1.1.0 — soft-deprecated is not the same as removed.
-- **"An errors { ignore } block only matches the exact error scenario I wrote it for."** Proven above with the SpotTheBug: it matches any error text the regex happens to hit.
+- **"An `errors { ignore }` block only matches the exact error scenario I wrote it for."** Proven above with the SpotTheBug: it matches any error text the regex happens to hit.
 
 <Callout title="The one-line takeaway">
-`terragrunt run --all plan` and `terragrunt run --all apply` are the current commands for operating on every unit under a directory tree, applied in the order Terragrunt computes from each unit's `dependency` blocks — proven above with `find --dag`/`list --dag` returning the identical order a real `run --all` uses; the older `terragrunt run-all <command>` syntax and `plan-all`/`apply-all` have all been removed entirely — none of the three runs on a current install, proven above with real `unknown command` errors. Scope a `run --all` to part of the tree with `--filter`, which replaced `--queue-include-dir`/`--queue-exclude-dir` — but proven above with a real run, those older flags are soft-deprecated, not removed, unlike the hard-removed `*-all` commands. Skip confirmation prompts in CI with `--non-interactive`. `before_hook` and `after_hook` blocks inside a unit's `terraform` block run an arbitrary shell command before or after specific Terragrunt commands on that unit. An `errors { ignore / retry }` block (real syntax, proven above) can downgrade a matched failure to a warning — proven turning a real, exit-code-1 `plan` failure into exit code 0, and proven dangerous when the regex is broader than intended.
+`terragrunt run --all plan` and `terragrunt run --all apply` are the current commands for operating on every unit under a directory tree, applied in the order Terragrunt computes from each unit's `dependency` blocks — proven above with `find --dag`/`list --dag` returning the identical order a real `run --all` uses; the older `terragrunt run-all COMMAND` syntax and `plan-all`/`apply-all` have all been removed entirely — none of the three runs on a current install, proven above with real `unknown command` errors. Scope a `run --all` to part of the tree with `--filter`, which replaced `--queue-include-dir`/`--queue-exclude-dir` — but proven above with a real run, those older flags are soft-deprecated, not removed, unlike the hard-removed `*-all` commands. Skip confirmation prompts in CI with `--non-interactive`. `before_hook` and `after_hook` blocks inside a unit's `terraform` block run an arbitrary shell command before or after specific Terragrunt commands on that unit. An `errors { ignore / retry }` block (real syntax, proven above) can downgrade a matched failure to a warning — proven turning a real, exit-code-1 `plan` failure into exit code 0, and proven dangerous when the regex is broader than intended.
 </Callout>
 
 export const quizRunAll = [

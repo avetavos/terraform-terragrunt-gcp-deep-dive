@@ -189,7 +189,7 @@ resource "google_compute_instance" "app" {
     }
   }
 }`}>
-พิสูจน์ข้างบนด้วย error จริงของ \`terraform validate\`: module นี้ reference \`var.instance_count\`, \`var.environment\`, และ \`var.machine_type\` โดยไม่มี \`variable\` block คู่กันเลยที่ไหนในไฟล์ — error จริงแบบ "Reference to undeclared input variable" สามตัว — และ \`google_compute_instance\` resource ไม่มี \`network_interface\` block เลย เป็น error จริงตัวที่สี่ module ที่ "ดูครบแล้ว" เพราะมี \`count\`, \`name\` ที่คำนวณ, และ \`boot_disk\` ก็ยังขาด configuration สองหมวดเลยที่มีแค่ \`terraform validate\` เท่านั้นที่จับได้แน่นอน
+พิสูจน์ข้างบนด้วย error จริงของ `terraform validate`: module นี้ reference `var.instance_count`, `var.environment`, และ `var.machine_type` โดยไม่มี `variable` block คู่กันเลยที่ไหนในไฟล์ — error จริงแบบ "Reference to undeclared input variable" สามตัว — และ `google_compute_instance` resource ไม่มี `network_interface` block เลย เป็น error จริงตัวที่สี่ module ที่ "ดูครบแล้ว" เพราะมี `count`, `name` ที่คำนวณ, และ `boot_disk` ก็ยังขาด configuration สองหมวดเลยที่มีแค่ `terraform validate` เท่านั้นที่จับได้แน่นอน
 </SpotTheBug>
 
 ## `terragrunt stack`: generate ทั้ง tree ของ unit จาก catalog เดียว

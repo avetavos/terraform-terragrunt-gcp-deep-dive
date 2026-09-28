@@ -92,7 +92,7 @@ export const dryConfigDiagram = `flowchart TD
 
 ## พิสูจน์: สอง `include` block พร้อม `expose = true`, `terragrunt render` จริง
 
-`read_terragrunt_config()` ข้างบนคือวิธีหนึ่งในการอ่าน `project.hcl` เทคนิคที่สอง ตรงกว่า คือ **`include` block ตัวที่สอง** ใช้ `expose = true` กับทั้งคู่เพื่อให้เนื้อหาของมันอ่านได้เป็น `include.<name>.<field>` และ `merge_strategy = "no_merge"` บน include ที่ไม่ใช่ root เพื่อให้ `project.hcl` มีส่วนร่วมแค่ `locals` ของตัวเอง:
+`read_terragrunt_config()` ข้างบนคือวิธีหนึ่งในการอ่าน `project.hcl` เทคนิคที่สอง ตรงกว่า คือ **`include` block ตัวที่สอง** ใช้ `expose = true` กับทั้งคู่เพื่อให้เนื้อหาของมันอ่านได้เป็น `include.NAME.FIELD` และ `merge_strategy = "no_merge"` บน include ที่ไม่ใช่ root เพื่อให้ `project.hcl` มีส่วนร่วมแค่ `locals` ของตัวเอง:
 
 ```hcl
 # root.hcl
@@ -188,18 +188,18 @@ terraform {
 inputs = {
   project_id = include.project.locals.project_id
 }`}>
-ทั้งสอง \`include\` block ไม่มี \`expose = true\` เลย พิสูจน์ข้างบนว่า \`expose\` คือสิ่งที่ทำให้เนื้อหาของ include อ่านได้ผ่าน reference \`include.<name>\` — ถ้าไม่มี \`include.project.locals.project_id\` ก็ resolve เป็นอะไรที่ใช้ได้ไม่ได้เลย config นี้จะ fail ตอน evaluate แทนที่จะอ่านค่าผิดแบบเงียบ ๆ
+ทั้งสอง `include` block ไม่มี `expose = true` เลย พิสูจน์ข้างบนว่า `expose` คือสิ่งที่ทำให้เนื้อหาของ include อ่านได้ผ่าน reference `include.NAME` — ถ้าไม่มี `include.project.locals.project_id` ก็ resolve เป็นอะไรที่ใช้ได้ไม่ได้เลย config นี้จะ fail ตอน evaluate แทนที่จะอ่านค่าผิดแบบเงียบ ๆ
 </SpotTheBug>
 
 ## อ่านโค้ดที่ AI สร้าง
 
-- `include` block ตัวที่สองที่ไม่มี `expose = true` เลย แล้วมีโค้ดที่ reference `include.project.locals.project_id` — พิสูจน์ข้างบนว่า `expose` คือสิ่งที่ทำให้ `include.<name>` เป็นค่าที่อ่านได้
+- `include` block ตัวที่สองที่ไม่มี `expose = true` เลย แล้วมีโค้ดที่ reference `include.project.locals.project_id` — พิสูจน์ข้างบนว่า `expose` คือสิ่งที่ทำให้ `include.NAME` เป็นค่าที่อ่านได้
 - `merge_strategy` ปล่อยเป็นค่า default (deep merge) บน include ตัวกลางที่ตั้งใจให้มีส่วนร่วมแค่ `locals` — `project.hcl` ที่ภายหลังเพิ่ม `remote_state` block เข้ามาโดยไม่ตั้งใจ จะ deep-merge เข้าทุก unit
 - `read_terragrunt_config()` ถูกเรียกโดยไม่มี accessor `.locals` เพิ่ม — return value ซ้อนอยู่ใต้ `.locals` โค้ดที่ลืมขั้นตอนนั้นจะได้ null แทนค่าจริง
 
 ## Mental Model
 
-`include` กับ `find_in_parent_folders` คือ copy-paste แบบ dynamic ที่ไม่ขึ้นกับตำแหน่ง `expose` คือความต่างระหว่าง "merge เข้ามาเป็น block" (default) กับ "อ่านเป็นค่าได้ด้วย" (`include.<name>.<field>`) — พิสูจน์ข้างบน
+`include` กับ `find_in_parent_folders` คือ copy-paste แบบ dynamic ที่ไม่ขึ้นกับตำแหน่ง `expose` คือความต่างระหว่าง "merge เข้ามาเป็น block" (default) กับ "อ่านเป็นค่าได้ด้วย" (`include.NAME.FIELD`) — พิสูจน์ข้างบน
 
 ## Trade-offs
 
@@ -262,7 +262,7 @@ export const quizDryConfig = [
     q: 'unit หนึ่งมี include สองตัวคือ "root" กับ "project" ไม่มีตัวไหนมี expose = true เลย โค้ด reference include.project.locals.project_id เกิดอะไรขึ้น พิสูจน์ข้างบน',
     options: [
       'resolve ได้ถูกต้อง เพราะ expose มีผลแค่กับ generate block เท่านั้น',
-      'ทั้งสอง include ยัง deep-merge block ของตัวเองอยู่ (remote_state จาก root ยังทำงาน) แต่ include.project.locals.project_id resolve ไม่ได้ เพราะ expose คือสิ่งที่ทำให้ include.<name> อ่านได้เลย',
+      'ทั้งสอง include ยัง deep-merge block ของตัวเองอยู่ (remote_state จาก root ยังทำงาน) แต่ include.project.locals.project_id resolve ไม่ได้ เพราะ expose คือสิ่งที่ทำให้ include.NAME อ่านได้เลย',
       'Terragrunt เดาให้เองว่า expose = true ทุกครั้งที่มี locals block',
       'unit นี้ parse ไม่ผ่านเลยตั้งแต่ต้น',
     ],

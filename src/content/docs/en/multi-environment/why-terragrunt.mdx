@@ -149,7 +149,7 @@ data "terraform_remote_state" "network" {
 resource "google_container_cluster" "app" {
   network = data.terraform_remote_state.network.outputs.network_self_link
 }`}>
-Proven above, \`terraform_remote_state\` has no mock-output mechanism at all — unlike a Terragrunt \`dependency\` block, there is no way to let this \`plan\` succeed with a placeholder while signaling \`apply\` should still refuse. The real, unavoidable result here is \`Error: Unable to find remote state\`, and the only fix within plain Terraform is manually sequencing applies.
+Proven above, `terraform_remote_state` has no mock-output mechanism at all — unlike a Terragrunt `dependency` block, there is no way to let this `plan` succeed with a placeholder while signaling `apply` should still refuse. The real, unavoidable result here is `Error: Unable to find remote state`, and the only fix within plain Terraform is manually sequencing applies.
 </SpotTheBug>
 
 <Callout title="The one-line takeaway">

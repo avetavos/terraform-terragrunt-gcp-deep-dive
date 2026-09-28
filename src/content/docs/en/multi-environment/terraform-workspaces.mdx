@@ -34,7 +34,7 @@ terraform workspace select staging
 terraform apply
 ```
 
-`terraform workspace new <name>` creates a workspace and switches to it immediately. `terraform workspace select <name>` switches the active workspace without creating a new one. `terraform workspace list` shows every workspace that exists, with an asterisk marking the one currently active. The active workspace is tracked locally in the `.terraform` directory, and every `plan` or `apply` you run only ever touches that workspace's own state — the `dev` state and the `prod` state are two entirely separate files, even though both come from the same `main.tf`.
+`terraform workspace new NAME` creates a workspace and switches to it immediately. `terraform workspace select NAME` switches the active workspace without creating a new one. `terraform workspace list` shows every workspace that exists, with an asterisk marking the one currently active. The active workspace is tracked locally in the `.terraform` directory, and every `plan` or `apply` you run only ever touches that workspace's own state — the `dev` state and the `prod` state are two entirely separate files, even though both come from the same `main.tf`.
 
 ## Varying behavior with terraform.workspace
 
@@ -174,12 +174,12 @@ The earlier version of this lesson's own example had exactly this bug — a `goo
     }
   }
 }`}>
-Proven above with a real \`terraform validate\` run: this resource is missing a required \`network_interface\` block. \`google_compute_instance\` needs at least one, and the provider rejects the config at validate time with "Insufficient network_interface blocks" — not a plan-time or apply-time surprise, a validate-time one. This is exactly the bug this lesson's own example originally had.
+Proven above with a real `terraform validate` run: this resource is missing a required `network_interface` block. `google_compute_instance` needs at least one, and the provider rejects the config at validate time with "Insufficient network_interface blocks" — not a plan-time or apply-time surprise, a validate-time one. This is exactly the bug this lesson's own example originally had.
 </SpotTheBug>
 
 ## Mental Model
 
-A workspace is a pointer, not a boundary — proven above, `terraform.tfstate.d/<name>/` is the entire mechanism.
+A workspace is a pointer, not a boundary — proven above, `terraform.tfstate.d/NAME/` is the entire mechanism.
 
 ## Trade-offs
 
@@ -251,7 +251,7 @@ export const quizTerraformWorkspaces = [
   {
     q: 'Where does the default workspace state file real on-disk path, as proven above, differ from every other workspace?',
     options: [
-      'It does not differ; every workspace including default gets a terraform.tfstate.d/<name>/ subdirectory',
+      'It does not differ; every workspace including default gets a terraform.tfstate.d/NAME/ subdirectory',
       'default state lives at the plain terraform.tfstate path with no terraform.tfstate.d subdirectory, while every other workspace (proven above: staging) does get one',
       'default state is stored remotely even when every other workspace uses a local backend',
       'default is the only workspace whose state file is encrypted',

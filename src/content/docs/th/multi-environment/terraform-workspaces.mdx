@@ -34,7 +34,7 @@ terraform workspace select staging
 terraform apply
 ```
 
-`terraform workspace new <name>` สร้าง workspace แล้วสลับไปใช้ทันที `terraform workspace select <name>` สลับ workspace ที่ active อยู่โดยไม่สร้างใหม่ `terraform workspace list` แสดง workspace ทั้งหมดที่มีอยู่ พร้อมเครื่องหมาย asterisk บอกว่าตัวไหน active อยู่ workspace ที่ active ถูก track ไว้ในเครื่องของคุณเองที่ directory `.terraform` และทุก `plan` หรือ `apply` ที่คุณรันจะแตะแค่ state ของ workspace นั้นเท่านั้น state ของ `dev` กับ state ของ `prod` คือคนละไฟล์กันเลย ถึงแม้ทั้งคู่จะมาจาก `main.tf` เดียวกัน
+`terraform workspace new NAME` สร้าง workspace แล้วสลับไปใช้ทันที `terraform workspace select NAME` สลับ workspace ที่ active อยู่โดยไม่สร้างใหม่ `terraform workspace list` แสดง workspace ทั้งหมดที่มีอยู่ พร้อมเครื่องหมาย asterisk บอกว่าตัวไหน active อยู่ workspace ที่ active ถูก track ไว้ในเครื่องของคุณเองที่ directory `.terraform` และทุก `plan` หรือ `apply` ที่คุณรันจะแตะแค่ state ของ workspace นั้นเท่านั้น state ของ `dev` กับ state ของ `prod` คือคนละไฟล์กันเลย ถึงแม้ทั้งคู่จะมาจาก `main.tf` เดียวกัน
 
 ## เปลี่ยน behavior ด้วย terraform.workspace
 
@@ -174,12 +174,12 @@ At least 1 "network_interface" blocks are required.
     }
   }
 }`}>
-พิสูจน์ข้างบนด้วย \`terraform validate\` จริง: resource นี้ขาด \`network_interface\` block ที่จำเป็น \`google_compute_instance\` ต้องมีอย่างน้อยหนึ่งอัน provider ปฏิเสธ config ตั้งแต่ตอน validate ด้วย "Insufficient network_interface blocks" — ไม่ใช่เรื่องเซอร์ไพรส์ตอน plan หรือ apply แต่เป็นตอน validate เลย นี่คือบั๊กเดียวกันเป๊ะที่ตัวอย่างเดิมของบทนี้เองเคยมี
+พิสูจน์ข้างบนด้วย `terraform validate` จริง: resource นี้ขาด `network_interface` block ที่จำเป็น `google_compute_instance` ต้องมีอย่างน้อยหนึ่งอัน provider ปฏิเสธ config ตั้งแต่ตอน validate ด้วย "Insufficient network_interface blocks" — ไม่ใช่เรื่องเซอร์ไพรส์ตอน plan หรือ apply แต่เป็นตอน validate เลย นี่คือบั๊กเดียวกันเป๊ะที่ตัวอย่างเดิมของบทนี้เองเคยมี
 </SpotTheBug>
 
 ## Mental Model
 
-workspace คือ pointer ไม่ใช่ boundary — พิสูจน์ข้างบน `terraform.tfstate.d/<name>/` คือกลไกทั้งหมด
+workspace คือ pointer ไม่ใช่ boundary — พิสูจน์ข้างบน `terraform.tfstate.d/NAME/` คือกลไกทั้งหมด
 
 ## Trade-offs
 
@@ -251,7 +251,7 @@ export const quizTerraformWorkspaces = [
   {
     q: 'state file ของ default workspace มี path จริงบน disk ต่างจาก workspace อื่นทุกตัวตรงไหน ตามที่พิสูจน์ข้างบน',
     options: [
-      'ไม่ต่างกันเลย ทุก workspace รวมถึง default ได้ subdirectory terraform.tfstate.d/<name>/',
+      'ไม่ต่างกันเลย ทุก workspace รวมถึง default ได้ subdirectory terraform.tfstate.d/NAME/',
       'state ของ default อยู่ที่ path terraform.tfstate ธรรมดา ไม่มี subdirectory terraform.tfstate.d เลย ในขณะที่ workspace อื่นทุกตัว (พิสูจน์ข้างบน: staging) ได้ subdirectory นั้นจริง',
       'state ของ default ถูกเก็บแบบ remote แม้ workspace อื่นทุกตัวจะใช้ local backend',
       'default เป็น workspace เดียวที่ state file ถูกเข้ารหัส',
