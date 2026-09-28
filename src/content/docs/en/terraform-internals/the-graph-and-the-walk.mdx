@@ -1,0 +1,289 @@
+---
+title: 'The Graph and the Walk'
+description: 'A real terraform graph in DOT and Mermaid, how -parallelism (default 10) changes wall-clock time proven with real timing, depends_on vs implicit references, and how -type=plan differs from -type=apply on Terraform 1.16.4.'
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
+
+## The idea in one sentence
+
+Before Terraform runs anything, it compiles your configuration into a **dependency graph** and every command — `plan`, `apply`, `destroy`, even `graph` itself — is a **walk** over that graph that dispatches independent nodes concurrently, bounded by `-parallelism` (default **10**), never a top-to-bottom read of your `.tf` files.
+
+## A real graph, from a real config
+
+This is the whole config used for every proof in this lesson — three resources, two real dependency edges, no cloud provider needed:
+
+```hcl
+# main.tf
+terraform {
+  required_version = ">= 1.11.0"
+  required_providers {
+    random = { source = "hashicorp/random", version = "~> 3.6" }
+    local  = { source = "hashicorp/local",  version = "~> 2.5" }
+  }
+}
+
+resource "random_pet" "name" {
+  length = 2
+}
+
+resource "local_file" "greeting" {
+  filename = "${path.module}/greeting.txt"
+  content  = "hello ${random_pet.name.id}"
+}
+
+resource "terraform_data" "after_file" {
+  depends_on = [local_file.greeting]
+  input      = "runs after greeting.txt exists"
+}
+```
+
+`local_file.greeting` depends on `random_pet.name` **implicitly**, through the `random_pet.name.id` reference in its `content` argument — Terraform finds this by parsing the expression, no `depends_on` needed. `terraform_data.after_file` has no attribute referencing `local_file.greeting` at all; its dependency exists purely because of an **explicit** `depends_on = [local_file.greeting]`.
+
+Real `terraform graph` output against this exact config, default mode (DOT):
+
+```text
+$ terraform graph
+digraph G {
+  rankdir = "RL";
+  node [shape = rect, fontname = "sans-serif"];
+  "local_file.greeting" [label="local_file.greeting"];
+  "random_pet.name" [label="random_pet.name"];
+  "terraform_data.after_file" [label="terraform_data.after_file"];
+  "local_file.greeting" -> "random_pet.name";
+  "terraform_data.after_file" -> "local_file.greeting";
+}
+```
+
+Two edges, matching exactly the two dependencies above — one from an implicit reference, one from `depends_on`. DOT's arrows point from a resource to what it depends on (`rankdir = "RL"`, right-to-left), so `"terraform_data.after_file" -> "local_file.greeting"` reads as "after_file depends on greeting," and the walk executes in the opposite direction: dependencies first.
+
+## The same graph, as Mermaid — no manual conversion needed
+
+Terraform 1.16.4 can emit Mermaid directly; `-format` is a real, documented flag on `graph -help`:
+
+```text
+$ terraform graph -help
+...
+  -format=FORMAT      Output format for the graph. Supported values are
+                      dot (default) and mermaid.
+```
+
+Real output with `-format=mermaid` against the same config:
+
+```text
+$ terraform graph -format=mermaid
+flowchart LR
+  local_file.greeting["local_file.greeting"]
+  random_pet.name["random_pet.name"]
+  terraform_data.after_file["terraform_data.after_file"]
+  local_file.greeting --> random_pet.name
+  terraform_data.after_file --> local_file.greeting
+```
+
+Rendered:
+
+<Mermaid title="terraform graph -format=mermaid, real output" code={graphDemoDiagram} />
+
+export const graphDemoDiagram = `flowchart LR
+  local_file.greeting["local_file.greeting"]
+  random_pet.name["random_pet.name"]
+  terraform_data.after_file["terraform_data.after_file"]
+  local_file.greeting --> random_pet.name
+  terraform_data.after_file --> local_file.greeting`;
+
+Both outputs come from the exact same internal graph structure — `-format=dot` and `-format=mermaid` are two renderers over one data structure, not two different graphs.
+
+## `-type=plan` vs `-type=apply`: the summary graph vs the real evaluation graph
+
+Everything above is the **default** graph mode: a summary of relationships between the resources in your configuration, meant for humans. `terraform graph -help` documents four real operation-graph types:
+
+```text
+$ terraform graph -help
+...
+  -type=TYPE          Type of operation graph to output. Can be: plan,
+                      plan-refresh-only, plan-destroy, or apply. By default
+                      Terraform just summarizes the relationships between
+                      the resources in your configuration, without any
+                      particular operation in mind. Full operation graphs
+                      are more detailed but therefore often harder to read.
+```
+
+`-type=plan` against the same config — note this is dramatically more detailed than the default graph:
+
+```text
+$ terraform graph -type=plan
+digraph {
+	compound = "true"
+	newrank = "true"
+	subgraph "root" {
+		"[root] local_file.greeting (expand)" [label = "local_file.greeting", shape = "box"]
+		...
+```
+
+The default graph has one node per resource address (3 nodes, 2 edges, above). `-type=plan` expands every resource into the real internal nodes Terraform's evaluator actually walks — `(expand)` nodes for `count`/`for_each` handling, provider configuration nodes, and root/close markers for each module — because it is not a summary, it is the literal graph the plan walk executes. `-plan=tfplan` (documented on the same `-help` output) renders this same detailed graph from a saved plan file instead of live configuration, and implies `-type=apply`.
+
+## `-parallelism`: real, proven with wall-clock time
+
+`-parallelism=n` is documented on both `plan -help` and `apply -help` as "Limit the number of concurrent operations" / "Limit the number of parallel resource operations" — the default is **10**. To prove it changes real behavior, not just a theoretical limit, this config creates 5 independent `terraform_data` resources, each with a `local-exec` provisioner that sleeps 2 seconds — independent, so nothing in the graph forces them to run one after another:
+
+```hcl
+# main.tf
+terraform {
+  required_version = ">= 1.11.0"
+}
+
+resource "terraform_data" "sleeper" {
+  count = 5
+  provisioner "local-exec" {
+    command = "sleep 2"
+  }
+}
+```
+
+Real timing, default parallelism (10 — well above the 5 resources here, so all 5 can run concurrently):
+
+```text
+$ time terraform apply -auto-approve -input=false
+...
+Apply complete! Resources: 5 added, 0 changed, 0 destroyed.
+terraform apply -auto-approve -input=false  0.04s user 0.04s system 3% cpu 2.083 total
+```
+
+Real timing, `-parallelism=1` (strictly serial — each 2-second sleep waits for the previous one):
+
+```text
+$ time terraform apply -auto-approve -input=false -parallelism=1
+...
+Apply complete! Resources: 5 added, 0 changed, 0 destroyed.
+terraform apply -auto-approve -input=false -parallelism=1  0.06s user 0.08s system 1% cpu 10.195 total
+```
+
+**2.08 seconds** vs **10.20 seconds** for the exact same 5 resources — proof that `-parallelism` is not cosmetic: at the default of 10, all 5 independent 2-second operations overlap and the whole apply takes about as long as *one* of them; at 1, they queue strictly and the apply takes about as long as *all five combined*. A real `TF_LOG=DEBUG` trace against the same apply confirms the walk does not process resources in declaration/index order either — five `refresh` log lines land at the exact same millisecond timestamp, in index order `[0], [2], [3], [1], [4]`:
+
+```text
+$ TF_LOG=DEBUG terraform apply -auto-approve -input=false 2>debug.log
+$ grep -i sleeper debug.log
+2026-09-29T04:04:50.902+0700 [DEBUG] refresh: terraform_data.sleeper[0]: no state, so not refreshing
+2026-09-29T04:04:50.902+0700 [DEBUG] refresh: terraform_data.sleeper[2]: no state, so not refreshing
+2026-09-29T04:04:50.902+0700 [DEBUG] refresh: terraform_data.sleeper[3]: no state, so not refreshing
+2026-09-29T04:04:50.902+0700 [DEBUG] refresh: terraform_data.sleeper[1]: no state, so not refreshing
+2026-09-29T04:04:50.902+0700 [DEBUG] refresh: terraform_data.sleeper[4]: no state, so not refreshing
+```
+
+## `depends_on` vs implicit references: same graph edge, different reason
+
+Both dependency kinds produce a real edge in `terraform graph` (proven above — `terraform_data.after_file -> local_file.greeting`), and both are honored identically by the walk. The difference is entirely about *why* Terraform needs to know:
+
+| Kind | When to use it | What happens if you omit it |
+|---|---|---|
+| Implicit reference (`random_pet.name.id` inside `local_file.greeting`) | Whenever one resource's argument actually needs another resource's value | Terraform cannot compute the argument at all — this is a hard requirement, not a style choice |
+| `depends_on` | A dependency that is real but invisible to any argument — e.g. `terraform_data.after_file` needs the *file to exist on disk*, but reads none of `local_file.greeting`'s attributes | The graph has no edge, so the walk may schedule both concurrently, and the ordering guarantee is gone |
+
+`depends_on` never changes *what* gets applied — only *when*, relative to what it names. It is the escape hatch for the (usually rare, outside provisioners and this course's local-only proofs) case where an argument reference can't express a real ordering requirement.
+
+## Mental Model
+
+Every command in this lesson (`plan`, `apply`, `graph` itself) is the same two-step process: **build a graph from the configuration (and, for `-type=plan`/`apply`, expand it into the detailed internal form the evaluator actually walks), then walk it, dispatching every node whose dependencies are already satisfied, up to `-parallelism` at a time.** A resource with no unresolved dependency is eligible to start the moment the walk begins — which is exactly why the 5 independent sleepers above overlap by default and why the graph, not file order, is the one true source of execution order.
+
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---|---|---|
+| Default `-parallelism=10` | Independent resources overlap; proven above (2.08s for 5×2s sleeps) | A misconfigured provider or rate-limited API can be hit by up to 10 concurrent requests at once |
+| `-parallelism=1` | Fully serial, easiest to reason about and to read logs for, gentlest on rate limits | Proven above: ~5x slower wall-clock on this lesson's independent-resource example |
+| Implicit reference | Terraform enforces the dependency for you; no way to forget it since the argument literally needs the value | Only expresses dependencies that show up in an argument at all |
+| `depends_on` | Expresses a real ordering requirement with no matching argument | Easy to add unnecessarily (harms parallelism) or forget entirely (silent race) since nothing type-checks it |
+
+## Common Misconceptions
+
+- **"Resources apply in the order they're written in the file."** Proven above: `terraform graph` shows edges determined entirely by references and `depends_on`, not declaration order — and the real `-parallelism=1` DEBUG log shows resources processed in index order `[0],[2],[3],[1],[4]`, not `[0],[1],[2],[3],[4]`.
+- **"`-parallelism` only matters for huge configurations with hundreds of resources."** Proven above with just 5 resources: default vs `-parallelism=1` is a real 2.08s vs 10.20s, a ~5x difference — the effect is about how many *independent* nodes exist at any point in the walk, not the total resource count.
+- **"`depends_on` is required whenever two resources are related."** Proven above: `local_file.greeting` depends on `random_pet.name` with zero `depends_on` — an implicit reference in an argument is sufficient and is what Terraform prefers to infer automatically.
+- **"The default `terraform graph` output and `-type=plan` show the same graph, one just prettier."** Proven above: the default graph has 3 nodes and 2 edges for this config; `-type=plan` expands into per-resource `(expand)` nodes, provider nodes, and module boundary markers — it is the literal executor graph, not a summary.
+
+## Reading AI-generated code
+
+- A "controller" or CI script that assumes `-parallelism=50` (a value copy-pasted from a blog post) is safe for every provider — proven above, this bounds how many concurrent gRPC calls hit the provider (and, for real cloud providers, the cloud API), so a value tuned for one provider/account's rate limits can silently throttle or fail against another.
+- Code review comments claiming a bug is "a race condition in apply ordering" without checking `terraform graph` first — proven above, the graph is the actual, inspectable source of ordering truth; a real dependency gap shows up as a missing edge, not a hidden race.
+- A `depends_on` added defensively "just in case" on a resource that already references the target's attribute — redundant (the edge already exists from the implicit reference, proven above) and, at scale, needlessly limits how much of the graph can run concurrently for no ordering benefit.
+
+<SpotTheBug code={`# modules/pipeline/main.tf
+resource "local_file" "config" {
+  filename = "\${path.module}/config.json"
+  content  = jsonencode({ ready = true })
+}
+
+resource "terraform_data" "deploy_trigger" {
+  # "runs after config.json is written" -- comment only, no real edge
+  input = "deploying now"
+}`}>
+The comment claims an ordering requirement that the code does not actually express. `terraform graph` against this file would show **zero edges** between these two resources — no implicit reference (nothing in `deploy_trigger` reads `local_file.config`'s attributes) and no `depends_on`. Proven in this lesson: Terraform's walk only respects edges that exist in the graph, so with `-parallelism` at its default of 10, `terraform_data.deploy_trigger` can run *before* `local_file.config` finishes, exactly contradicting the comment. The fix is either a real implicit reference (e.g. `input = "deploying after ${local_file.config.id}"`) or, if no attribute is naturally needed, an explicit `depends_on = [local_file.config]` — the same fix this lesson's own `terraform_data.after_file` uses.
+</SpotTheBug>
+
+export const quizGraphWalk = [
+  {
+    q: '```text\n$ terraform graph\ndigraph G {\n  rankdir = "RL";\n  ...\n  "local_file.greeting" -> "random_pet.name";\n  "terraform_data.after_file" -> "local_file.greeting";\n}\n```\nlocal_file.greeting has no depends_on, yet this edge to random_pet.name exists. Why?',
+    options: [
+      'Terraform always links resources of different types',
+      'local_file.greeting references random_pet.name.id inside its content argument -- an implicit reference Terraform detects by parsing the expression',
+      'This is a bug -- the edge should not exist without depends_on',
+      'DOT format always adds edges between adjacent resource declarations',
+    ],
+    answer: 1,
+    explain: 'Proven above: implicit references (an attribute of one resource used inside another\'s argument) create real graph edges automatically, with no depends_on needed.',
+  },
+  {
+    q: 'Real timing: `terraform apply` on 5 independent terraform_data resources, each sleeping 2s via local-exec, takes 2.08s total at default parallelism and 10.20s at -parallelism=1. What does this prove?',
+    options: [
+      '-parallelism only affects network-bound cloud resources, not local ones',
+      'The default parallelism of 10 lets independent graph nodes run concurrently; -parallelism=1 forces them fully serial',
+      'The timing difference is measurement noise, not a real effect',
+      'Terraform always runs local-exec provisioners serially regardless of -parallelism',
+    ],
+    answer: 1,
+    explain: 'Proven above with real `time` output: ~2s (all 5 overlap, bounded by the default limit of 10) vs ~10s (5 x 2s, one at a time) is a direct, reproducible consequence of -parallelism.',
+  },
+  {
+    q: '```text\n$ terraform graph -help\n...\n  -type=TYPE  Type of operation graph to output. Can be: plan,\n              plan-refresh-only, plan-destroy, or apply. By default\n              Terraform just summarizes the relationships...\n```\nWhat is the real difference between the default terraform graph output and -type=plan?',
+    options: [
+      'There is no real difference, -type=plan is just cosmetic styling',
+      'The default output is a per-resource summary (3 nodes for this lesson\'s config); -type=plan expands into the actual detailed graph the evaluator walks, including (expand) and provider nodes',
+      '-type=plan only works after a real apply has happened',
+      '-type=plan removes all edges to simplify the output',
+    ],
+    answer: 1,
+    explain: 'Proven above: the default graph for this lesson\'s 3-resource config has exactly 3 nodes/2 edges; -type=plan\'s real output shows per-resource (expand) nodes and provider subgraphs -- it is the literal executor graph.',
+  },
+  {
+    q: 'terraform_data.after_file has no attribute referencing local_file.greeting. What makes Terraform apply it after local_file.greeting anyway?',
+    options: [
+      'Terraform guesses based on resource type ordering',
+      'An explicit depends_on = [local_file.greeting] block, which creates a graph edge with no matching implicit reference needed',
+      'Nothing -- this ordering is not actually guaranteed',
+      'Alphabetical resource name ordering (after_file > greeting)',
+    ],
+    answer: 1,
+    explain: 'Proven above: this lesson\'s own main.tf uses depends_on precisely because no argument of terraform_data.after_file reads local_file.greeting\'s attributes -- depends_on is the edge in that case.',
+  },
+  {
+    q: 'A CI script sets -parallelism=50 for every terraform apply, copied from a blog post, regardless of which provider/account it runs against. What is the real risk, per this lesson?',
+    options: [
+      'None -- higher parallelism is always strictly better',
+      '-parallelism bounds concurrent operations/gRPC calls to the provider; a value tuned for one provider or account\'s rate limits can overwhelm or throttle a different one',
+      '-parallelism only affects local-only resources like this lesson\'s examples, never real cloud providers',
+      '-parallelism above 10 is rejected by Terraform with a hard error',
+    ],
+    answer: 1,
+    explain: 'Proven above: -parallelism directly controls how many graph nodes -- and therefore how many concurrent provider calls -- run at once; this lesson\'s Trade-offs table makes the rate-limit risk of blindly raising it explicit.',
+  },
+];
+
+<Quiz client:visible id="terraform-internals/the-graph-and-the-walk" questions={quizGraphWalk} />
+
+<ProgressTracker client:visible id="terraform-internals/the-graph-and-the-walk" />

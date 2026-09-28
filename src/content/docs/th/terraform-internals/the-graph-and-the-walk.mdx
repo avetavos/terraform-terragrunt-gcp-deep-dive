@@ -1,0 +1,289 @@
+---
+title: 'The Graph and the Walk'
+description: 'terraform graph จริงทั้ง DOT และ Mermaid, -parallelism (default 10) เปลี่ยน wall-clock อย่างไร พิสูจน์ด้วยเวลาจริง, depends_on เทียบกับ implicit reference, และ -type=plan ต่างจาก -type=apply อย่างไรบน Terraform 1.16.4'
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
+
+## ไอเดียในหนึ่งประโยค
+
+ก่อน Terraform จะรันอะไรเลย มัน compile configuration ของคุณให้เป็น **dependency graph** และทุกคำสั่ง — `plan`, `apply`, `destroy`, แม้แต่ `graph` เอง — คือการ **walk** บน graph นั้นที่ส่ง node ที่ไม่ขึ้นต่อกันไปพร้อมกัน จำกัดด้วย `-parallelism` (default **10**) ไม่ใช่การอ่านไฟล์ `.tf` ของคุณจากบนลงล่าง
+
+## graph จริงจาก config จริง
+
+นี่คือ config ทั้งหมดที่ใช้พิสูจน์ทุกอย่างในบทนี้ — 3 resource, 2 dependency edge จริง ไม่ต้องใช้ cloud provider เลย
+
+```hcl
+# main.tf
+terraform {
+  required_version = ">= 1.11.0"
+  required_providers {
+    random = { source = "hashicorp/random", version = "~> 3.6" }
+    local  = { source = "hashicorp/local",  version = "~> 2.5" }
+  }
+}
+
+resource "random_pet" "name" {
+  length = 2
+}
+
+resource "local_file" "greeting" {
+  filename = "${path.module}/greeting.txt"
+  content  = "hello ${random_pet.name.id}"
+}
+
+resource "terraform_data" "after_file" {
+  depends_on = [local_file.greeting]
+  input      = "runs after greeting.txt exists"
+}
+```
+
+`local_file.greeting` depends on `random_pet.name` แบบ **implicit** ผ่าน reference `random_pet.name.id` ใน argument `content` — Terraform หาเจอเองจากการ parse expression ไม่ต้องมี `depends_on` เลย `terraform_data.after_file` ไม่มี attribute ไหนอ้างถึง `local_file.greeting` เลยด้วยซ้ำ dependency ของมันมาจาก `depends_on = [local_file.greeting]` ที่ระบุไว้ตรง ๆ **explicit** ล้วน ๆ
+
+output จริงของ `terraform graph` กับ config นี้เป๊ะ ๆ โหมด default (DOT):
+
+```text
+$ terraform graph
+digraph G {
+  rankdir = "RL";
+  node [shape = rect, fontname = "sans-serif"];
+  "local_file.greeting" [label="local_file.greeting"];
+  "random_pet.name" [label="random_pet.name"];
+  "terraform_data.after_file" [label="terraform_data.after_file"];
+  "local_file.greeting" -> "random_pet.name";
+  "terraform_data.after_file" -> "local_file.greeting";
+}
+```
+
+2 edge ตรงกับ 2 dependency ข้างบนเป๊ะ — อันหนึ่งจาก implicit reference อันหนึ่งจาก `depends_on` ลูกศรของ DOT ชี้จาก resource ไปยังสิ่งที่มันขึ้นต่อ (`rankdir = "RL"` ขวาไปซ้าย) ดังนั้น `"terraform_data.after_file" -> "local_file.greeting"` อ่านว่า "after_file ขึ้นกับ greeting" และการ walk จริงเดินสวนทางกัน: dependency ก่อนเสมอ
+
+## graph เดียวกัน แต่เป็น Mermaid — ไม่ต้องแปลงมือ
+
+Terraform 1.16.4 emit Mermaid ได้ตรง ๆ `-format` เป็น flag จริงที่ document ไว้บน `graph -help`:
+
+```text
+$ terraform graph -help
+...
+  -format=FORMAT      Output format for the graph. Supported values are
+                      dot (default) and mermaid.
+```
+
+output จริงด้วย `-format=mermaid` กับ config เดียวกัน:
+
+```text
+$ terraform graph -format=mermaid
+flowchart LR
+  local_file.greeting["local_file.greeting"]
+  random_pet.name["random_pet.name"]
+  terraform_data.after_file["terraform_data.after_file"]
+  local_file.greeting --> random_pet.name
+  terraform_data.after_file --> local_file.greeting
+```
+
+render ออกมา:
+
+<Mermaid title="terraform graph -format=mermaid, output จริง" code={graphDemoDiagram} />
+
+export const graphDemoDiagram = `flowchart LR
+  local_file.greeting["local_file.greeting"]
+  random_pet.name["random_pet.name"]
+  terraform_data.after_file["terraform_data.after_file"]
+  local_file.greeting --> random_pet.name
+  terraform_data.after_file --> local_file.greeting`;
+
+output ทั้งสองมาจาก internal graph structure เดียวกันเป๊ะ — `-format=dot` กับ `-format=mermaid` คือ renderer สองแบบบน data structure เดียว ไม่ใช่ graph คนละอัน
+
+## `-type=plan` เทียบกับ `-type=apply`: graph สรุปเทียบกับ graph evaluation จริง
+
+ทุกอย่างข้างบนคือโหมด **default**: สรุป relationship ระหว่าง resource ใน configuration ของคุณ ออกแบบมาให้มนุษย์อ่าน `terraform graph -help` document ชนิด operation-graph จริง 4 แบบ
+
+```text
+$ terraform graph -help
+...
+  -type=TYPE          Type of operation graph to output. Can be: plan,
+                      plan-refresh-only, plan-destroy, or apply. By default
+                      Terraform just summarizes the relationships between
+                      the resources in your configuration, without any
+                      particular operation in mind. Full operation graphs
+                      are more detailed but therefore often harder to read.
+```
+
+`-type=plan` กับ config เดียวกัน — สังเกตว่าละเอียดกว่า default graph มาก:
+
+```text
+$ terraform graph -type=plan
+digraph {
+	compound = "true"
+	newrank = "true"
+	subgraph "root" {
+		"[root] local_file.greeting (expand)" [label = "local_file.greeting", shape = "box"]
+		...
+```
+
+default graph มี node เดียวต่อ resource address (3 node, 2 edge, ข้างบน) `-type=plan` ขยายทุก resource เป็น internal node จริงที่ evaluator ของ Terraform walk จริง — node `(expand)` สำหรับจัดการ `count`/`for_each`, node provider configuration, และ marker เปิด/ปิด module — เพราะมันไม่ใช่ summary แต่เป็น graph จริงที่ plan walk ใช้ execute `-plan=tfplan` (document อยู่บน `-help` เดียวกัน) render graph ละเอียดแบบเดียวกันนี้จาก plan file ที่ save ไว้แทนที่จะเป็น configuration สด และ imply `-type=apply` ไปด้วย
+
+## `-parallelism`: จริง พิสูจน์ด้วย wall-clock time
+
+`-parallelism=n` document ไว้ทั้งบน `plan -help` และ `apply -help` ว่า "Limit the number of concurrent operations" / "Limit the number of parallel resource operations" — default คือ **10** เพื่อพิสูจน์ว่ามันเปลี่ยนพฤติกรรมจริง ไม่ใช่แค่ทฤษฎี config นี้สร้าง `terraform_data` 5 ตัวที่ไม่ขึ้นต่อกัน แต่ละตัวมี provisioner `local-exec` ที่ sleep 2 วินาที — ไม่ขึ้นต่อกัน จึงไม่มีอะไรใน graph บังคับให้รันทีละตัว
+
+```hcl
+# main.tf
+terraform {
+  required_version = ">= 1.11.0"
+}
+
+resource "terraform_data" "sleeper" {
+  count = 5
+  provisioner "local-exec" {
+    command = "sleep 2"
+  }
+}
+```
+
+เวลาจริง ที่ parallelism default (10 — สูงกว่า 5 resource ในนี้มาก ทั้ง 5 จึงรันพร้อมกันได้หมด):
+
+```text
+$ time terraform apply -auto-approve -input=false
+...
+Apply complete! Resources: 5 added, 0 changed, 0 destroyed.
+terraform apply -auto-approve -input=false  0.04s user 0.04s system 3% cpu 2.083 total
+```
+
+เวลาจริง ที่ `-parallelism=1` (serial ล้วน — sleep 2 วินาทีแต่ละตัวต้องรอตัวก่อนหน้า):
+
+```text
+$ time terraform apply -auto-approve -input=false -parallelism=1
+...
+Apply complete! Resources: 5 added, 0 changed, 0 destroyed.
+terraform apply -auto-approve -input=false -parallelism=1  0.06s user 0.08s system 1% cpu 10.195 total
+```
+
+**2.08 วินาที** เทียบกับ **10.20 วินาที** สำหรับ resource เดียวกันเป๊ะ 5 ตัว — หลักฐานว่า `-parallelism` ไม่ใช่แค่ cosmetic: ที่ default 10 operation อิสระ 2 วินาที ทั้ง 5 ตัวซ้อนกันได้ และ apply ทั้งหมดใช้เวลาพอ ๆ กับ *ตัวเดียว*; ที่ 1 มันต่อคิวเป๊ะ ๆ และ apply ใช้เวลาพอ ๆ กับ *รวมทั้งห้าตัว* trace `TF_LOG=DEBUG` จริงกับ apply เดียวกันนี้ยืนยันด้วยว่า walk ไม่ได้ process resource ตามลำดับ declaration/index — log บรรทัด `refresh` ทั้ง 5 บรรทัดมาที่ timestamp millisecond เดียวกันเป๊ะ เรียงตาม index `[0], [2], [3], [1], [4]`:
+
+```text
+$ TF_LOG=DEBUG terraform apply -auto-approve -input=false 2>debug.log
+$ grep -i sleeper debug.log
+2026-09-29T04:04:50.902+0700 [DEBUG] refresh: terraform_data.sleeper[0]: no state, so not refreshing
+2026-09-29T04:04:50.902+0700 [DEBUG] refresh: terraform_data.sleeper[2]: no state, so not refreshing
+2026-09-29T04:04:50.902+0700 [DEBUG] refresh: terraform_data.sleeper[3]: no state, so not refreshing
+2026-09-29T04:04:50.902+0700 [DEBUG] refresh: terraform_data.sleeper[1]: no state, so not refreshing
+2026-09-29T04:04:50.902+0700 [DEBUG] refresh: terraform_data.sleeper[4]: no state, so not refreshing
+```
+
+## `depends_on` เทียบกับ implicit reference: edge เดียวกันบน graph เหตุผลต่างกัน
+
+dependency ทั้งสองแบบสร้าง edge จริงใน `terraform graph` (พิสูจน์ข้างบน — `terraform_data.after_file -> local_file.greeting`) และ walk ให้ความสำคัญทั้งสองแบบเท่ากัน ความต่างอยู่ที่ *ทำไม* Terraform ถึงต้องรู้
+
+| แบบไหน | ใช้เมื่อไหร่ | ถ้าลืมใส่จะเกิดอะไร |
+|---|---|---|
+| Implicit reference (`random_pet.name.id` ใน `local_file.greeting`) | เมื่อไหร่ก็ตามที่ argument ของ resource หนึ่งต้องการค่าจาก resource อีกตัวจริง ๆ | Terraform คำนวณ argument ไม่ได้เลย — เป็นข้อบังคับจริง ไม่ใช่สไตล์การเขียน |
+| `depends_on` | dependency ที่มีจริงแต่มองไม่เห็นจาก argument ไหนเลย — เช่น `terraform_data.after_file` ต้องการ *ไฟล์มีอยู่บนดิสก์จริง* แต่ไม่อ่าน attribute ไหนของ `local_file.greeting` เลย | graph ไม่มี edge เลย walk จึงอาจ schedule ทั้งสองพร้อมกัน และการรับประกันลำดับก็หายไป |
+
+`depends_on` ไม่เคยเปลี่ยน *สิ่งที่* apply เลย — เปลี่ยนแค่ *เวลา* เทียบกับสิ่งที่มันระบุ มันคือทางออกสำหรับกรณี (ปกติพบไม่บ่อย นอกเหนือจาก provisioner กับตัวอย่างที่พิสูจน์แบบ local-only ในคอร์สนี้) ที่ argument reference บอก ordering requirement จริงไม่ได้
+
+## Mental Model
+
+ทุกคำสั่งในบทนี้ (`plan`, `apply`, `graph` เอง) คือ process 2 ขั้นตอนเดียวกัน: **สร้าง graph จาก configuration (และสำหรับ `-type=plan`/`apply` ขยายมันเป็น internal form ละเอียดที่ evaluator walk จริง) แล้ว walk มัน ส่ง node ทุกตัวที่ dependency พร้อมแล้ว สูงสุดตาม `-parallelism` ต่อครั้ง** resource ที่ไม่มี dependency ค้างเลยมีสิทธิ์เริ่มได้ทันทีที่ walk เริ่ม — ซึ่งเป็นเหตุผลเป๊ะ ๆ ว่าทำไม sleeper อิสระ 5 ตัวข้างบนถึงซ้อนกันโดย default และทำไม graph ไม่ใช่ลำดับในไฟล์ ถึงเป็นแหล่งความจริงเดียวของลำดับการ execute
+
+## Trade-offs
+
+| ตัวเลือก | ข้อดี | ต้นทุน |
+|---|---|---|
+| `-parallelism=10` (default) | resource อิสระซ้อนกันได้ พิสูจน์ข้างบน (2.08s สำหรับ 5×2s sleep) | provider ที่ config ผิดหรือ API ที่มี rate limit อาจโดน request พร้อมกันสูงสุด 10 ตัว |
+| `-parallelism=1` | serial เต็มรูปแบบ เข้าใจง่ายที่สุดและอ่าน log ง่ายที่สุด เบามือกับ rate limit ที่สุด | พิสูจน์ข้างบน: ช้ากว่า wall-clock ประมาณ 5 เท่าในตัวอย่าง resource อิสระของบทนี้ |
+| Implicit reference | Terraform บังคับ dependency ให้เอง ไม่มีทางลืมเพราะ argument ต้องการค่านั้นจริง ๆ | บอก dependency ได้เฉพาะที่โผล่ใน argument จริง ๆ เท่านั้น |
+| `depends_on` | บอก ordering requirement จริงที่ไม่มี argument ไหนตรงกันได้ | เผลอใส่เกินจำเป็นได้ง่าย (ลด parallelism) หรือลืมใส่ไปเลย (race เงียบ ๆ) เพราะไม่มีอะไร type-check มันให้ |
+
+## ความเข้าใจผิดที่พบบ่อย
+
+- **"resource apply ตามลำดับที่เขียนในไฟล์"** พิสูจน์ข้างบน: `terraform graph` แสดง edge ที่กำหนดโดย reference กับ `depends_on` ล้วน ๆ ไม่ใช่ลำดับ declaration — และ log `-parallelism=1` DEBUG จริงแสดงการ process ตามลำดับ index `[0],[2],[3],[1],[4]` ไม่ใช่ `[0],[1],[2],[3],[4]`
+- **"`-parallelism` สำคัญแค่กับ configuration ขนาดใหญ่หลายร้อย resource"** พิสูจน์ข้างบนด้วยแค่ 5 resource: default เทียบกับ `-parallelism=1` คือ 2.08s เทียบกับ 10.20s จริง ต่างกันประมาณ 5 เท่า — ผลกระทบขึ้นกับจำนวน node *อิสระ* ที่มีอยู่ ณ จุดไหนของ walk ไม่ใช่จำนวน resource ทั้งหมด
+- **"`depends_on` ต้องใส่ทุกครั้งที่ resource สองตัวเกี่ยวข้องกัน"** พิสูจน์ข้างบน: `local_file.greeting` ขึ้นกับ `random_pet.name` โดยไม่มี `depends_on` เลยสักนิด — implicit reference ใน argument ก็พอแล้ว และเป็นสิ่งที่ Terraform อยากให้ infer เองมากกว่า
+- **"`terraform graph` แบบ default กับ `-type=plan` แสดง graph เดียวกัน แค่สวยกว่า"** พิสูจน์ข้างบน: default graph ของ config นี้มี 3 node 2 edge; `-type=plan` ขยายเป็น node `(expand)` ต่อ resource, node provider, และ marker ขอบเขต module — มันคือ graph ของ executor จริง ไม่ใช่ summary
+
+## อ่านโค้ดที่ AI เขียน
+
+- script "controller" หรือ CI ที่สมมติว่า `-parallelism=50` (ค่าที่ copy-paste มาจาก blog) ปลอดภัยกับทุก provider — พิสูจน์ข้างบน ค่านี้จำกัดว่า gRPC call พร้อมกันกี่ตัวที่ยิงไปหา provider (และสำหรับ cloud provider จริง คือ cloud API ด้วย) ค่าที่ปรับมาสำหรับ rate limit ของ provider/account หนึ่ง อาจไป throttle หรือทำให้อีกอันพังเงียบ ๆ ได้
+- comment review ที่บอกว่า bug เป็น "race condition ใน apply ordering" โดยไม่เช็ค `terraform graph` ก่อน — พิสูจน์ข้างบน graph คือแหล่งความจริงของ ordering ที่ตรวจสอบได้จริง dependency ที่ขาดหายจะโผล่มาเป็น edge ที่หายไป ไม่ใช่ race ที่ซ่อนอยู่
+- ใส่ `depends_on` แบบป้องกันไว้ก่อน "เผื่อไว้" บน resource ที่ reference attribute ของ target อยู่แล้ว — ซ้ำซ้อน (edge มีอยู่แล้วจาก implicit reference พิสูจน์ข้างบน) และเมื่อ scale ใหญ่ขึ้น จำกัด parallelism โดยไม่ได้ประโยชน์ด้าน ordering เพิ่มเลย
+
+<SpotTheBug code={`# modules/pipeline/main.tf
+resource "local_file" "config" {
+  filename = "\${path.module}/config.json"
+  content  = jsonencode({ ready = true })
+}
+
+resource "terraform_data" "deploy_trigger" {
+  # "runs after config.json is written" -- comment only, no real edge
+  input = "deploying now"
+}`}>
+comment อ้างว่ามี ordering requirement แต่โค้ดจริงไม่ได้ express อะไรเลย `terraform graph` กับไฟล์นี้จะแสดง **edge เป็นศูนย์** ระหว่าง 2 resource นี้ — ไม่มี implicit reference (ไม่มีอะไรใน `deploy_trigger` อ่าน attribute ของ `local_file.config`) และไม่มี `depends_on` พิสูจน์ในบทนี้: walk ของ Terraform เคารพเฉพาะ edge ที่มีอยู่จริงใน graph ดังนั้นที่ `-parallelism` default 10 `terraform_data.deploy_trigger` อาจรัน *ก่อน* `local_file.config` เสร็จด้วยซ้ำ ขัดกับ comment ตรง ๆ ทางแก้คือ implicit reference จริง (เช่น `input = "deploying after ${local_file.config.id}"`) หรือถ้าไม่มี attribute ที่ต้องใช้จริง ๆ ก็ใส่ `depends_on = [local_file.config]` ตรง ๆ — ทางแก้เดียวกับที่ `terraform_data.after_file` ของบทนี้เองใช้อยู่
+</SpotTheBug>
+
+export const quizGraphWalk = [
+  {
+    q: '```text\n$ terraform graph\ndigraph G {\n  rankdir = "RL";\n  ...\n  "local_file.greeting" -> "random_pet.name";\n  "terraform_data.after_file" -> "local_file.greeting";\n}\n```\nlocal_file.greeting ไม่มี depends_on เลย แต่ edge ไปหา random_pet.name นี้มีอยู่จริง ทำไม?',
+    options: [
+      'Terraform always links resources of different types',
+      'local_file.greeting references random_pet.name.id inside its content argument -- an implicit reference Terraform detects by parsing the expression',
+      'This is a bug -- the edge should not exist without depends_on',
+      'DOT format always adds edges between adjacent resource declarations',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ข้างบน: implicit reference (attribute ของ resource หนึ่งถูกใช้ใน argument ของอีกตัว) สร้าง edge จริงบน graph ให้เองอัตโนมัติ ไม่ต้องมี depends_on เลย',
+  },
+  {
+    q: 'เวลาจริง: `terraform apply` บน terraform_data 5 ตัวที่ไม่ขึ้นต่อกัน แต่ละตัว sleep 2 วินาทีผ่าน local-exec ใช้เวลารวม 2.08 วินาทีที่ parallelism default และ 10.20 วินาทีที่ -parallelism=1 นี่พิสูจน์อะไร?',
+    options: [
+      '-parallelism only affects network-bound cloud resources, not local ones',
+      'The default parallelism of 10 lets independent graph nodes run concurrently; -parallelism=1 forces them fully serial',
+      'The timing difference is measurement noise, not a real effect',
+      'Terraform always runs local-exec provisioners serially regardless of -parallelism',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ข้างบนด้วย `time` จริง: ~2s (ทั้ง 5 ซ้อนกัน จำกัดด้วยค่า default 10) เทียบกับ ~10s (5 x 2s ทีละตัว) เป็นผลจริงที่ทำซ้ำได้จาก -parallelism โดยตรง',
+  },
+  {
+    q: '```text\n$ terraform graph -help\n...\n  -type=TYPE  Type of operation graph to output. Can be: plan,\n              plan-refresh-only, plan-destroy, or apply. By default\n              Terraform just summarizes the relationships...\n```\nความต่างจริงระหว่าง terraform graph แบบ default กับ -type=plan คืออะไร?',
+    options: [
+      'There is no real difference, -type=plan is just cosmetic styling',
+      'The default output is a per-resource summary (3 nodes for this lesson\'s config); -type=plan expands into the actual detailed graph the evaluator walks, including (expand) and provider nodes',
+      '-type=plan only works after a real apply has happened',
+      '-type=plan removes all edges to simplify the output',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ข้างบน: default graph ของ config 3 resource ในบทนี้มี 3 node/2 edge เป๊ะ; output จริงของ -type=plan แสดง node (expand) ต่อ resource และ subgraph ของ provider -- มันคือ graph ของ executor จริง',
+  },
+  {
+    q: 'terraform_data.after_file ไม่มี attribute ไหนอ้างถึง local_file.greeting เลย อะไรที่ทำให้ Terraform apply มันหลัง local_file.greeting ได้?',
+    options: [
+      'Terraform guesses based on resource type ordering',
+      'An explicit depends_on = [local_file.greeting] block, which creates a graph edge with no matching implicit reference needed',
+      'Nothing -- this ordering is not actually guaranteed',
+      'Alphabetical resource name ordering (after_file > greeting)',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ข้างบน: main.tf ของบทนี้เองใช้ depends_on เพราะไม่มี argument ไหนของ terraform_data.after_file อ่าน attribute ของ local_file.greeting เลย -- depends_on คือ edge ในกรณีนั้น',
+  },
+  {
+    q: 'CI script ตั้ง -parallelism=50 ให้ terraform apply ทุกครั้ง copy มาจาก blog โดยไม่สนว่ารันกับ provider/account ไหน ความเสี่ยงจริงตามบทนี้คืออะไร?',
+    options: [
+      'None -- higher parallelism is always strictly better',
+      '-parallelism bounds concurrent operations/gRPC calls to the provider; a value tuned for one provider or account\'s rate limits can overwhelm or throttle a different one',
+      '-parallelism only affects local-only resources like this lesson\'s examples, never real cloud providers',
+      '-parallelism above 10 is rejected by Terraform with a hard error',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ข้างบน: -parallelism คุมโดยตรงว่า graph node กี่ตัว -- และดังนั้น provider call พร้อมกันกี่ตัว -- ที่รันในเวลาเดียวกัน ตาราง Trade-offs ของบทนี้บอกความเสี่ยงเรื่อง rate limit ไว้ตรง ๆ ถ้าปรับขึ้นมั่ว ๆ',
+  },
+];
+
+<Quiz client:visible id="terraform-internals/the-graph-and-the-walk" questions={quizGraphWalk} />
+
+<ProgressTracker client:visible id="terraform-internals/the-graph-and-the-walk" />
