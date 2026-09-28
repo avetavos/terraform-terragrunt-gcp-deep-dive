@@ -1,0 +1,129 @@
+---
+title: Review Checklist
+description: 'Checklist หน้าเดียว 8 กลุ่มสำหรับ review Terraform และ Terragrunt configuration — แต่ละบรรทัดลิงก์ไปยังบทเรียนและคำสั่ง verification ที่อธิบายกฎเบื้องหลัง'
+sidebar:
+  order: 2
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+นี่คือ checklist ที่ต้องไล่ดู — ด้วยตาเปล่า บน diff ไหนก็ได้ ไม่ว่าจะเป็นของคุณหรือของ AI — หลังจากเครื่องมือใน **[Verification Tools](/terraform-gcp/th/reading-terraform/verification-tools/)** รันผ่านสะอาดแล้ว มันตั้งใจให้อยู่หน้าเดียวพิมพ์ได้พอดี: checklist ที่ไม่มีใครเปิดดูจริงตอน review ไม่มีค่าอะไรเลย ทุกบรรทัดลิงก์ไปยัง entry ที่อธิบาย *เหตุผล* เพื่อให้หน้านี้ยังเป็นแค่ list ไม่ใช่การรื้อคอร์สมาสอนซ้ำ กลุ่มต่างๆ เรียงตามลำดับเดียวกับ **[วิธีอ่าน Terraform ที่ไม่ได้เขียนเอง](/terraform-gcp/th/reading-terraform/)** บวกกลุ่ม Tooling สุดท้ายที่ครอบคลุมว่าอีกเจ็ดกลุ่มถูก verify ยังไงจริงๆ
+
+<Mermaid title="อะไรจับแต่ละกลุ่มได้จริง ถ้ามี" code={checklistCoverageDiagram} />
+
+export const checklistCoverageDiagram = `flowchart LR
+  A["Versions &amp; providers"] --> T["validate/plan จับได้บางส่วน<br/>(deprecation warning, module+count error)"]
+  B["State &amp; backend"] --> P["บางส่วน: remote_state พังดังจริง,<br/>backend-locking drift เงียบ"]
+  V["Variables"] --> M["ส่วนใหญ่ต้อง review ด้วยคน<br/>(nullable/ephemeral ทำงานเงียบ)"]
+  R["Resources &amp; lifecycle"] --> P2["บางส่วน: for_each-on-unknown จับได้,<br/>prevent_destroy-ผิดตัวจับไม่ได้"]
+  Mo["Modules"] --> P
+  Tg["Terragrunt live tree"] --> M
+  C["CI &amp; policy"] --> P2
+`;
+
+## Versions & providers
+
+- ทุก `required_providers` constraint เป็น `~>` ไม่ใช่ `>=` ใช่ไหม? Constraint ที่ลอยตัว resolve ไปที่ release ใหม่สุดของ registry ในวันที่ `init` รัน ดู **[AI Bug Catalog](/terraform-gcp/th/reading-terraform/ai-bug-catalog/)**, entry 1
+- `.terraform.lock.hcl` commit ไว้แล้วหรือยัง — ไม่ได้ gitignore พร้อมกับ `.terraform/`? ดู entry 4
+- `terraform validate -json` กลับมาโดยไม่มี **warning** เลยใช่ไหม ไม่ใช่แค่ไม่มี error? Argument ที่ deprecated (`acl`, `managed_policy_arns`) ยัง validate และ plan ผ่านสำเร็จ ดู entry 2
+- มี module ไหนประกาศ `provider` block ของตัวเองหรือไม่? มัน validate ผ่านด้วยตัวเองสบายๆ และพังก็ต่อเมื่อผู้เรียกใช้ต้องการ `count`/`for_each`/`depends_on` ดู entry 3
+
+## State & backend
+
+- กลไกล็อกของ backend ตรงกับสิ่งที่ Terraform/backend version นี้รองรับจริงหรือไม่ — `use_lockfile` (S3, stable ตั้งแต่ 1.11) แทนที่ `dynamodb_table` ที่ deprecated แล้ว? ดู **[AI Bug Catalog](/terraform-gcp/th/reading-terraform/ai-bug-catalog/)**, entry 5 และ **[The State File](/terraform-gcp/th/state-management/the-state-file/)**
+- `terraform_remote_state` data source ทุกตัวชี้ไปที่ `key`/`path` ที่ apply ไปแล้วจริงหรือไม่? ไม่มี mock fallback เลย — state ที่หายไปพัง plan ทั้งหมดหนักๆ ดู entry 6
+
+## Variables
+
+- default ของ `nullable = false` variable เคยแทนที่ `null` ที่ผู้เรียกส่งมาตรงๆ อย่างเงียบๆ หรือไม่ โดยไม่มีอะไรใน `plan`/`apply` output บอกเรื่องการแทนที่เลย? ดู **[AI Bug Catalog](/terraform-gcp/th/reading-terraform/ai-bug-catalog/)**, entry 7
+- variable ไหนที่เป็น `ephemeral` มี default เป็น secret ตรงๆ หรือไม่? มันยังรั่วเข้าไปใน `show -json` ของ plan ที่ save ไว้ แม้จะไม่เข้า state เลยก็ตาม ดู entry 8
+
+## Resources & lifecycle
+
+- ใช้ `count` กับ list ไหนที่อาจถูกจัดลำดับใหม่ได้ ในที่ที่ `for_each` เป็นทางเลือกปลอดภัยทางเดียวหรือไม่? การเอา element ตรงกลางออกเลื่อน index ทุกตัวที่ตามมา ดู **[AI Bug Catalog](/terraform-gcp/th/reading-terraform/ai-bug-catalog/)**, entry 10
+- `lifecycle { prevent_destroy = true }` อยู่บน resource ที่สำคัญจริงหรือไม่ — ตรวจตรงๆ ไม่ใช่สมมติจาก resource ใกล้ๆ? ดู entry 9 พิสูจน์ด้วย `plan -destroy` จริงที่ destroy database ที่ไม่ถูกป้องกันได้โดยไม่มีอะไรต้านเลย
+- `for_each` ไหน derive key มาจาก computed attribute ของ resource ที่ managed อีกตัวหรือไม่? Error "Invalid for_each argument" จริงและปัจจุบัน — ดู entry 11
+- ใช้ `null_resource` ในที่ที่ `terraform_data` (1.4+) ตัดทั้ง provider dependency เพิ่มออกไปสำหรับพฤติกรรมที่เท่ากันหรือไม่? ดู entry 12
+- มี argument ไหนที่ดู copy มาจาก resource type ที่คล้ายกันแต่ไม่ใช่ตัวเดียวกันหรือไม่ (`force_destroy` บน `google_compute_instance`, จริงบน `google_storage_bucket` แต่ไม่ใช่ที่นี่)? Error "Unsupported argument" จริง — ดู entry 13
+
+## Modules
+
+- ทุก `source` ที่ไม่ใช่ registry pin revision ไว้แล้วหรือยัง — `?ref=<tag-or-sha>` สำหรับ source แบบ `git::`, `version` ตรงๆ สำหรับ registry module? ถ้าไม่มี Terraform จะ track default branch ของ `HEAD` อย่างเงียบๆ ดู **[AI Bug Catalog](/terraform-gcp/th/reading-terraform/ai-bug-catalog/)**, entry 14
+- `depends_on` บน module call ไหนมีไว้เพื่อ "แก้" ข้อร้องเรียนเรื่องลำดับที่จริงๆ แล้วเป็น reference cycle จริงหรือไม่? ไม่มี `depends_on` ใดกด `Error: Cycle` จริงไว้ได้ ดู entry 15
+
+## Terragrunt live tree
+
+- มีอะไรอ้างอิง `run-all`/`plan-all` หรือไม่? ทั้งคู่เป็นคำสั่งที่ไม่รู้จักตั้งแต่ Terragrunt 1.1 CLI redesign — ปฏิเสธจริงและทันที ดู **[AI Bug Catalog](/terraform-gcp/th/reading-terraform/ai-bug-catalog/)**, entry 16
+- ไฟล์ `terragrunt.hcl` ของสอง environment เคยมีค่า `account_id`/`region`/subscription/project *เหมือนกันทุกตัวอักษร*ใน `inputs` หรือไม่? `terragrunt hcl validate` จับ copy-paste ที่ valid ทาง syntax แบบนี้ไม่ได้ ดู entry 17 พิสูจน์ด้วย diff ของ `dev`/`prod` ที่เหมือนกันทุกตัวอักษรจริง
+
+## CI & policy
+
+- `-auto-approve` เคยรันกับ plan ที่ *สดใหม่* แทนที่จะเป็นไฟล์ `plan -out` ที่ save และ review แล้วหรือไม่? ดู **[AI Bug Catalog](/terraform-gcp/th/reading-terraform/ai-bug-catalog/)**, entry 18 พิสูจน์ด้วย apply เทียบข้างกันจริง
+- GitHub Action จาก third-party ทุกตัว pin ด้วย commit SHA เต็ม ไม่ใช่ tag ที่เปลี่ยนได้อย่าง `@master`/`@main` ใช่ไหม? ดู entry 19
+- Policy Rego ไหนใช้ syntax ก่อน v1 (`deny[msg] { ... }`) หรือไม่? มัน load ไม่ผ่านเลยภายใต้ OPA/conftest ปัจจุบัน — ดู entry 20 พิสูจน์ด้วย `rego_parse_error` จริง
+- ทุก rule ของ `.tflint.hcl` อ้างอิงสิ่งที่ ruleset `tflint-ruleset-google` เล็กๆ ที่เน้น IAM (รวม 6 rule) มีอยู่จริงหรือไม่ — ไม่ใช่สมมติว่ามี resource-shape check แบบที่ ruleset ของ cloud อื่นที่ใหญ่กว่ามี? ดู entry 21 พิสูจน์ด้วย error "Rule not found" จริงและทันทีที่นี่
+- มี secret จริงถูก commit ในไฟล์ `.tfvars` หรือไม่ หรือเหลืออยู่ใน `terraform.tfstate` เป็น plaintext แม้ output จะติด `sensitive` แล้วหรือไม่? ดู entry 22–23
+
+## Tooling
+
+- `terraform validate -json | jq '.diagnostics[]'` ถูกเช็คหา **warning** ด้วยหรือไม่ ไม่ใช่แค่ exit code ที่ไม่ใช่ศูนย์? ดู **[Verification Tools](/terraform-gcp/th/reading-terraform/verification-tools/)**
+- CI รัน `terraform plan -detailed-exitcode` จริงและตรวจ `show -json` ของ plan ที่ save ไว้ด้วย policy tool จริง (conftest, checkov) ไม่ใช่แค่กวาดตาดู plan text หรือไม่? ดู **[Verification Tools](/terraform-gcp/th/reading-terraform/verification-tools/)**
+- `terragrunt hcl validate`/`render` รันใน CI ก่อน `run --all plan` เพื่อจับ syntax error ก่อนที่ tree 10 หน่วยจะ apply ไปครึ่งหนึ่งหรือไม่? ดู **[Verification Tools](/terraform-gcp/th/reading-terraform/verification-tools/)**
+
+<Callout title="Checklist ช่วยแคบขอบเขตการค้นหา ไม่ได้แทนที่มัน">
+ทุกบรรทัดข้างบนแมปกับหนึ่งใน 23 pattern ใน **[AI Bug Catalog](/terraform-gcp/th/reading-terraform/ai-bug-catalog/)** — มีแค่ส่วนน้อยเท่านั้นที่ `validate`/`plan`/`terragrunt` ปฏิเสธตรงๆ รัน list นี้กับทุก diff ไม่ว่าเครื่องมือเหล่านั้นจะผ่านสะอาดแค่ไหน
+</Callout>
+
+export const quizReviewChecklist = [
+  {
+    q: "ทำไม coverage diagram ของกลุ่ม 'Versions & providers' ถึงบอกว่า 'validate/plan จับได้บางส่วน' ในขณะที่ 'Variables' กับ 'Terragrunt live tree' บอกว่า 'ส่วนใหญ่ต้อง review ด้วยคน'?",
+    options: [
+      "เป็นแค่การสุ่มเลือก — ทุกกลุ่มมี tool coverage เหมือนกันหมด",
+      "Argument ที่ deprecated หรือ module+count ที่ขัดกันเป็นสิ่งที่ validate/plan ตรวจจับได้จาก schema/graph เพียงอย่างเดียว ส่วนคำถามว่า default ของ nullable แทนที่ null อย่างเงียบๆ หรือไม่ หรือ terragrunt.hcl ของสอง environment ต่างกันจริงหรือไม่ เป็นคำถามเชิง semantic ที่ไม่มีเครื่องมือไหนตรวจได้โดยไม่รู้เจตนาจริงของ reviewer",
+      "Variables ไม่เคยถูก validate ด้วยเครื่องมือไหนเลย",
+      "ไฟล์ Terragrunt fail hcl validate เสมอ",
+    ],
+    answer: 1,
+    explain: "พิสูจน์ตลอด AI Bug Catalog: entry 2-3 (deprecated arg, module+count) เป็น validate rejection/warning จริงและปัจจุบัน ส่วน entry 7 (nullable), 17 (การ copy dev/prod) ทั้งคู่ apply/validate ผ่านสะอาด เพราะไม่ใช่รูปแบบที่เครื่องมือเรียกว่า invalid ได้เอง",
+  },
+  {
+    q: "stack หนึ่งมี database resource จริงที่ไม่มี lifecycle block เลย อยู่ข้างๆ helper resource ที่ทิ้งได้ซึ่งมี lifecycle { prevent_destroy = true } กลุ่มไหนใน checklist ครอบคลุมการ review คู่นี้ และมันขึ้นอยู่กับอะไรในการจับ?",
+    options: [
+      "Terragrunt live tree — ขึ้นอยู่กับ input ต่อ environment",
+      "Resources & lifecycle — การจับขึ้นอยู่กับการเช็ค prevent_destroy กับ resource ที่สำคัญจริงๆ เพราะ terraform plan เองยอมรับ configuration นี้โดยไม่มีข้อโต้แย้งเลยจนกว่าจะมีการลอง plan -destroy จริง",
+      "Versions & providers — prevent_destroy เป็นเรื่องของ provider version",
+      "Tooling — มีแค่ checkov เท่านั้นที่จับเรื่องนี้ได้",
+    ],
+    answer: 1,
+    explain: "พิสูจน์ตรงๆ ใน aws sibling ของคอร์สนี้ entry 9 ด้วยกลไกระดับ graph เดียวกับที่ entry 9 ของ repo นี้ยืนยัน: plan -destroy จริงกับรูปแบบนี้เป๊ะ destroy database ที่ไม่ถูกป้องกันได้โดยไม่มี error เลย ขณะที่บล็อกแค่การ destroy ของ helper resource ที่ทิ้งได้เท่านั้น",
+  },
+  {
+    q: "ทำไม checklist ถึงถาม 'Rego policy ทุกตัวใช้ syntax v1 หรือไม่' ในกลุ่ม CI & policy แทนที่จะสมมติว่า conftest จะแค่เตือนเรื่อง syntax เก่า?",
+    options: [
+      "conftest อัปเกรด syntax Rego เก่าให้อัตโนมัติเสมอ",
+      "พิสูจน์ตรงๆ: syntax ก่อน v1 อย่าง deny[msg] { ... } สร้าง rego_parse_error จริงตอน LOAD ภายใต้ conftest ปัจจุบัน — เป็นความล้มเหลวหนักตั้งแต่เริ่มรัน ไม่ใช่ warning ซึ่งดูเหมือนปัญหา CI/tooling ได้ แทนที่จะเป็นสิ่งที่มันเป็นจริงๆ",
+      "Syntax Rego v1 กับก่อน v1 ทำงานเหมือนกันเป๊ะ",
+      "เรื่องนี้เกี่ยวกับ checkov เท่านั้น ไม่เกี่ยวกับ conftest",
+    ],
+    answer: 1,
+    explain: "พิสูจน์ใน AI Bug Catalog entry 20: output จริงของ conftest คือ 'rego_parse_error: `if` keyword is required before rule body' — load ไม่ผ่าน ยืนยันว่าแก้ได้ด้วยการเพิ่ม `import rego.v1` และเขียนใหม่เป็น `contains`/`if`",
+  },
+  {
+    q: "ทำไม entry 21 ของ repo นี้ถึงแสดงว่า tflint ปฏิเสธ rule ที่คิดขึ้นเองทันที ทั้งที่ aws sibling ของคอร์สนี้บอกว่า tflint เงียบกับชื่อ rule ที่ไม่มีอยู่จริง?",
+    options: [
+      "ทั้งสองพฤติกรรมเหมือนกันเป๊ะเสมอในทุก ruleset",
+      "พิสูจน์ตรงๆ: การจับชื่อ rule ที่คิดขึ้นเองได้หรือไม่ขึ้นอยู่กับ ruleset plugin แต่ละตัวเอง — ruleset ของ google ที่เล็กมาก (6 rule) ปฏิเสธชื่อที่ invalid ทันทีด้วย 'Rule not found' ขณะที่ ruleset ของ aws เงียบและไม่เคยเอา rule นั้นไปใช้เลย",
+      "นี่เป็นแค่ความกังวลเชิงทฤษฎี ไม่เคยเกิดขึ้นจริง",
+      "tflint ปฏิเสธ plugin ที่ไม่รู้จักทั้งหมด",
+    ],
+    answer: 1,
+    explain: "พิสูจน์ใน AI Bug Catalog entry 21: การรัน tflint จริงที่นี่กับ google_compute_instance_invalid_zone ให้ error จริง 'Rule not found' ทันที — ตรงข้ามกับพฤติกรรมของ ruleset aws ที่พิสูจน์ใน aws sibling ของคอร์สนี้",
+  },
+];
+
+<Quiz client:visible id="reading-terraform/review-checklist" questions={quizReviewChecklist} />
+
+<ProgressTracker client:visible id="reading-terraform/review-checklist" />

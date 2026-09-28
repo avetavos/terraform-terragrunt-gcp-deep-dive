@@ -1,0 +1,212 @@
+---
+title: Verification tools
+description: 'The real ladder for verifying Terraform and Terragrunt you did not write — fmt, validate, plan -detailed-exitcode, show -json + jq, terraform test with mock_provider, tflint, checkov, conftest, terragrunt hcl validate/render/run --all, and this course''s own harness — each run for real.'
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+Every tool below was actually run against real Terraform 1.16.4 / Terragrunt 1.1.0 configuration with the pinned `hashicorp/google` 8.4.0 provider and the pinned `ghcr.io/terraform-linters/tflint`, `bridgecrew/checkov`, and `openpolicyagent/conftest` Docker images this course uses — never against a real GCP project (every provider config in this course uses `project = "mock-project"`, and `terraform validate` never contacts GCP at all; real `google` `plan` always needs real Application Default Credentials, so plan-shaped proofs in this course use `terraform_data` or `terraform test` with `mock_provider`, see the AI Bug Catalog's entry 9). This is the ladder in the order it actually catches things, cheapest and fastest first.
+
+<Mermaid title="The verification ladder — what each rung catches" code={ladderDiagram} />
+
+export const ladderDiagram = `flowchart TD
+  A["fmt -check<br/>formatting only"] --> B["validate<br/>schema + type errors + deprecation warnings"]
+  B --> C["plan -detailed-exitcode<br/>real diff against real (mock) provider schema"]
+  C --> D["show -json + jq<br/>machine-readable plan, what CI/policy actually reads"]
+  D --> E["terraform test + mock_provider<br/>assertions against a plan, no real infra"]
+  E --> F["tflint / checkov<br/>real rule catalogs, cloud-specific findings"]
+  F --> G["conftest<br/>custom Rego policy against show -json"]
+  G --> H["terragrunt hcl validate/render/run --all<br/>the live tree, offline"]
+`;
+
+## `terraform fmt -check` — formatting, not correctness
+
+```text
+$ terraform fmt -check -diff main.tf
+```
+
+Exits non-zero and prints a diff if formatting is off; fixes nothing itself unless run without `-check`. Catches zero semantic bugs from this module's catalog — a perfectly formatted file can still hardcode a wrong account ID. It's the cheapest possible CI gate, and the one this course's own harness runs first, before anything else, over every fence.
+
+## `terraform validate` — schema, types, and (crucially) warnings
+
+```text
+$ terraform validate -json
+```
+
+Catches: entry 3 (module + `count` incompatibility), entry 11 (`for_each` on an unknown value), entry 13 (hallucinated argument), entry 15 (reference cycle) — all real, hard failures. Also catches entry 2 (deprecated arguments) — but only as a **warning**, which a CI step that checks `terraform validate; echo $?` alone silently ignores. The real, useful CI check greps the JSON:
+
+```bash
+terraform validate -json | jq -e '[.diagnostics[] | select(.severity=="warning")] | length == 0'
+```
+
+`validate` never contacts a real provider API — it checks the configuration against the provider's *schema*, downloaded once at `init`, entirely offline.
+
+## `terraform plan -detailed-exitcode` — a real diff, not just a syntax check
+
+```text
+$ terraform plan -detailed-exitcode
+```
+
+Exit code `0` = no changes, `1` = error, `2` = changes present — the exit code CI actually branches on, instead of parsing plan text. Real `google` `plan` always needs real Application Default Credentials (proven directly in the **[AI Bug Catalog](/terraform-gcp/en/reading-terraform/ai-bug-catalog/)**'s entry 9), so the plan-shaped proofs in this catalog — entry 10's `count` index-shift, entry 7's `nullable` substitution — use `terraform test` with `mock_provider "google" {}` instead of a raw `plan`, which is genuinely offline for any provider. Catches the same class of bug `validate` alone cannot see, because it only shows up as a *diff*, not a schema violation.
+
+## `terraform show -json` + `jq` — what CI and policy tools actually read
+
+```text
+$ terraform plan -out=plan.out && terraform show -json plan.out > plan.json
+$ jq '.resource_changes[] | select(.change.actions[0] == "delete") | .address' plan.json
+```
+
+This is the schema `conftest`/OPA (below) and this course's own harness read — never plan's human-readable text. Proven directly in entry 8: an `ephemeral` variable's literal `default` shows up in this exact JSON's `variables` block even though it's correctly kept out of `terraform.tfstate`. Any secret-shaped string an archived `show -json` plan artifact might leak is caught here, not in the CLI's redacted output.
+
+## `terraform test` with `mock_provider`
+
+```hcl
+# tests/example.tftest.hcl (fragment — see modules/testing-modules for a full worked example)
+mock_provider "google" {}
+
+run "plan_only" {
+  command = plan
+  assert {
+    condition     = google_compute_instance.app.machine_type == "e2-medium"
+    error_message = "unexpected machine_type"
+  }
+}
+```
+
+`terraform test` (1.6+) with `mock_provider` (1.7+) runs full `plan`-time assertions with **zero real provider calls at all** — this is exactly what makes it useful for `google` resources, where a real `plan` needs a real project and real Application Default Credentials (see **[Testing Modules](/terraform-gcp/en/modules/testing-modules/)** for a full worked example, including `override_resource`). This is the only rung on this ladder that works identically well across all three clouds regardless of what a real `plan` can reach.
+
+## tflint — real, current findings against a real rule catalog
+
+```text
+$ docker run --rm -v "$(pwd)":/data -v <plugin-cache>:/root/.tflint.d -w /data ghcr.io/terraform-linters/tflint --init
+$ docker run --rm -v "$(pwd)":/data -v <plugin-cache>:/root/.tflint.d -w /data ghcr.io/terraform-linters/tflint
+```
+
+Real output against a bare `google_compute_instance` with no `required_providers`/`required_version` block:
+
+```text
+2 issue(s) found:
+Warning: Missing version constraint for provider "google" in `required_providers` (terraform_required_providers)
+Warning: terraform "required_version" attribute is required (terraform_required_version)
+```
+
+Catches genuinely current findings — but the entire real `tflint-ruleset-google` rule catalog is six rules, all IAM-`_invalid_member` checks (confirmed against `github.com/terraform-linters/tflint-ruleset-google/tree/master/docs/rules`); most resource-shape checks other clouds' larger rulesets offer simply don't exist for `google` yet. Entry 21 shows the flip side of this smallness: an invented rule name here (`google_compute_instance_invalid_zone`) is *rejected outright* — "Rule not found" — unlike this catalog's aws sibling, where an invented rule name is silently never applied. `--init` must persist its downloaded plugin across runs — mount a real volume for `~/.tflint.d`, not a fresh one per `docker run --rm`, or every run re-downloads and a stale cache silently masks plugin-install failures.
+
+## checkov — real, current findings
+
+```text
+$ docker run --rm -v "$(pwd)":/tf bridgecrew/checkov -d /tf --compact --quiet
+```
+
+Real output against a bare `google_compute_instance`:
+
+```text
+terraform scan results:
+Passed checks: 5, Failed checks: 3, Skipped checks: 0
+Check: CKV_GCP_38: "Ensure VM disks for critical VMs are encrypted with Customer Supplied Encryption Keys (CSEK)"
+Check: CKV_GCP_32: "Ensure 'Block Project-wide SSH keys' is enabled for VM instances"
+Check: CKV_GCP_39: "Ensure Compute instances are launched with Shielded VM enabled"
+```
+
+Same caveat as tflint: a checkov check ID that doesn't exist (a common AI-hallucination shape across all three clouds — see this course's Azure sibling's `CKV_AZURE_59` vs `CKV_AZURE_35` catalog entry) is silently never evaluated, not rejected as invalid config.
+
+## conftest — custom Rego policy against `show -json`
+
+```text
+$ docker run --rm -v "$(pwd)":/project openpolicyagent/conftest test --policy policy plan.json
+```
+
+Reads exactly the `show -json` output from the rung above — proven throughout entry 20's real `FAIL`/`PASS` output. Current `conftest` defaults to **Rego v1** syntax (`import rego.v1`, `contains`/`if`): pre-v1 `deny[msg] { ... }` fails to even *load*, with a real `rego_parse_error`, not a rule that silently never fires.
+
+## `terragrunt hcl validate` / `render` / `run --all plan` — the live tree, offline
+
+```text
+$ terragrunt hcl validate --working-dir live/prod/vpc      # recursive HCL syntax check
+$ terragrunt render --format json --working-dir live/dev/vpc   # resolved config, offline
+$ terragrunt run --all plan --working-dir .                 # dependency-ordered, offline with mock_outputs
+```
+
+`hcl validate` only checks that the HCL parses — proven directly in entry 17, it passes on two `terragrunt.hcl` files that are byte-identical copy-pastes deploying against the wrong account. `render` resolves every `include`/`local`/function call to its final value without ever calling `terraform` — the fastest way to actually *see* whether two environments' resolved `inputs` differ. `run --all plan` requires a `root.hcl` (or a `--terragrunt` flag on this course's own harness) and runs every unit in real dependency order — `run-all`/`plan-all` (entry 16) are both unknown commands as of the 1.1 CLI redesign; this is the real, current replacement.
+
+## This course's own harness: `tools/verify-snippets.mjs`
+
+Every `hcl` fence in this course whose first line is `# <path>` ending `.tf`/`.hcl`/`.tftest.hcl`/`.tfvars` is collected as a real file at that path (relative to its lesson) and run through `terraform init -backend=false` + `validate` + `fmt -check`, plus `test`/`plan`/`terragrunt hcl validate`/`render` under the `--test`/`--plan`/`--terragrunt` flags. Honestly, two real limitations:
+
+- **`-backend=false` always.** Any `backend "s3"`/`"azurerm"`/`"gcs"` block a lesson declares is never actually initialized — this course never has real backend credentials, so entry 5's backend-locking claims are docs-sourced, not harness-run (see that entry for the exact citation).
+- **`google` cannot `plan` offline for most resources.** This harness always *tries* `terraform plan` and pattern-matches known offline-auth-failure phrases to print `not possible offline: <reason>` instead of a raw stack trace — real: `google` always tries to resolve Application Default Credentials, even for a `plan -destroy -refresh=false` against a hand-authored state, proven directly in the AI Bug Catalog's entry 9. aws's mock credentials (`skip_credentials_validation`, `skip_requesting_account_id`, `skip_metadata_api_check`, `skip_region_validation`) are what let aws `plan` proceed fully offline where google generally cannot.
+
+A fence whose first line contains `@expect-error` (used throughout the **[AI Bug Catalog](/terraform-gcp/en/reading-terraform/ai-bug-catalog/)** for every deliberately-broken snippet) is deliberately **skipped** by this harness — the lesson prose carries the real, already-captured error instead of asking the harness to re-derive it on every run.
+
+## Mental Model
+
+```text
+The verification ladder, cheapest and fastest first:
+
+1. fmt -check           → formatting only, zero semantic coverage
+2. validate              → schema/type errors + warnings (check warnings explicitly!)
+3. plan -detailed-exitcode → a real diff — count/for_each churn, lifecycle scope, nullable substitution
+4. show -json + jq        → what CI/policy tools actually read, not plan's human text
+5. test + mock_provider   → plan-time assertions, zero real provider calls, works for any cloud
+6. tflint / checkov        → real rule catalogs — but silent on an invented rule ID
+7. conftest                → custom policy against show -json — v1 Rego syntax required
+8. terragrunt hcl validate/render/run --all → the live tree, offline, dependency-ordered
+
+Passing every rung proves the configuration is well-formed and internally consistent.
+It does not prove prevent_destroy protects the right resource, or that dev and prod
+actually deploy against different accounts — those need a human reading the checklist.
+```
+
+## Common Misconceptions
+
+- **"`terraform validate` passing means the config is correct."** It means the config is schema-valid. Proven throughout the catalog: 15 of 23 entries validate and plan cleanly.
+- **"A green tflint/checkov run means every intended check actually ran."** Proven directly in entry 21: an invented rule ID produces the identical "success" output as a correctly-named one — the tool has no way to tell "this rule doesn't exist" from "this rule found nothing to flag."
+- **"`-backend=false` is just a harness limitation, not a real concern."** It's also the honest state of most CI `validate`/`plan` steps before a real `apply` stage — which is exactly why entry 5's backend-locking drift is invisible to `validate`/`plan` in real pipelines too, not just this course's harness.
+
+<Callout title="The one-line takeaway">
+Each rung of this ladder catches a specific, narrow class of bug — `fmt` catches formatting, `validate` catches schema errors and (if you check for them) warnings, `plan` catches real diffs, `test`/tflint/checkov/conftest catch policy and provider-specific findings, and `terragrunt` catches the live tree's structure — but passing all of them together still does not prove intent: that the right resource is protected, that two environments actually differ, or that a policy rule you wrote is spelled correctly enough to actually run.
+</Callout>
+
+export const quizVerificationTools = [
+  {
+    q: "Why does this lesson say `terraform validate` passing is not enough on its own, even though it does catch real errors like entry 3's module+count conflict?",
+    options: [
+      "validate doesn't actually catch any real errors",
+      "validate only fails on hard schema/type errors — a deprecated argument (entry 2) or a hallucinated-but-schema-valid choice still validates successfully, and validate's own warnings are easy to miss if CI only checks the exit code",
+      "validate requires real cloud credentials to run at all",
+      "validate and plan always produce identical results",
+    ],
+    answer: 1,
+    explain: "Proven directly: terraform validate -json on entry 2's deprecated google_compute_firewall.enable_logging produces a warning-severity diagnostic, not an error — a bare `terraform validate; echo $?` reports success.",
+  },
+  {
+    q: "Why can aws's `terraform plan` run fully offline in this course while `google` generally cannot, per the harness's own documented limitation?",
+    options: [
+      "azurerm and google providers are broken",
+      "aws's provider config sets skip_credentials_validation, skip_requesting_account_id, and skip_metadata_api_check, letting most resource types plan without any real AWS call — google needs real Application Default Credentials for essentially every plan, with no equivalent skip flags on the provider block",
+      "Terraform plan never needs any credentials for any provider",
+      "This course never runs azurerm/google plan at all, even with mock_provider",
+    ],
+    answer: 1,
+    explain: "Documented directly in the harness header and confirmed by the AI Bug Catalog's own proofs — real aws plans shown in this course's aws sibling ran with zero network calls; google relies on terraform test + mock_provider instead for the equivalent offline coverage, proven directly in this catalog's entry 9.",
+  },
+  {
+    q: "What does a real tflint run against a `.tflint.hcl` referencing a rule name that doesn't exist in the real ruleset actually report?",
+    options: [
+      "An explicit 'unknown rule' error that fails the run",
+      "Success on everything the config DID check — proven directly, the invented rule silently never applies, with zero indication the intended check never ran",
+      "tflint refuses to start entirely",
+      "The rule runs anyway using a default configuration",
+    ],
+    answer: 1,
+    explain: "Proven in the AI Bug Catalog entry 21: the real tflint run against a .tflint.hcl with rule \"google_compute_instance_invalid_zone\" produced a real 'Rule not found' error immediately — the google ruleset validates rule names strictly, unlike the aws ruleset's silent behavior proven in this catalog's aws sibling.",
+  },
+];
+
+<Quiz client:visible id="reading-terraform/verification-tools" questions={quizVerificationTools} />
+
+<ProgressTracker client:visible id="reading-terraform/verification-tools" />

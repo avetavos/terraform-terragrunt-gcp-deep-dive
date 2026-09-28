@@ -1,0 +1,129 @@
+---
+title: Review checklist
+description: 'A one-page, eight-group checklist for reviewing Terraform and Terragrunt configuration — each line a yes/no question linking the lesson and verification command that explains the underlying rule.'
+sidebar:
+  order: 2
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+This is the checklist to run down — by eye, on any diff, yours or an AI's — after the tools in **[Verification Tools](/terraform-gcp/en/reading-terraform/verification-tools/)** have run and come back clean. It fits on one printed page on purpose: a checklist nobody actually opens during a review is worthless. Every line links the entry that explains *why*, so this page stays a list, not a re-run of the course. The groups follow the same order as **[How to read Terraform you did not write](/terraform-gcp/en/reading-terraform/)**, plus a final Tooling group covering how each of the other seven actually gets verified.
+
+<Mermaid title="What actually catches each group, if anything" code={checklistCoverageDiagram} />
+
+export const checklistCoverageDiagram = `flowchart LR
+  A["Versions &amp; providers"] --> T["validate/plan catch some<br/>(deprecation warnings, module+count errors)"]
+  B["State &amp; backend"] --> P["Partial: remote_state hard-fails loudly,<br/>backend-locking drift is silent"]
+  V["Variables"] --> M["Mostly human review<br/>(nullable/ephemeral behave silently)"]
+  R["Resources &amp; lifecycle"] --> P2["Partial: for_each-on-unknown caught,<br/>prevent_destroy-on-wrong-resource is not"]
+  Mo["Modules"] --> P
+  Tg["Terragrunt live tree"] --> M
+  C["CI &amp; policy"] --> P2
+`;
+
+## Versions & providers
+
+- Is every `required_providers` constraint `~>`, not `>=`? A floating constraint resolves to whatever the registry's current newest release is on the day `init` runs. See the **[AI Bug Catalog](/terraform-gcp/en/reading-terraform/ai-bug-catalog/)**, entry 1.
+- Is `.terraform.lock.hcl` committed — not gitignored alongside `.terraform/`? See entry 4.
+- Does `terraform validate -json` come back with zero **warnings**, not just zero errors? A deprecated argument (`acl`, `managed_policy_arns`) still validates and plans successfully. See entry 2.
+- Does any module declare its own `provider` block? It validates fine alone and only fails once a caller needs `count`/`for_each`/`depends_on`. See entry 3.
+
+## State & backend
+
+- Does the backend's locking mechanism match what this Terraform/backend version actually supports — `use_lockfile` (S3, stable since 1.11) rather than the now-deprecated `dynamodb_table`? See the **[AI Bug Catalog](/terraform-gcp/en/reading-terraform/ai-bug-catalog/)**, entry 5, and **[The State File](/terraform-gcp/en/state-management/the-state-file/)**.
+- Does every `terraform_remote_state` data source point at a `key`/`path` that has actually been applied? There is no mock fallback — a missing state file hard-fails the whole plan. See entry 6.
+
+## Variables
+
+- Does a `nullable = false` variable's default ever silently stand in for an explicit `null` passed from a caller, with nothing in `plan`/`apply` output calling out the substitution? See the **[AI Bug Catalog](/terraform-gcp/en/reading-terraform/ai-bug-catalog/)**, entry 7.
+- Does any `ephemeral` variable carry a literal secret `default`? It still leaks into a saved plan's `show -json` output even though it never reaches state. See entry 8.
+
+## Resources & lifecycle
+
+- Is `count` used over any list that could be reordered, where `for_each` is the only safe choice? Removing a middle element shifts every later index. See the **[AI Bug Catalog](/terraform-gcp/en/reading-terraform/ai-bug-catalog/)**, entry 10.
+- Does `lifecycle { prevent_destroy = true }` sit on the resource that actually matters — checked directly, not assumed from a nearby resource's error message? See entry 9, proven with a real `plan -destroy` that destroyed the unprotected database with zero resistance.
+- Does any `for_each` derive its keys from another managed resource's computed attribute? A real, current "Invalid for_each argument" rejection — see entry 11.
+- Is `null_resource` used where `terraform_data` (1.4+) removes an entire extra provider dependency for equivalent behavior? See entry 12.
+- Does any argument look copied from a similar-but-different resource type (`force_destroy` on `google_compute_instance`, real on `google_storage_bucket` but not here)? A real "Unsupported argument" rejection — see entry 13.
+
+## Modules
+
+- Does every non-registry `source` pin a revision — `?ref=<tag-or-sha>` for a `git::` source, an explicit `version` for a registry module? Without it, Terraform tracks the default branch's `HEAD`, silently. See the **[AI Bug Catalog](/terraform-gcp/en/reading-terraform/ai-bug-catalog/)**, entry 14.
+- Does any `depends_on` on a module call exist to "fix" an ordering complaint that's actually a genuine reference cycle? No `depends_on` can suppress a real `Error: Cycle`. See entry 15.
+
+## Terragrunt live tree
+
+- Does anything reference `run-all`/`plan-all`? Both are unknown commands as of the Terragrunt 1.1 CLI redesign — a real, immediate rejection. See the **[AI Bug Catalog](/terraform-gcp/en/reading-terraform/ai-bug-catalog/)**, entry 16.
+- Do two environments' `terragrunt.hcl` files ever carry the *identical* `account_id`/`region`/subscription/project value in `inputs`? `terragrunt hcl validate` cannot catch a syntactically valid copy-paste. See entry 17, proven with a real byte-identical `dev`/`prod` diff.
+
+## CI & policy
+
+- Does `-auto-approve` ever run against a *fresh* plan, rather than a saved, reviewed `plan -out` file? See the **[AI Bug Catalog](/terraform-gcp/en/reading-terraform/ai-bug-catalog/)**, entry 18, proven with a real side-by-side apply.
+- Is every third-party GitHub Action pinned to a full commit SHA, not a mutable tag like `@master`/`@main`? See entry 19.
+- Does any Rego policy use pre-v1 `deny[msg] { ... }` syntax? It fails to even *load* under current OPA/conftest — see entry 20, proven with a real `rego_parse_error`.
+- Does every `.tflint.hcl` rule reference something this small, IAM-focused `tflint-ruleset-google` (six rules total) actually offers — rather than assuming a resource-shape check other clouds' larger rulesets have? See entry 21, proven with a real, immediate "Rule not found" rejection here.
+- Is a real secret ever committed in a `.tfvars` file, or left in `terraform.tfstate` as plaintext despite an output marked `sensitive`? See entries 22–23.
+
+## Tooling
+
+- Does `terraform validate -json | jq '.diagnostics[]'` get checked for **warnings**, not just a nonzero exit code? See **[Verification Tools](/terraform-gcp/en/reading-terraform/verification-tools/)**.
+- Does CI run a real `terraform plan -detailed-exitcode` and inspect the saved plan's `show -json` output with a real policy tool (conftest, checkov), not just eyeball the plan text? See **[Verification Tools](/terraform-gcp/en/reading-terraform/verification-tools/)**.
+- Does `terragrunt hcl validate`/`render` run in CI before `run --all plan`, catching syntax errors before a 10-unit tree partially applies? See **[Verification Tools](/terraform-gcp/en/reading-terraform/verification-tools/)**.
+
+<Callout title="A checklist narrows the search, it does not replace it">
+Every line above maps to one of the 23 patterns in the **[AI Bug Catalog](/terraform-gcp/en/reading-terraform/ai-bug-catalog/)** — only a minority of which `validate`/`plan`/`terragrunt` reject outright. Run this list on every diff regardless of how clean those tools came back.
+</Callout>
+
+export const quizReviewChecklist = [
+  {
+    q: "Why does the 'Versions & providers' group's coverage diagram say 'validate/plan catch some' while 'Variables' and 'Terragrunt live tree' say 'mostly human review'?",
+    options: [
+      "It's arbitrary — every group has identical tool coverage",
+      "A deprecated argument or a module+count conflict is something validate/plan can detect from the schema/graph alone; whether nullable's default silently substituted for null, or whether two environments' terragrunt.hcl inputs genuinely differ, are semantic questions neither tool can check without knowing the reviewer's actual intent",
+      "Variables are never validated by any tool",
+      "Terragrunt files always fail hcl validate",
+    ],
+    answer: 1,
+    explain: "Proven throughout the AI Bug Catalog: entries 2-3 (deprecated args, module+count) are real, current validate rejections/warnings; entries 7 (nullable), 17 (hardcoded dev/prod copy) both apply/validate cleanly, because neither is a shape the tool can call invalid on its own.",
+  },
+  {
+    q: "A stack has a real database resource with no lifecycle block at all, sitting next to a disposable helper resource that carries lifecycle { prevent_destroy = true }. Which checklist group covers reviewing this pair, and what does it depend on to catch it?",
+    options: [
+      "Terragrunt live tree — it depends on per-environment inputs",
+      "Resources & lifecycle — catching it depends on checking prevent_destroy against the resource that actually matters, since terraform plan itself accepts this configuration with zero complaint until a real plan -destroy is attempted",
+      "Versions & providers — prevent_destroy is a provider-version concern",
+      "Tooling — only checkov catches this",
+    ],
+    answer: 1,
+    explain: "Proven directly in this course's aws sibling entry 9, with the same graph-level mechanism this repo's entry 9 confirms: a real plan -destroy against this exact shape destroyed the unprotected database with zero errors, while blocking only the disposable helper resource.",
+  },
+  {
+    q: "Why does the checklist ask 'is every Rego policy using v1 syntax' under CI & policy rather than assuming conftest would just warn about old syntax?",
+    options: [
+      "conftest always auto-upgrades old Rego syntax silently",
+      "Proven directly: pre-v1 deny[msg] { ... } syntax produces a real rego_parse_error at LOAD time under current conftest — it's a hard failure to even start, not a warning, which can look like a CI/tooling problem rather than what it actually is",
+      "Rego v1 and pre-v1 syntax are functionally identical",
+      "This only matters for checkov, not conftest",
+    ],
+    answer: 1,
+    explain: "Proven in the AI Bug Catalog entry 20: the real conftest output is 'rego_parse_error: `if` keyword is required before rule body' — a load failure, confirmed fixed by adding `import rego.v1` and rewriting to `contains`/`if`.",
+  },
+  {
+    q: "Why does the checklist list 'does this .tflint.hcl rule actually exist in the real google ruleset' as its own line, given entry 21 shows tflint rejecting the invented rule immediately here?",
+    options: [
+      "It doesn't need to be — tflint always errors on every invalid rule name, for every ruleset",
+      "Because whether an invented rule name is caught at all depends on the specific ruleset plugin — proven directly, this catalog's aws sibling shows the aws ruleset silently ignoring an invented rule, while the small google ruleset here rejects one outright; assuming either behavior universally is wrong",
+      "This is only a theoretical concern, never observed",
+      "tflint rejects unknown plugins entirely",
+    ],
+    answer: 1,
+    explain: "Proven in the AI Bug Catalog entry 21: the real tflint run here against google_compute_instance_invalid_zone produced 'Rule not found', a real and immediate rejection — the opposite behavior from the aws ruleset proven in this course's aws sibling, where an invented rule name is silently never applied.",
+  },
+];
+
+<Quiz client:visible id="reading-terraform/review-checklist" questions={quizReviewChecklist} />
+
+<ProgressTracker client:visible id="reading-terraform/review-checklist" />

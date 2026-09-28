@@ -1,0 +1,179 @@
+---
+title: วิธีอ่าน Terraform ที่ไม่ได้เขียนเอง
+description: 'ลำดับการอ่าน Terraform และ Terragrunt ที่ AI สร้างขึ้น — เริ่มจาก provider และ version ก่อน ตามด้วย backend และ state, variables และ locals, resources และ lifecycle, modules, live tree ของ Terragrunt, แล้วจึงถึง CI และ policy — เพราะสิ่งที่ทำให้ Terraform ที่ AI สร้างผิดพลาดส่วนใหญ่ apply ผ่านสะอาดแล้วค่อยพังทีหลัง'
+sidebar:
+  order: 0
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+ทุกโมดูลก่อนหน้านี้สอนให้คุณ *เขียน* Terraform และ Terragrunt โมดูลนี้สอนอีกครึ่งหนึ่ง คือการ อ่าน configuration ที่คนอื่น — หรือ AI — เขียนไว้ แล้วตัดสินว่ามันถูกต้องจริงหรือไม่ ผู้ช่วย AI ส่ง module, `terragrunt.hcl`, CI pipeline ที่ดูเหมือนตัวอย่างที่คุณเรียนมาทุกอย่าง ใช้ resource type และ argument ที่อ่านแล้วลื่นไหลและดูทันสมัย และ — ส่วนใหญ่แล้ว — **`terraform validate` กับ `terraform plan` ผ่านสะอาดทั้งคู่** นั่นคือกับดักที่โมดูลนี้มีไว้ปิด จาก 23 pattern ที่บทถัดไปรวบรวมไว้ มีเพียงส่วนน้อยเท่านั้นที่ `validate`/`plan`/`terragrunt` ปฏิเสธตรงๆ ที่เหลือคือ configuration ที่ schema ถูกต้อง plan สะอาด แต่พังทีหลัง — ตอน `apply` จริงกับ cloud account จริง ตอน `plan` ครั้งถัดไปหลังมีคนแก้ list ที่ไม่เกี่ยวข้อง หรือไม่พังเลยแต่ทำสิ่งผิดอย่างเงียบๆ (ป้องกัน resource ผิดตัว, deploy `prod` ทับ account ของ `dev`, ปล่อย secret ที่ไม่มีใคร review)
+
+มีปัญหา training data สามอย่างที่ซ้อนกันจนเกิดเรื่องนี้ อย่างแรก provider ecosystem ของ Terraform เปลี่ยนรูปแบบทุก release จริงๆ — `aws_s3_bucket.acl` เคยเป็นวิธีตั้งค่า ACL มาหลายปีแล้วตอนนี้ deprecated ไปเป็น `aws_s3_bucket_acl`, `terragrunt run-all`/`plan-all` เคยเป็นคำสั่งเดียวที่มีก่อน Terragrunt 1.1 ปรับ CLI ใหม่ — และ training data สาธารณะจำนวนมากเกิดก่อนการเปลี่ยนแปลงแต่ละครั้งขณะที่ยังอ่านเป็น HCL ที่ลื่นไหลทันสมัยอยู่ อย่างที่สอง `count` เป็น construct การวนซ้ำตัวแรกที่ tutorial ส่วนใหญ่สอน ผู้ช่วย AI จึงหยิบมาใช้เป็นค่าเริ่มต้นแม้ในที่ที่ `for_each` เป็นทางเลือกเดียวที่ปลอดภัย — list สามารถถูกจัดลำดับใหม่ได้ แต่ `count` แยกไม่ออกระหว่าง "จัดลำดับใหม่" กับ "แทนที่" อย่างที่สาม ทางที่เร็วที่สุดในการผ่าน error เรื่อง permission หรือ destroy มักเป็นทางแก้ที่กว้างที่สุดเสมอ — `-auto-approve` ลดแรงเสียดทานได้จริง `prevent_destroy` บน resource *บางตัว* ทำให้ error message หายไปได้จริง — แลกมาด้วยการเอา safeguard ตัวเดียวที่สำคัญออกไป หกขั้นตอนด้านล่างคือลำดับที่เผยความผิดพลาดเหล่านี้ออกมาจริงๆ และทุกบทถัดไปในโมดูลนี้จะเจาะลึกส่วนหนึ่งของมัน
+
+<Mermaid title="ลำดับการอ่าน Terraform/Terragrunt ที่ไม่ได้เขียนเอง" code={readingOrderDiagram} />
+
+export const readingOrderDiagram = `flowchart TD
+  A["1. Providers &amp; versions<br/>pin ด้วย ~&gt;? commit lock file แล้วหรือยัง?"] --> B["2. Backend &amp; state<br/>locking จริงหรือ? remote_state ชี้ไปที่ state ที่ apply แล้ว?"]
+  B --> C["3. Variables &amp; locals<br/>nullable, ephemeral, validation block"]
+  C --> D["4. Resources &amp; lifecycle<br/>count แทนที่จะเป็น for_each? prevent_destroy ป้องกันอะไรจริงๆ?"]
+  D --> E["5. Modules<br/>มี provider block ข้างใน? pin source แล้ว? depends_on ซ่อน cycle อยู่หรือไม่?"]
+  E --> F["6. Terragrunt live tree<br/>run --all ไม่ใช่ run-all/plan-all? dev กับ prod ต่างกันจริงหรือ?"]
+  F --> G["7. CI &amp; policy<br/>-auto-approve บน plan สดๆ? pin action แล้ว? syntax policy ทันสมัย?"]
+`;
+
+## 1. Providers & versions
+
+ก่อนอื่นเลย ตรวจว่า provider constraint ป้องกันคุณได้จริงหรือไม่ และ lock file ที่ pin version ที่ resolve จริง commit ไว้แล้วหรือยัง — เพราะ constraint ที่ลอยตัวเปลี่ยนความหมายของ "configuration เดียวกัน" ในสองวันที่ต่างกัน บนเครื่องที่ต่างกัน โดยไม่มี diff ให้ review เลย
+
+- **สิ่งที่ต้องมองหา:** `~>` หรือ `>=` ใน `required_providers`? `.terraform.lock.hcl` commit ไว้หรือ gitignore ไว้พร้อมกับ `.terraform/`? มี resource ไหนใช้ argument ที่ schema ของ provider ที่ติดตั้งไว้ทำเครื่องหมาย `deprecated: true` หรือไม่?
+- **คำถามที่ต้องถาม:** ถ้าเพื่อนร่วมทีมรัน `terraform init` วันนี้เทียบกับอีกหนึ่งเดือนข้างหน้า จะ resolve provider version เดียวกันหรือไม่ — และ `terraform validate -json` จะกลับมาโดยไม่มี warning เลยหรือไม่ ไม่ใช่แค่ไม่มี error?
+- **บทที่อธิบายเรื่องนี้:** กลุ่ม Versions & providers ใน **[AI Bug Catalog](/terraform-gcp/th/reading-terraform/ai-bug-catalog/)** (entry 1–3) สำหรับการ resolve `.terraform.lock.hcl` จริงและ warning เรื่อง deprecation ที่มาจาก schema จริง; **[Installing & Project Structure](/terraform-gcp/th/foundations/installing-and-project-structure/)** สำหรับพื้นฐาน `required_providers`
+
+## 2. Backend & state
+
+เมื่อ provider ถูก pin แล้ว ตรวจว่าอะไรที่ล็อกและเก็บ state จริงๆ — เพราะ `terraform_remote_state` และ backend-locking argument ที่ลอยตัวทั้งคู่พังในแบบที่ `validate` มองไม่เห็นจาก configuration ฝั่งที่อ่านค่าเพียงอย่างเดียว
+
+- **สิ่งที่ต้องมองหา:** กลไกล็อกของ backend ตรงกับสิ่งที่ Terraform/backend version นี้รองรับจริงหรือไม่ (`use_lockfile` ของ S3 เทียบกับ `dynamodb_table` ที่ deprecated แล้ว)? `terraform_remote_state` data source ทุกตัวชี้ไปที่ `key`/`path` ที่ apply แล้วจริงหรือไม่? state เคยถูกใช้แยก environment ผ่าน `terraform workspace` ในที่ที่ backend config แยกกันจริงๆ จะปลอดภัยกว่าหรือไม่?
+- **คำถามที่ต้องถาม:** ถ้า backend config นี้รัน `init` กับ bucket ใหม่เอี่ยมตอนนี้เลย locking จะทำงานจริงหรือไม่ — และถ้า state ที่ `terraform_remote_state` นี้อ่านยังไม่มีอยู่ plan จะพังดังๆ หรือมีอะไรดำเนินต่อไปเงียบๆ ด้วยค่า default?
+- **บทที่อธิบายเรื่องนี้:** กลุ่ม State & backend ใน **[AI Bug Catalog](/terraform-gcp/th/reading-terraform/ai-bug-catalog/)** (entry 4–6) สำหรับ lock file ที่ gitignore แล้วเกิด drift จริง และ "Unable to find remote state" ที่พังหนักจริง; **[The State File](/terraform-gcp/th/state-management/the-state-file/)** และ **[Why Terragrunt](/terraform-gcp/th/why-terragrunt/)** สำหรับกลไกทั้งสองแบบเจาะลึก
+
+## 3. Variables & locals
+
+variable block ที่ดูเหมือนแค่ input validation ธรรมดาสามารถเปลี่ยนค่าที่ไปถึง resource จริงได้อย่างเงียบๆ — `nullable` และ `ephemeral` ทั้งคู่มีผลต่อพฤติกรรมในแบบที่ไม่มี error message ไหนบอก
+
+- **สิ่งที่ต้องมองหา:** default ของ `nullable = false` variable แทนที่ค่า `null` ที่ส่งมา override อย่างเงียบๆ หรือไม่ โดยไม่มีอะไรใน plan output บอกเลย? variable ที่เป็น `ephemeral` เคยมี `default` เป็น secret ตรงๆ หรือไม่ — ซึ่งยังรั่วเข้าไปใน `show -json` ของ plan ที่ save ไว้ แม้จะไม่เข้า state ก็ตาม?
+- **คำถามที่ต้องถาม:** ถ้า variable ตัวนี้ถูกส่ง `null` มาจากผู้เรียกใช้ ค่าจริงจะกลายเป็น `null` จริงหรือไม่ — หรือจะกลายเป็น default อย่างเงียบๆ โดย CLI output เหมือนกันทั้งสองแบบ?
+- **บทที่อธิบายเรื่องนี้:** กลุ่ม Variables ใน **[AI Bug Catalog](/terraform-gcp/th/reading-terraform/ai-bug-catalog/)** (entry 7–8) สำหรับ output การ apply แบบ `nullable` เทียบข้างกันจริง และการรั่วของ ephemeral default เข้า `show -json` จริง
+
+## 4. Resources & lifecycle
+
+resource block อาจเป็น HCL ที่ valid สมบูรณ์แบบแต่ยังผิดในแบบที่ปรากฏเฉพาะตอน plan *ครั้งถัดไป* หรือวันที่ใครสักคนต้องการให้ `lifecycle` block ทำตามที่ชื่อมันบอกจริงๆ
+
+- **สิ่งที่ต้องมองหา:** ใช้ `count` กับ list ที่อาจถูกจัดลำดับใหม่ได้หรือไม่ ในที่ที่ `for_each` เป็นทางเลือกปลอดภัยทางเดียว? `lifecycle { prevent_destroy = true }` อยู่บน resource ที่สำคัญจริงหรืออยู่บนอะไรที่ทิ้งได้ใกล้ๆ กัน? `for_each` เคยดึง key มาจาก computed attribute ของ resource ที่ managed อีกตัวหรือไม่? มี argument ที่ดู hallucinate มา (copy จาก resource type ที่คล้ายกันแต่ไม่ใช่ตัวเดียวกัน) อยู่ที่ไหนหรือไม่?
+- **คำถามที่ต้องถาม:** ถ้าเอา item ตรงกลางออกจาก list นี้ตอนนี้เลย `terraform plan` จะแสดงการลบ item เดียวสะอาดๆ หรือจะแสดงการแทนที่ไล่ไปตามตำแหน่งที่เลื่อน? และถ้า resource นี้ถูก destroy ตอนนี้เลย `prevent_destroy` จะบล็อกจริงหรือแค่ดูเหมือนบล็อกจาก error message ของ resource อื่น?
+- **บทที่อธิบายเรื่องนี้:** กลุ่ม Resources & lifecycle ใน **[AI Bug Catalog](/terraform-gcp/th/reading-terraform/ai-bug-catalog/)** (entry 9–13) สำหรับ `plan -destroy` จริงที่พิสูจน์ว่า `prevent_destroy` ป้องกันเฉพาะ resource ที่ประกาศไว้เท่านั้น และ plan การเลื่อน index ของ `count` จริง
+
+## 5. Modules
+
+module call สามารถซ่อน provider configuration หรือ source ที่ไม่ pin ซึ่งกลายเป็นปัญหาก็ต่อเมื่อผู้เรียกใช้ต้องการ `count`, `for_each`, หรือ environment ที่สอง
+
+- **สิ่งที่ต้องมองหา:** module ที่ reusable ประกาศ `provider` block ของตัวเองหรือไม่ ทำให้เข้ากันไม่ได้กับ `count`/`for_each`/`depends_on` ฝั่งที่เรียกใช้? `source` แบบ `git::`/registry ละ `?ref=`/version constraint หรือไม่ ลอยอยู่บน default branch? `depends_on` บน module call มีไว้เพื่อปิดบัง cycle ของ reference ที่มีอยู่จริงหรือไม่?
+- **คำถามที่ต้องถาม:** source ของ module นี้ resolve ไปที่ commit/version เดียวกันทุกครั้งหรือไม่ ไม่ว่าจะ init จากเครื่องไหน วันไหน — และถ้าผู้เรียกใช้ต้องการ loop module นี้ด้วย `count` มันจะทำงานได้หรือไม่?
+- **บทที่อธิบายเรื่องนี้:** กลุ่ม Modules ใน **[AI Bug Catalog](/terraform-gcp/th/reading-terraform/ai-bug-catalog/)** (entry 14–15) สำหรับ error "Module is incompatible with count, for_each, and depends_on" จริง และ error ของ reference cycle จริงที่ไม่มี `depends_on` ใดปิดบังได้; **[Writing a Reusable Module](/terraform-gcp/th/modules/writing-a-reusable-module/)** และ **[Module Composition & Sources](/terraform-gcp/th/modules/module-composition-and-sources/)** สำหรับกลไกทั้งสองแบบเจาะลึก
+
+## 6. Terragrunt live tree
+
+ไฟล์ `terragrunt.hcl` ถูก copy-paste ข้าม environment กันตลอดเวลา — การตรวจว่า copy นั้นเปลี่ยนค่าที่สำคัญจริงหรือไม่เป็นการอ่านที่คุ้มค่าที่สุดในโมดูลนี้ทั้งหมด
+
+- **สิ่งที่ต้องมองหา:** คำสั่งที่ AI เขียนใช้ `run-all`/`plan-all` หรือไม่ — ทั้งคู่ถูกเอาออกใน Terragrunt 1.1 CLI redesign แล้ว? ไฟล์ `terragrunt.hcl` ของ `dev` และ `prod` (หรือ environment สองตัวไหนก็ตาม) มีค่า `account_id`/`region`/subscription/project *เหมือนกันทุกตัวอักษร* ใน `inputs` หรือไม่ ในที่ที่ต้องต่างกันจริง?
+- **คำถามที่ต้องถาม:** `terragrunt hcl validate` ที่ผ่านทั้งสองไฟล์ environment พิสูจน์ได้จริงหรือไม่ว่า deploy ไป account ต่างกัน — หรือพิสูจน์แค่ว่าทั้งคู่เป็น HCL ที่ valid ทาง syntax?
+- **บทที่อธิบายเรื่องนี้:** กลุ่ม Terragrunt ใน **[AI Bug Catalog](/terraform-gcp/th/reading-terraform/ai-bug-catalog/)** (entry 16–17) สำหรับการปฏิเสธ "unknown command" จริง และการ copy-paste `dev`/`prod` ที่เหมือนกันทุกตัวอักษรจริงซึ่ง `hcl validate` จับไม่ได้; **[Terragrunt HCL & the Root Config](/terraform-gcp/th/terragrunt-fundamentals/terragrunt-hcl-and-the-root-config/)** และ **[The Multi-Environment Problem](/terraform-gcp/th/multi-environment/the-multi-environment-problem/)** สำหรับกลไกที่พิสูจน์เต็มรูปแบบ
+
+## 7. CI & policy
+
+สุดท้าย ตรวจว่า pipeline ที่ apply configuration นี้จริงๆ มี approval gate จริง มี policy check จริง และมี dependency ที่เชื่อถือได้หรือไม่ — เพราะทุกขั้นตอนการอ่านก่อนหน้านี้อาจสมบูรณ์แบบแล้วยังหลุดผ่าน pipeline ที่เอา safeguard ตัวเดียวที่สำคัญออกไปได้
+
+- **สิ่งที่ต้องมองหา:** `-auto-approve` รันกับ plan ที่ *สดใหม่* หรือกับ plan ที่ save แล้ว review แล้ว? GitHub Action จาก third-party ถูก pin ด้วย commit SHA หรือลอยอยู่บน `@master`/`@main`? Rego policy ใช้ syntax ก่อน v1 (`deny[msg] { ... }`) ที่ load ไม่ผ่านภายใต้ OPA/conftest ปัจจุบันหรือไม่? `.tflint.hcl`/checkov config อ้างอิง rule ID ที่ไม่มีอยู่จริงใน rule catalog ของ linter นั้นหรือไม่?
+- **คำถามที่ต้องถาม:** ถ้า pipeline นี้รันตอนนี้เลย มีจุดไหนระหว่าง "plan" กับ "การเปลี่ยนแปลง infrastructure จริง" ที่มนุษย์หรือ policy gate จะหยุดมันได้จริงหรือไม่ — และทุก check ใน pipeline นี้รันจริงพิสูจน์ได้หรือไม่ หรือมีตัวไหนเงียบๆ ไม่ทำอะไรเลย?
+- **บทที่อธิบายเรื่องนี้:** กลุ่ม CI & policy ใน **[AI Bug Catalog](/terraform-gcp/th/reading-terraform/ai-bug-catalog/)** (entry 18–21) สำหรับ proof การ `-auto-approve` เทียบข้างกันจริง, error parse ของ Rego v1 จริง, และการรัน tflint จริงที่ rule ที่ hallucinate มาเช็คอะไรไม่ได้เลยอย่างเงียบๆ; **[Verification Tools](/terraform-gcp/th/reading-terraform/verification-tools/)** สำหรับทุกเครื่องมือในรายการนี้ที่รันจริง
+
+## สิ่งที่โมดูลนี้ครอบคลุมต่อไป
+
+- **[AI Bug Catalog](/terraform-gcp/th/reading-terraform/ai-bug-catalog/)** — 23 pattern เฉพาะเจาะจง แต่ละอันมี configuration ที่ AI มักเขียน, output จริงจาก `validate`/`plan`/`test`/`terragrunt`/tflint/checkov/conftest, และวิธีแก้
+- **[Review Checklist](/terraform-gcp/th/reading-terraform/review-checklist/)** — 23 pattern เดียวกันในรูปแบบ checklist หน้าเดียว 8 กลุ่ม แต่ละบรรทัดลิงก์ไปยังบทที่พิสูจน์มัน
+- **[Verification Tools](/terraform-gcp/th/reading-terraform/verification-tools/)** — `terraform fmt -check`, `validate`, `plan -detailed-exitcode`, `show -json` + `jq`, `terraform test` กับ `mock_provider`, tflint, checkov, conftest, `terragrunt hcl validate`/`render`/`run --all plan`, และ harness ของคอร์สนี้เองแต่ละตัวพิสูจน์อะไรได้จริงบ้าง
+- Worked review สามบท — **Worked Review 1**, **Worked Review 2**, **Worked Review 3** — นำลำดับการอ่านนี้ไปใช้กับชุด configuration ที่ AI สร้างเต็มรูปแบบ (module network+compute, Terragrunt live tree แบบ multi-environment, และ CI pipeline พร้อม policy check) ทั้งสามบทนี้เขียนและดูแลแยกจากบทนี้ — ถ้าลิงก์ด้านล่าง 404 ระหว่างที่งานนั้นยังไม่เสร็จ ลำดับการอ่านและ catalog ข้างบนยังยืนได้ด้วยตัวเอง
+
+## Mental Model
+
+```text
+ลำดับการอ่าน Terraform/Terragrunt ที่ไม่ได้เขียนเอง:
+
+1. Providers & versions  → pin ด้วย ~> แล้วหรือยัง? commit lock file แล้วหรือยัง? มี deprecated arg ไหม?
+2. Backend & state       → กลไกล็อกจริงหรือ? remote_state ชี้ไปที่ state ที่ apply แล้วหรือไม่?
+3. Variables & locals    → nullable/ephemeral ทำงานตามชื่อจริงหรือไม่?
+4. Resources & lifecycle → count ในที่ที่ควรเป็น for_each หรือไม่? prevent_destroy ป้องกันอะไรจริงๆ?
+5. Modules               → มี provider block ข้างในไหม? pin source แล้วหรือยัง? depends_on ซ่อน cycle อยู่ไหม?
+6. Terragrunt live tree  → run --all ไม่ใช่ run-all/plan-all? dev กับ prod ต่างกันจริงหรือไม่?
+7. CI & policy           → -auto-approve บน plan สดๆ? pin action แล้ว? syntax policy ทันสมัยหรือไม่?
+
+"terraform validate และ plan ผ่านสะอาดทั้งคู่" ตอบคำถามเหล่านี้ได้แทบไม่ได้เลย — catalog 23 entry
+ของโมดูลนี้ส่วนใหญ่คือ configuration ที่ schema valid, plan สะอาด แต่ผิดตรงๆ เฉยๆ
+```
+
+## Common Misconceptions
+
+- **"ถ้า `validate` กับ `plan` ผ่านทั้งคู่ แปลว่าถูกต้อง"** พิสูจน์ตลอด catalog ของโมดูลนี้แล้วว่า จาก 23 pattern มีแค่ไม่กี่อันเท่านั้นที่ `validate`/`plan`/`terragrunt` ปฏิเสธตรงๆ ที่เหลือเป็น HCL ที่ valid ทั้ง syntax และ semantic ซึ่ง Terraform ไม่มีทางตั้ง flag ได้ เพราะไม่มีอะไรในภาษาที่บอกความต่างระหว่าง "ป้องกัน resource ผิดตัว" กับ "resource ถูกป้องกันอยู่"
+- **"Terraform ที่ AI สร้างแค่ต้องการ prompt ใหม่กว่านี้"** ปัญหาไม่ใช่แค่ความล้าสมัย — `dynamodb_table` และ `terragrunt run-all` คือ configuration ที่ valid ทาง syntax และดูลื่นไหลโดยเฉพาะ ซึ่งบังเอิญเล็งไปที่รูปแบบที่ provider/CLI version ปัจจุบันเลยผ่านไปแล้ว บางทีก็มี warning บางทีก็ไม่มีเลย
+- **"ความล้มเหลวแบบเงียบๆ หายากกว่า `apply` ที่ถูกปฏิเสธ เลยสำคัญน้อยกว่า"** ในทางตรงกันข้ามต่างหากที่ใกล้ความจริงกว่าใน catalog นี้ — `prevent_destroy` บน resource ผิดตัว, ชื่อ rule ใน `.tflint.hcl` ที่เช็คอะไรไม่ได้เลยอย่างเงียบๆ, หรือ `prod` ที่ deploy ทับ `account_id` ของ `dev` ทั้งหมดนี้ผ่านไปได้โดยไม่มี error ไม่มี warning ไม่มีสัญญาณอะไรผิดปกติเลย — จนถึงจุดที่มีบางอย่างขึ้นอยู่กับพฤติกรรมที่ผิดนั้นพอดี
+- **"`-auto-approve` เป็นแค่ความสะดวกของ CI สำหรับข้าม prompt"** มันเอาจุดเดียวในทั้ง pipeline ที่ plan ที่ save และ review แล้วจะถูกตรวจกับความจริงก่อนมีอะไรเปลี่ยนแปลงจริงออกไป — ทางแก้คือแยกขั้นตอน `plan -out` + policy gate + `apply <planfile>` ไม่ใช่แค่ยอมรับ flag นี้เพราะ CI พิมพ์ `yes` ไม่ได้
+
+<Callout title="สรุปบรรทัดเดียว">
+อ่าน Terraform/Terragrunt ตามลำดับนี้ — providers และ versions, backend และ state, variables และ locals, resources และ lifecycle, modules, Terragrunt live tree, แล้วจึงถึง CI และ policy — เพราะแต่ละขั้นเปลี่ยนความหมายของขั้นถัดไป และเพราะ "`validate` กับ `plan` ผ่านสะอาดทั้งคู่" บอกแค่ว่า configuration นั้น schema valid ไม่เคยบอกว่ามันทำตามที่ชื่อ resource, `lifecycle` block, หรือ environment directory ของมันอ้างจริง
+</Callout>
+
+export const quizReadingTerraformIndex = [
+  {
+    q: "ทำไมโมดูลนี้ถึงตรวจ providers & versions ก่อนตรวจอะไรก็ตามเกี่ยวกับ resources หรือ modules?",
+    options: [
+      "เพราะ required_providers เป็น block ที่สั้นที่สุดเสมอ",
+      "เพราะ provider constraint ที่ไม่ pin หรือ lock file ที่ gitignore เปลี่ยนความหมายของ 'configuration เดียวกัน' ที่ resolve ออกมาข้ามเครื่องและข้ามเวลา — ทุกคำกล่าวอ้างเกี่ยวกับพฤติกรรมของ resource ในภายหลังตั้งอยู่บนสมมติฐานว่ามี provider version ที่เจาะจงและรู้แน่ชัดอยู่ข้างใต้",
+      "เพราะ modules ไม่เคยมีปัญหาเรื่อง version",
+      "ลำดับไม่สำคัญ",
+    ],
+    answer: 1,
+    explain: "พิสูจน์แล้วใน AI Bug Catalog entry 1 และ 4: constraint แบบ >= 6.0 ที่ลอยตัว resolve ไปที่ release ใหม่สุดของ registry ในตอนนั้น และ .terraform.lock.hcl ที่ gitignore แปลว่าการ resolve นั้นไม่ reproduce ข้ามเครื่องได้เลยด้วยซ้ำ",
+  },
+  {
+    q: "```text\nPlan: 0 to add, 0 to change, 2 to destroy.\n```\nจากกลไก plan -destroy เดียวกันนี้ (พิสูจน์ด้วย AWS resource จริงใน aws sibling ของคอร์สนี้) ในสถานการณ์ที่มีแค่ resource ที่ทิ้งได้เท่านั้นที่มี `prevent_destroy = true` มันพิสูจน์อะไรเกี่ยวกับ database จริงที่อยู่ข้างๆ?",
+    options: [
+      "ว่า database ถูกป้องกันด้วยเช่นกันเพราะอยู่ไฟล์เดียวกัน",
+      "ไม่มีอะไรป้องกันมันเลย — พิสูจน์ตรงๆ ว่า: เมื่อมีแค่ IAM role ที่มี prevent_destroy, plan ยังแสดงว่าจะ destroy resource 2 ตัว หมายความว่า database ไม่เคยถูกป้องกันจริง",
+      "ว่า database ไม่สามารถถูก destroy ได้เลย",
+      "ว่า plan ล้มเหลวทั้งหมด",
+    ],
+    answer: 1,
+    explain: "พิสูจน์ตรงๆ ใน AI Bug Catalog entry 9: การเอา prevent_destroy ออกจาก IAM role แล้วรัน plan -destroy ซ้ำแสดง plan ที่สะอาด ไม่มี error ในการ destroy resource ทั้งสองตัว — prevent_destroy ป้องกันเฉพาะ resource ที่ประกาศไว้เท่านั้น",
+  },
+  {
+    q: "ทำไมโมดูลนี้ถึงถือว่า 'pipeline ใช้ -auto-approve แต่นั่นก็แค่เรื่อง CI' เป็นประเด็นในลำดับการอ่านกลุ่ม CI & policy แทนที่จะเป็นแค่สุขอนามัยของ pipeline ทั่วไป?",
+    options: [
+      "-auto-approve ไม่เคยเปลี่ยนสิ่งที่ถูก apply จริงๆ เลย",
+      "มันเอาจุดเดียวระหว่าง plan ที่ save และ review แล้วกับการเปลี่ยนแปลง infrastructure จริงที่มนุษย์หรือ policy gate จะเข้ามาแทรกแซงได้ออกไป — พิสูจน์ตรงๆ ด้วย apply เทียบข้างกันจริงที่ -auto-approve ข้าม prompt ยืนยันเดียวกับที่ apply แบบ interactive ต้องการ",
+      "CI pipeline ต้องใช้ -auto-approve เสมอถึงจะทำงานได้",
+      "-auto-approve มีผลแค่กับการรัน local เท่านั้น ไม่เกี่ยวกับ CI",
+    ],
+    answer: 1,
+    explain: "พิสูจน์ใน AI Bug Catalog entry 18: terraform_data resource เดียวกันต้องพิมพ์ 'yes' ภายใต้ apply แบบ interactive และ apply ผ่านโดยไม่มี prompt เลยภายใต้ -auto-approve — ยืนยันว่ามันคือการเอาขั้นตอนอนุมัติออก ไม่ใช่แค่ flag ผิวเผิน",
+  },
+  {
+    q: "ขั้นตอนไหนในลำดับการอ่านนี้ที่ถามตรงๆ ว่า terragrunt.hcl ที่ copy-paste มา inputs ต่างกันจริงระหว่าง dev กับ prod หรือไม่?",
+    options: [
+      "Backend & state",
+      "Terragrunt live tree",
+      "Modules",
+      "CI & policy",
+    ],
+    answer: 1,
+    explain: "ขั้นตอน Terragrunt live tree มีอยู่เพราะ terragrunt hcl validate ไม่มีทางรู้ว่าค่า account_id 'ผิด' สำหรับ environment path หนึ่งๆ — พิสูจน์ด้วย diff ของ terragrunt.hcl ระหว่าง dev/prod ที่เหมือนกันทุกตัวอักษรจริงใน AI Bug Catalog entry 17 โดยไม่มี validation error ใดๆ เลย",
+  },
+  {
+    q: "ทำไมโมดูลนี้ถึงบอกว่า catalog 23 entry ส่วนใหญ่น่ากังวลกว่าอันที่ validate/plan ปฏิเสธตรงๆ แทนที่จะน้อยกว่า?",
+    options: [
+      "ไม่ใช่ — entry ที่ถูกปฏิเสธแย่กว่า",
+      "validate/plan ที่ถูกปฏิเสธนั้นดังและเห็นทันที ผู้อ่านสังเกตได้ทันที ส่วน configuration ที่ถูกยอมรับเงียบๆ ที่มี bug จริง (ป้องกัน resource ผิดตัว, lint rule ที่ hallucinate มาเช็คอะไรไม่ได้เลย, prod ที่ชี้ไป account ของ dev) ดูเหมือนถูกต้องทุกอย่างจนกว่าจะมีอะไรขึ้นกับพฤติกรรมที่ผิดพอดี ซึ่งมักเกิดขึ้นทีหลังมากและอยู่ใน production",
+      "ความล้มเหลวแบบเงียบๆ เกิดขึ้นน้อยกว่าในทางปฏิบัติ",
+      "validate และ plan จับ bug ด้าน security ได้เสมอในที่สุด",
+    ],
+    answer: 1,
+    explain: "พิสูจน์ตลอด catalog: entry อย่างชื่อ tflint rule ที่ hallucinate มา หรือ terragrunt.hcl ของ dev/prod ที่เหมือนกันทุกตัวอักษร apply/validate ผ่านสะอาด และปรากฏออกมาก็ต่อเมื่อมีอะไรขึ้นกับพฤติกรรมที่ผิดนั้นพอดี — control ด้าน cost/security ที่เช็คอะไรไม่ได้เลย หรือ production deploy ที่เล็งผิด account",
+  },
+];
+
+<Quiz client:visible id="reading-terraform/index" questions={quizReadingTerraformIndex} />
+
+<ProgressTracker client:visible id="reading-terraform/index" />

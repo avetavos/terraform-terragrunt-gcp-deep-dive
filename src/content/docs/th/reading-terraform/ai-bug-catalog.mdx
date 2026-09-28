@@ -1,0 +1,1107 @@
+---
+title: AI Bug Catalog
+description: '23 bug ที่ Terraform/Terragrunt ที่ AI สร้างมักทำเป็นประจำ — configuration ที่ AI มักเขียน เหตุผลที่มันผิด output จริงจาก validate/plan/test ที่ reproduce ด้วย Terraform 1.16.4 และ Terragrunt 1.1.0 และวิธีแก้'
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+ทุก snippet ด้านล่างเขียนให้ดูเหมือน HCL ที่ผู้ช่วย AI สร้างขึ้นจริงๆ — ลื่นไหล น่าเชื่อถือ ตาม training data ที่ยังจำ `dynamodb_table` แบบยุค Terraform 0.11 หรือความเคยชินกับ `count` แบบก่อนมี `for_each` — แล้วรันจริง: `terraform validate`, `terraform plan` (ด้วย mock AWS credentials ที่ harness ของคอร์สนี้ใช้ทุกที่ — `access_key = "mock"`, `skip_credentials_validation = true`, ไม่เรียก AWS จริงเลย), `terraform test`, `terragrunt hcl validate`, `terragrunt run --all plan`, และการรัน `docker run` จริงของ tflint/checkov/conftest output ด้านล่าง copy มาจากการรันจริงๆ ไม่ได้แต่งขึ้นจากความจำ สังเกตว่ามีกี่ตัวที่ `terraform validate`/`plan` ปฏิเสธตรงๆ — เป็นส่วนน้อย ส่วนใหญ่ของ 23 pattern นี้คือ **Terraform ที่ schema valid, plan สะอาด แต่พังทีหลัง**: ตอน `apply` จริงกับ AWS จริง, ตอน `plan` ครั้งถัดไปหลังมีคนแก้ list ที่ไม่เกี่ยวข้อง, หรือไม่พังเลยแต่ทำสิ่งผิดอย่างเงียบๆ ตลอดไป 23 pattern นี้จัดกลุ่มตามลำดับเดียวกับ **[วิธีอ่าน Terraform ที่ไม่ได้เขียนเอง](/terraform-gcp/th/reading-terraform/)** และ **[Review Checklist](/terraform-gcp/th/reading-terraform/review-checklist/)**
+
+## Versions & providers
+
+### 1. Provider constraint ที่ลอยตัว (`>=` แทนที่จะเป็น `~>`)
+
+```hcl
+# entries/01-unpinned-provider/main.tf
+terraform {
+  required_providers {
+    google = { source = "hashicorp/google", version = ">= 8.0" }
+  }
+}
+```
+
+**อาการ — `.terraform.lock.hcl` จริงหลัง `terraform init`:**
+
+```text
+provider "registry.terraform.io/hashicorp/google" {
+  version     = "8.4.0"
+  constraints = ">= 8.0.0"
+  hashes = [ ... ]
+}
+```
+
+`>= 8.0` resolve ไปที่ release ใหม่สุดที่ registry มี**วันนี้** — 8.4.0 ถ้า `.terraform.lock.hcl` ไม่ถูก commit (ดู entry 4) หรือมีใครรัน `init -upgrade` การ `init` ครั้งถัดไปอาจ resolve release ใหม่สุดที่**ต่างออกไป** เปลี่ยนพฤติกรรม provider อย่างเงียบๆ ระหว่างการรัน `main.tf` ไฟล์เดียวกันสองครั้ง ไม่มีอะไรใน `>= 8.0` ที่สัญญาว่าการ resolve ครั้งถัดไปจะอยู่ในขอบเขตการรับประกันของ major version เดียวกันแบบที่ `~> 8.0` ให้ได้
+
+**วิธีแก้:**
+
+```hcl
+# entries/01-unpinned-provider-fixed/main.tf
+terraform {
+  required_providers {
+    google = { source = "hashicorp/google", version = "~> 8.0" }
+  }
+}
+```
+
+**จับได้โดย:** ไม่มีอะไรจับอัตโนมัติเลย — `terraform init`/`validate`/`plan` ผ่านทั้งคู่ไม่ว่าจะใช้ constraint แบบไหน มีแค่การ review diff หรือ policy ที่บังคับ pin version เท่านั้นที่จับได้ ดู **[Verification Tools](/terraform-gcp/th/reading-terraform/verification-tools/)**
+
+### 2. Argument ที่ deprecated แล้วแต่ AI ยังเขียนจากความเคยชิน
+
+Warning การ deprecate จริงที่ดึงมาจาก schema ของ provider `hashicorp/google` 8.4.0 ที่ติดตั้งจริง (`terraform providers schema -json`) ไม่ได้เดาเอา:
+
+```hcl
+# entries/02-deprecated-args/main.tf
+resource "google_compute_network" "vpc" {
+  name = "acme-vpc"
+}
+
+resource "google_compute_firewall" "allow_ssh" {
+  name           = "allow-ssh"
+  network        = google_compute_network.vpc.name
+  enable_logging = true
+  allow {
+    protocol = "tcp"
+    ports    = ["22"]
+  }
+}
+```
+
+**อาการ — `terraform validate -json` จริง:**
+
+```text
+warning - Argument is deprecated - Deprecated in favor of log_config
+```
+
+ยัง **validate ผ่านสำเร็จ** — เป็นแค่ warning ไม่ใช่ error ดังนั้น CI ที่เช็คแค่ exit code (ดู entry 18) จะปล่อยผ่านไปเฉยๆ
+
+**วิธีแก้:**
+
+```hcl
+# entries/02-deprecated-args-fixed/main.tf
+resource "google_compute_network" "vpc" {
+  name = "acme-vpc"
+}
+
+resource "google_compute_firewall" "allow_ssh" {
+  name    = "allow-ssh"
+  network = google_compute_network.vpc.name
+  log_config {
+    metadata = "INCLUDE_ALL_METADATA"
+  }
+  allow {
+    protocol = "tcp"
+    ports    = ["22"]
+  }
+}
+```
+
+**จับได้โดย:** `terraform validate -json | jq '.diagnostics[] | select(.severity=="warning")'` — grep หา warning ใน CI ไม่ใช่แค่ exit code เริ่มต้น
+
+### 3. `provider` block ข้างใน module ที่ reusable
+
+```hcl
+# entries/03-provider-in-module/modules/net/main.tf
+provider "google" {
+  project = "mock-project"
+  region  = "us-central1"
+}
+
+resource "google_compute_network" "this" {
+  name = "acme-vpc"
+}
+```
+
+```hcl
+# entries/03-provider-in-module/main.tf — @expect-error Module is incompatible with count, for_each, and depends_on
+module "net" {
+  source = "./modules/net"
+  count  = 2
+}
+```
+
+ตัวนี้ resolve ผ่านสบายๆ จนกว่าผู้เรียกใช้จะพยายามใช้ `count`/`for_each`/`depends_on` บน module call ซึ่งเป็นสิ่งที่ environment ที่สองมักต้องการพอดี
+
+**อาการ — `terraform init` จริง, Terraform 1.16.4:**
+
+```text
+Upgrading modules...
+- net in modules/net
+
+Error: Module is incompatible with count, for_each, and depends_on
+
+  on main.tf line 3, in module "net":
+   3:   count  = 2
+
+The module at module.net is a legacy module which contains its own local
+provider configurations, and so calls to it may not use the count,
+for_each, or depends_on arguments.
+
+If you also control the module "./modules/net", consider updating this
+module to instead expect provider configurations to be passed by its
+caller.
+```
+
+**วิธีแก้:**
+
+```hcl
+# entries/03-provider-in-module-fixed/modules/net/main.tf
+resource "google_compute_network" "this" {
+  name = "acme-vpc"
+}
+```
+
+```hcl
+# entries/03-provider-in-module-fixed/main.tf
+provider "google" {
+  project = "mock-project"
+  region  = "us-central1"
+}
+
+module "net" {
+  source = "./modules/net"
+  count  = 2
+}
+```
+
+**จับได้โดย:** `terraform init`/`validate` — แต่เฉพาะตอนที่มีคนเพิ่ม `count`/`for_each`/`depends_on` จริงๆ ซึ่งมักช้ากว่าตอนที่ module ถูกเขียนและ review ผ่านครั้งแรกไปทั้ง environment หนึ่ง
+
+## State & backend
+
+### 4. `.terraform.lock.hcl` ถูก gitignore
+
+`.gitignore` ที่ copy มาจาก template "Terraform" ทั่วไปมักรวม `.terraform.lock.hcl` เข้าไปพร้อมกับ `.terraform/` — แต่มีแค่อันเดียวในสองอันนี้เท่านั้นที่ควรถูก ignore
+
+```text
+# entries/04-lockfile-gitignored/.gitignore
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.backup
+```
+
+**อาการ — reproduce จริงในเครื่อง:** ลบ `.terraform.lock.hcl` แล้วรัน `terraform init` ใหม่ด้วย constraint ที่ลอยตัวจาก entry 1 (`>= 6.0`):
+
+```text
+$ rm .terraform.lock.hcl && terraform init -backend=false
+Initializing provider plugins...
+- Finding hashicorp/aws versions matching ">= 6.0.0"...
+- Installing hashicorp/aws v6.66.0...
+```
+
+ไม่มีอะไรเตือนว่า version ที่ resolve อาจต่างจากที่เพื่อนร่วมทีม — หรือ CI ในวันอื่น — resolve ได้ lock file มีไว้เพื่อการันตีว่าการ resolve นี้ reproduce ได้ข้ามเครื่องและข้ามเวลาพอดี การ gitignore มันทิ้งการรับประกันนั้นไปเลย
+
+**วิธีแก้:**
+
+```text
+# entries/04-lockfile-gitignored-fixed/.gitignore
+.terraform/
+*.tfstate
+*.tfstate.backup
+```
+
+**จับได้โดย:** `git status` หลัง `init` สะอาดๆ แสดง `.terraform.lock.hcl` เป็น untracked — หรือ policy ของ repo ที่ทำให้ CI fail ถ้าไม่มี lock file
+
+### 5. Copy pattern การล็อก `dynamodb_table` ของ S3 backend มาใส่ `gcs` ที่ไม่เคยมีจริง
+
+```hcl
+# entries/05-backend-locking/backend.tf
+terraform {
+  backend "gcs" {
+    bucket         = "acme-tfstate"
+    prefix         = "network"
+    dynamodb_table = "acme-tf-locks"
+  }
+}
+```
+
+`dynamodb_table` เป็นของจริง — บน backend `s3` สำหรับ cloud ที่ต่างกันเลย training data ของ AI ผสม backend example ข้าม cloud กันตลอดเวลา และ argument นี้ไม่มีอยู่ใน schema ของ backend `gcs` เลย ตาม [เอกสาร GCS backend](https://developer.hashicorp.com/terraform/language/backend/gcs): "This backend supports state locking" — โดยตรง ผ่าน GCS object generation precondition บน state object เอง โดย**ไม่ต้องมี table, resource, หรือ argument เพิ่มให้ provision, จัดการ IAM-permission, หรือจ่ายเงินเลย** ต่างจาก `dynamodb_table` ของ S3 ที่ deprecated แล้ว (ดู aws sibling ของคอร์สนี้)
+
+<Callout title="มาจากเอกสาร ไม่ได้พิสูจน์ด้วยการรันจริง">
+`terraform init -backend=false` (ใช้ทั่วคอร์สนี้ ตาม harness ของคอร์สนี้เอง) ไม่เคย validate argument ข้างในของ backend block เลย — `dynamodb_table` ที่มั่วขึ้นบน backend `gcs` init "สำเร็จ" ด้วย `-backend=false` เหมือนเดิม เพราะ block นี้ไม่เคยถูก parse กับ backend schema จริงเลยถ้าไม่ init จริง ข้อมูลเรื่อง locking ใน entry นี้ quote ตรงจาก `developer.hashicorp.com/terraform/language/backend/gcs` (ลิงก์ด้านบน) แทนที่จะ reproduce ด้วย `init` จริงที่มี credential
+</Callout>
+
+**วิธีแก้:**
+
+```hcl
+# entries/05-backend-locking-fixed/backend.tf
+terraform {
+  backend "gcs" {
+    bucket = "acme-tfstate"
+    prefix = "network"
+  }
+}
+```
+
+**จับได้โดย:** ไม่มีอะไรใน `validate`/`plan` กับ `-backend=false` เลย — argument นี้ถูกยอมรับอย่างเงียบๆ โดยไม่เคยถูกเช็คกับ backend schema จริง มีแค่ `terraform init` จริงที่มี credential (ซึ่งคอร์สนี้ไม่เคยรัน) หรือ reviewer ที่รู้ว่า locking ของ `gcs` ไม่ต้องมี table เลยเท่านั้นที่จับได้
+
+### 6. `terraform_remote_state` ที่ชี้ไป backend/path ที่ไม่เคยถูก apply
+
+```hcl
+# entries/06-remote-state-cross-backend/main.tf — @expect-error No stored state was found for the given workspace in the given backend.
+data "terraform_remote_state" "network" {
+  backend = "local"
+  config = {
+    path = "../does-not-exist/terraform.tfstate"
+  }
+}
+```
+
+**อาการ — `terraform plan` จริง:**
+
+```text
+data.terraform_remote_state.network: Reading...
+
+Planning failed. Terraform encountered an error while generating this plan.
+
+Error: Unable to find remote state
+
+  with data.terraform_remote_state.network,
+  on main.tf line 1, in data "terraform_remote_state" "network":
+   1: data "terraform_remote_state" "network" {
+
+No stored state was found for the given workspace in the given backend.
+```
+
+**ไม่มี mock fallback เลย** — `terraform_remote_state` พัง plan ทั้งหมดหนักๆ ทันทีที่ state ที่อ้างอิงไม่มีอยู่ ซึ่งเป็นสถานการณ์ปกติระหว่างการ `apply` ครั้งแรกของ stack ที่ stack อื่นต้องพึ่งพา หรือหลัง state file ถูกย้ายไป key/bucket อื่นโดยไม่ได้อัปเดต consumer ทุกตัว
+
+**วิธีแก้:** ชี้ `config.path`/`config.key` ไปที่ state file ที่ apply ไปแล้วจริง หรือเปลี่ยนการอ่าน cross-stack เป็น pattern `dependency` block ของ Terragrunt (`mock_outputs`) ที่บทเรียน `dependencies-between-units` ของคอร์สนี้สอนไว้ ซึ่ง**มี** offline fallback จริงๆ
+
+**จับได้โดย:** `terraform plan` — ดังและทันทีทุกครั้ง — แต่จับได้เฉพาะ plan ของ consumer ไม่ใช่ของ producer ถ้า producer stack เปลี่ยน backend key อย่างเงียบๆ consumer ทุกตัวจะพังตอน plan ครั้งถัดไป ไม่ใช่ producer
+
+## Variables
+
+### 7. `nullable = false` แทนที่ default อย่างเงียบๆ แทนที่จะ error
+
+```hcl
+# entries/07-nullable-false/child/variables.tf
+variable "instance_count" {
+  type     = number
+  default  = 3
+  nullable = false
+}
+```
+
+```hcl
+# entries/07-nullable-false/child/main.tf
+output "effective_count" {
+  value = var.instance_count
+}
+```
+
+```hcl
+# entries/07-nullable-false/variables.tf
+variable "override" {
+  type    = number
+  default = null
+}
+```
+
+```hcl
+# entries/07-nullable-false/main.tf
+module "child" {
+  source         = "./child"
+  instance_count = var.override
+}
+
+output "child_effective_count" {
+  value = module.child.effective_count
+}
+```
+
+**อาการ — `terraform apply` จริง, `var.override` เป็น `null`:**
+
+```text
+Changes to Outputs:
+  + child_effective_count = 3
+
+Apply complete! Resources: 0 added, 0 changed, 0 destroyed.
+
+Outputs:
+
+child_effective_count = 3
+```
+
+ด้วย `nullable = false` (ค่า default สำหรับ variable ที่ไม่ได้ตั้ง `nullable` ไว้เลย — AI มักเขียนออกมาตรงๆ โดยคิดว่ามันจะ*ปฏิเสธ* null) การส่ง `null` มาตรงๆ ไม่ error: Terraform **แทนที่ default อย่างเงียบๆ** เป็น `3` โดยไม่มีสัญญาณใดๆ ว่ามีการ override เกิดขึ้นเลย การเปลี่ยน variable ตัวเดียวกันเป็น `nullable = true` แล้วรันซ้ำพิสูจน์ความต่างตรงๆ — output กลายเป็น `null` จริง:
+
+```text
+Changes to Outputs:
+  - child_effective_count = 3 -> null
+
+Apply complete! Resources: 0 added, 0 changed, 0 destroyed.
+```
+
+**วิธีแก้:** ถ้า `null` ควรเป็น input ที่แยกแยะได้จริง ตั้ง `nullable = true` แล้วให้ logic ด้านล่าง branch ตาม `var.x == null` ตรงๆ ถ้า `null` ควรถูกปฏิเสธจริงๆ อย่าตั้ง `nullable = false` แล้วพึ่งการแทนที่อย่างเงียบๆ — validate มันแทน:
+
+```hcl
+# entries/07-nullable-false-fixed/child/variables.tf
+variable "instance_count" {
+  type    = number
+  default = 3
+
+  validation {
+    condition     = var.instance_count != null
+    error_message = "instance_count must not be null."
+  }
+}
+```
+
+**จับได้โดย:** ไม่มีอะไรใน `plan`/`apply` output เลยโดย default — มีแค่ `terraform plan` ที่ diff ค่า *ก่อน* กับ *หลัง* ข้าม refactor หรือ `validation` block ที่เขียนมาปฏิเสธ `null` ตรงๆ
+
+### 8. `default` ตรงๆ ของ `ephemeral` variable รั่วเข้า `show -json`
+
+```hcl
+# entries/08-ephemeral-leak/main.tf
+variable "api_token" {
+  type      = string
+  ephemeral = true
+  default   = "shh-do-not-print-me"
+}
+
+resource "terraform_data" "example" {
+  input = "static-value"
+}
+```
+
+**อาการ — `terraform show -json` จริงบน plan ที่ save ไว้:**
+
+```text
+$ terraform plan -out=plan.out && terraform show -json plan.out | jq '.variables'
+{
+  "api_token": {
+    "value": "shh-do-not-print-me"
+  }
+}
+```
+
+`ephemeral = true` (Terraform 1.10+) กันค่าออกจาก **state** แต่**ไม่**กัน `default` ตรงๆ ออกจาก **`variables` block ของ plan file ที่ save ไว้** — โครงสร้าง JSON เดียวกับที่ policy `conftest`/OPA ใน CI อ่าน (ดู entry 20) default ที่ตั้งใจแค่เป็น fallback ในเครื่องหลุดตรงเข้าไปใน artifact ที่ CI archive ไว้เลย
+
+**วิธีแก้:** อย่าให้ `ephemeral` variable มี default เป็น secret ตรงๆ เด็ดขาด (ไม่มี `default`, หรือใช้ `ephemeral` resource เป็นแหล่งข้อมูลจริง):
+
+```hcl
+# entries/08-ephemeral-leak-fixed/main.tf
+variable "api_token" {
+  type      = string
+  ephemeral = true
+}
+
+resource "terraform_data" "example" {
+  input = "static-value"
+}
+```
+
+**จับได้โดย:** grep หา string ที่ดูเหมือน secret ใน plan artifact ที่ archive จาก `show -json` — `validate`/`plan` ไม่เคย flag เรื่องนี้เอง
+
+## Resources & lifecycle
+
+### 9. `prevent_destroy` อยู่บน resource ที่ทิ้งได้ ไม่ใช่ตัวที่สำคัญ
+
+```hcl
+# entries/09-prevent-destroy-wrong-resource/main.tf
+resource "google_storage_bucket" "scratch_logs" {
+  name     = "acme-scratch-logs"
+  location = "US"
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+resource "google_sql_database_instance" "primary" {
+  name                = "primary-db"
+  database_version    = "POSTGRES_15"
+  region              = "us-central1"
+  deletion_protection = false
+  settings {
+    tier = "db-f1-micro"
+  }
+}
+```
+
+`prevent_destroy` เป็นกลไก `lifecycle` หลักของ Terraform เหมือนกันทุก provider — พิสูจน์แล้วครั้งเดียวเต็มรูปแบบด้วย resource AWS จริงใน aws sibling ของคอร์สนี้: `plan -destroy` กับ stack ที่มีแค่ `aws_iam_role` ที่ทิ้งได้มี `prevent_destroy = true` บล็อกแค่การ destroy ของ role นั้นเท่านั้น ในขณะที่ `aws_db_instance` จริงข้างๆ destroy ได้โดย**ไม่มีอะไรต้านเลย** กลไกระดับ graph เดียวกันเป๊ะใช้กับ resource ของ provider ไหนก็ได้ รวมถึง `google`
+
+<Callout title="กลไกมาจากเอกสาร ตัวอย่าง gcp ไม่ได้พิสูจน์ด้วย plan จริง">
+การ reproduce diff ของ destroy-plan เองต้องมี Terraform state จริง (จากการ apply จริง) หรือแต่งขึ้นเอง — และ `google` `plan`/`apply` ต้องการ Application Default Credentials จริงเสมอซึ่งคอร์สนี้ไม่มี (`terraform plan -destroy -refresh=false` กับ state ของ google ที่แต่งขึ้นเองพังทันทีด้วย `Attempted to load application default credentials since neither credentials nor access_token was set... could not find default credentials` จริง) `terraform validate` ด้านล่างยืนยันว่าตำแหน่งของ `lifecycle` block เองถูกยอมรับ ส่วนพฤติกรรมของ destroy-plan เป็นกลไก Terraform หลักเดียวกับที่ aws sibling ของคอร์สนี้พิสูจน์ตรงๆ ด้วย `plan -destroy` จริงที่ไม่ต้องใช้ credential เลย
+</Callout>
+
+**วิธีแก้:** ย้าย `prevent_destroy` ไปยัง resource ที่ต้องการมันจริงๆ:
+
+```hcl
+# entries/09-prevent-destroy-wrong-resource-fixed/main.tf
+resource "google_sql_database_instance" "primary" {
+  name                = "primary-db"
+  database_version    = "POSTGRES_15"
+  region              = "us-central1"
+  deletion_protection = true
+  settings {
+    tier = "db-f1-micro"
+  }
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+```
+
+**จับได้โดย:** `plan -destroy`/`terraform plan` สำหรับ resource ที่เจาะจงจริงๆ — `prevent_destroy` ป้องกัน*เฉพาะ resource ที่ประกาศไว้เท่านั้น* ไม่เคยป้องกัน "สิ่งที่สำคัญที่อยู่ใกล้ๆ"
+
+### 10. `count` กับ list ที่จัดลำดับใหม่ได้ — การเลื่อน index
+
+```hcl
+# entries/10-count-index-shift/main.tf
+variable "bucket_names" {
+  type    = list(string)
+  default = ["logs", "assets", "backups"]
+}
+
+resource "google_storage_bucket" "this" {
+  count    = length(var.bucket_names)
+  name     = "acme-${var.bucket_names[count.index]}-${count.index}"
+  location = "US"
+}
+```
+
+**อาการ — `terraform test` จริงกับ `mock_provider "google" {}`: seed bucket สามตัวด้วย `apply` แล้ว `plan` โดยเอา element ตรงกลาง (`"assets"`) ออกจาก `bucket_names`:**
+
+```text
+  # google_storage_bucket.this[1] will be updated in-place
+  ~ resource "google_storage_bucket" "this" {
+        id                          = "wzbwjbrf"
+      ~ name                        = "acme-assets-1" -> "acme-backups-1"
+        # (13 unchanged attributes hidden)
+    }
+
+  # google_storage_bucket.this[2] will be destroyed
+  # (because index [2] is out of range for count)
+  - resource "google_storage_bucket" "this" {
+      - name = "acme-backups-2" -> null
+        # (other attributes omitted)
+    }
+```
+
+`count.index` อิงตำแหน่ง ไม่ใช่ identity การเอา `"assets"` ออกจากตรงกลางเลื่อน `"backups"` จาก index 2 ไปเป็น index 1 — Terraform อ่านว่า "index 1 เปลี่ยนจาก bucket assets เป็น bucket backups" (การ update-in-place จริง — `google_storage_bucket.name` เปลี่ยนได้ใน schema ของ provider เอง แม้ในความเป็นจริงการ rename bucket ของ GCS จริงทำไม่ได้เลย ซึ่งเป็นกับดักแยกต่างหากของมันเอง) และ "index 2 ไม่มีอยู่แล้ว" (การ destroy) ทั้งที่เจตนาของมนุษย์คือแค่ "ลบ bucket เดียว เหลืออีกสองตัวไว้เฉยๆ"
+
+**วิธีแก้:** key ด้วย identity ที่แน่นอนด้วย `for_each` ไม่ใช่ตำแหน่งเลย:
+
+```hcl
+# entries/10-count-index-shift-fixed/main.tf
+variable "bucket_names" {
+  type    = list(string)
+  default = ["logs", "backups"]
+}
+
+resource "google_storage_bucket" "this" {
+  for_each = toset(var.bucket_names)
+  name     = "acme-${each.value}"
+  location = "US"
+}
+```
+
+**จับได้โดย:** `terraform plan -detailed-exitcode` ทุกครั้งที่มีการเปลี่ยน list ที่ index ด้วย `count` — คู่ destroy/replace มองเห็นได้ทุก plan แต่เฉพาะถ้ามีคนอ่าน plan จริงๆ แทนที่จะเชื่อ `apply` ที่ขึ้นสีเขียว
+
+### 11. `for_each` บนค่าที่รู้เฉพาะหลัง apply
+
+```hcl
+# entries/11-for-each-unknown/main.tf
+resource "google_service_account" "generator" {
+  account_id   = "generator"
+  display_name = "generator"
+}
+
+resource "google_project_iam_member" "per_role" {
+  for_each = toset(google_service_account.generator.disabled == true ? [] : ["roles/viewer"])
+  project  = "mock-project"
+  role     = each.value
+  member   = "serviceAccount:${google_service_account.generator.email}"
+}
+```
+
+`count` ยอมรับตัวเลขที่รู้เฉพาะหลัง apply ได้ในบางบริบท แต่ `for_each` ไม่เคยยอมรับ *set ของ key* ที่ไม่รู้ตอน plan เลย — key คือ identity และ Terraform ต้องรู้ identity ของทุก resource ก่อนจะคำนวณ plan ได้เลย นี่คือพฤติกรรม graph-evaluation หลักของ Terraform เหมือนกันทุก provider — พิสูจน์ตรงๆ เต็มรูปแบบด้วย resource AWS จริงใน aws sibling ของคอร์สนี้: error "Invalid for_each argument" จริงและปัจจุบัน ระบุ computed attribute ที่ชัดเจน (`tags_all is a map of string, known only after apply`) ที่ทำให้ set ไม่รู้ค่า
+
+<Callout title="กลไกจริง ตัวอย่าง gcp ไม่ได้พิสูจน์ด้วย plan จริงที่นี่">
+`google` `plan` จริงต้องการ Application Default Credentials จริงเสมอซึ่งคอร์สนี้ไม่มี (ดู entry 9) รูปแบบนี้จึงพิสูจน์ด้วย plan จริงกับ `google` ตรงๆ ไม่ได้ และพิสูจน์ด้วย `terraform test` + `mock_provider "google" {}` ก็ไม่ได้เช่นกัน — ลองตรงๆ แล้ว `mock_provider` resolve ทุก computed attribute (รวม `disabled`) เป็นค่าที่รู้แน่นอน ซึ่งหมายความว่าความล้มเหลวแบบ "รู้เฉพาะหลัง apply" ที่ entry นี้อธิบายไม่สามารถ reproduce ได้ภายใต้ mock provider เลย: `terraform test` ที่นี่รายงานว่าผ่านสะอาด เพราะการ mock เอาความไม่รู้ค่าที่ bug นี้ต้องพึ่งออกไปพอดี กฎระดับ graph เอง — พิสูจน์ตรงๆ ใน aws sibling ของคอร์สนี้ — ใช้กับ `google_project_iam_member.per_role` ที่นี่เหมือนกัน
+</Callout>
+
+**วิธีแก้:** derive set ของ `for_each` จากสิ่งที่รู้ตอน plan — variable, ค่า `locals`, หรือ attribute ของ data source ที่รู้ตอน plan — ไม่ใช่จาก output ที่ computed ของ managed resource อีกตัว
+
+**จับได้โดย:** `terraform plan` — เสมอ ดังทันที ก่อนมีอะไรถูกสร้างเลย กับ provider จริง ตัวนี้ไม่เคยหลุดไปแบบเงียบๆ
+
+### 12. `null_resource` ในที่ที่ `terraform_data` (1.4+) เป็นตัวแทนในตัว
+
+```hcl
+# entries/12-null-resource/main.tf
+resource "null_resource" "seed" {
+  triggers = { always = timestamp() }
+  provisioner "local-exec" {
+    command = "echo seeding"
+  }
+}
+```
+
+ตัวนี้ยัง `validate` ผ่านสะอาด — `null_resource` ไม่ถูกเอาออก — แต่มันพึ่งพา provider แยกต่างหาก `hashicorp/null` สำหรับสิ่งที่ Terraform 1.4+ มีให้เป็น resource type ในตัวโดยไม่ต้องพึ่ง provider: `terraform_data` ส่วนหนึ่งของ built-in provider `terraform.io/builtin/terraform` ของ Terraform เอง (ใช้ทั่ว catalog นี้แล้ว, entry 6, 8, 11, 17) `terraform_data` เพิ่ม attribute `input`/`output` ที่ `null_resource` ไม่เคยมี ทำให้ reference ที่อยู่ปลายทางได้ค่าจริงที่มี type แทนที่จะมีแค่ `id`/`triggers`
+
+**วิธีแก้:**
+
+```hcl
+# entries/12-null-resource-fixed/main.tf
+resource "terraform_data" "seed" {
+  triggers_replace = [timestamp()]
+  provisioner "local-exec" {
+    command = "echo seeding"
+  }
+}
+```
+
+**จับได้โดย:** ไม่มีอะไรใน `validate`/`plan` เลย — resource type ทั้งสองทำงานได้ มีแค่ reviewer ที่รู้ว่า `terraform_data` ตัดทั้ง provider dependency เพิ่มออกไป (`hashicorp/null` — อีกหนึ่งบรรทัดใน `.terraform.lock.hcl` อีกหนึ่ง plugin ที่ต้อง download และ pin) สำหรับพฤติกรรมที่เท่ากันเท่านั้นที่จับได้
+
+### 13. Argument ที่ hallucinate มาจาก resource type อื่น
+
+```hcl
+# entries/13-hallucinated-argument/main.tf — @expect-error An argument named "force_destroy" is not expected here.
+resource "google_compute_instance" "app" {
+  name          = "app-instance"
+  machine_type  = "e2-medium"
+  zone          = "us-central1-a"
+  force_destroy = true
+
+  boot_disk {
+    initialize_params {
+      image = "debian-cloud/debian-12"
+    }
+  }
+  network_interface {
+    network = "default"
+  }
+}
+```
+
+`force_destroy` เป็น argument จริงของ Terraform — บน `google_storage_bucket` สำหรับอนุญาตให้ destroy bucket ที่ไม่ว่างเปล่าได้ มันไม่มีอยู่บน `google_compute_instance` เลย training data ของ AI ผสม argument แบบ lifecycle-shortcut ข้าม resource type กันตลอดเวลา
+
+<Callout title="ไม่ใช่ตำนาน deletion_policy ที่ spec ของคอร์สนี้เคยสมมติไว้">
+Brief ของ assignment คอร์สนี้เคยคาดว่า `google_compute_instance` จะไม่มี argument `deletion_policy` เลย เช็คตรงกับ schema ของ provider `hashicorp/google` 8.4.0 ที่ติดตั้งจริงแล้ว สมมติฐานนั้นล้าสมัยไปแล้ว: `google_compute_instance` มีทั้ง `deletion_policy` (default `"DELETE"`) และ `deletion_protection` (default `false`) จริงในตอนนี้ `force_destroy` — copy มาจาก `google_storage_bucket` — คือ bug แบบ hallucinated-argument ตัวจริงบน resource นี้ รายงานตรงๆ ที่นี่แทนที่จะพูดซ้ำ claim ที่ล้าสมัยไปแล้ว
+</Callout>
+
+**อาการ — `terraform validate` จริง:**
+
+```text
+Error: Unsupported argument
+
+  on main.tf line 5, in resource "google_compute_instance" "app":
+   5:   force_destroy = true
+
+An argument named "force_destroy" is not expected here.
+```
+
+**วิธีแก้:** เอา argument ที่ hallucinate มาออก — `google_compute_instance` ไม่มี concept แบบ force-destroy ของ bucket เลย ตัวที่ใกล้เคียงที่สุดจริงๆ คือ `deletion_protection`:
+
+```hcl
+# entries/13-hallucinated-argument-fixed/main.tf
+resource "google_compute_instance" "app" {
+  name                = "app-instance"
+  machine_type        = "e2-medium"
+  zone                = "us-central1-a"
+  deletion_protection = true
+
+  boot_disk {
+    initialize_params {
+      image = "debian-cloud/debian-12"
+    }
+  }
+  network_interface {
+    network = "default"
+  }
+}
+```
+
+**จับได้โดย:** `terraform validate` — ตัวนี้ดังและทันทีเสมอตอน plan รูปแบบที่อันตรายของ pattern นี้คือ entry 2/9 ที่ argument ผิดแต่จริงไม่ error เลย
+
+## Modules
+
+### 14. Module `source` ที่ไม่มี `?ref=`
+
+```hcl
+# not a real path — a git clone against a live, network-reachable repo is out of scope for this offline harness; see the callout below
+module "vpc" {
+  source = "git::https://example.com/vpc.git"
+}
+```
+
+ตาม [เอกสาร module sources](https://developer.hashicorp.com/terraform/language/modules/sources#selecting-a-revision): "You can add the `ref` query parameter to the location specified in the `source` argument to reference any value supported by the `git checkout` command, such as a branch, SHA-1 hash, or tag." ถ้าไม่มี: "Terraform clones and uses the default branch referenced by `HEAD`" — หมายความว่า *configuration เดียวกันเป๊ะ* ที่ re-initialize คนละวัน สามารถดึง commit ของ module คนละตัวได้อย่างเงียบๆ
+
+<Callout title="มาจากเอกสาร ไม่ได้พิสูจน์ด้วยการรันจริง">
+การ clone git module ที่เข้าถึงเครือข่ายได้จริงอยู่นอกขอบเขตของ harness offline นี้ (และนอกกฎ "ไม่มี external state นอกจาก public Terraform registry" ของคอร์สนี้) quote ข้างบนยกมาตรงจาก `developer.hashicorp.com/terraform/language/modules/sources` (ลิงก์ด้านบน)
+</Callout>
+
+**วิธีแก้:**
+
+```hcl
+# not a real path — same reason as above
+module "vpc" {
+  source = "git::https://example.com/vpc.git?ref=v1.4.0"
+}
+```
+
+**จับได้โดย:** ไม่มีอะไรใน `validate`/`plan` เลย — resolve สำเร็จทั้งคู่ `.terraform.lock.hcl` บันทึก hash ของ provider ไม่เคยบันทึก revision ของ module source เลย จึงไม่มีตัวจับ drift ในตัวสำหรับเรื่องนี้เลย มีแค่ tag/SHA ที่ pin ไว้และการ review ของมนุษย์บนค่า `ref=` เท่านั้นที่จับได้
+
+### 15. `depends_on` ที่เพิ่มมาปิดบัง reference cycle ที่มีอยู่จริง
+
+```hcl
+# entries/15-depends-on-hides-cycle/main.tf — @expect-error Error: Cycle
+resource "terraform_data" "a" {
+  input = terraform_data.b.output
+}
+
+resource "terraform_data" "b" {
+  input = terraform_data.a.output
+}
+```
+
+**อาการ — `terraform validate` จริง:**
+
+```text
+Error: Cycle:
+  terraform_data.a
+  terraform_data.b
+```
+
+การเพิ่ม `depends_on` ตรงๆ ให้ฝั่งใดฝั่งหนึ่ง หวังว่าจะ "บังคับ" ลำดับ ไม่ได้แก้ปัญหานี้เลย — `depends_on` เพิ่มแค่ constraint ลำดับ*เพิ่มเติม*บน graph ที่ Terraform สร้างจาก reference จริง มันเอา cycle ที่ reference เหล่านั้นสร้างขึ้นเองออกไม่ได้ วิธีแก้ที่ถูกต้องคือทำลาย reference loop จริงๆ ไม่ใช่ปิดบัง graph error ด้วยคำใบ้เรื่องลำดับ
+
+**วิธีแก้:** ทำลาย cycle โดยให้ทั้งสองฝั่งมีแหล่งความจริงที่เป็นอิสระต่อกัน ไม่วนซ้ำ:
+
+```hcl
+# entries/15-depends-on-hides-cycle-fixed/main.tf
+locals {
+  shared_seed = "2024-01-shared"
+}
+
+resource "terraform_data" "a" {
+  input = local.shared_seed
+}
+
+resource "terraform_data" "b" {
+  input = local.shared_seed
+}
+```
+
+**จับได้โดย:** `terraform validate` — เสมอ ทันที และไม่มี `depends_on` ใดกดไว้ได้ ความเสี่ยงจริงๆ คือเวลาที่ผู้ช่วย AI ใช้ไปกับการเพิ่ม `depends_on` block พยายามแก้ error ที่สาเหตุจริงคือ circular reference แท้ๆ
+
+## Terragrunt
+
+### 16. `run-all`/`plan-all` — ถูกเอาออกใน CLI redesign 1.1
+
+```text
+$ terragrunt plan-all --working-dir live/dev/vpc
+ERROR unknown command: "plan-all". Terragrunt no longer forwards unknown commands by default. Use 'terragrunt run -- plan-all ...' or a supported shortcut. Learn more: https://docs.terragrunt.com/migrate/cli-redesign/#use-the-new-run-command
+
+$ terragrunt run-all plan --working-dir .
+ERROR unknown command: "run-all". Terragrunt no longer forwards unknown commands by default. Use 'terragrunt run -- run-all ...' or a supported shortcut. Learn more: https://docs.terragrunt.com/migrate/cli-redesign/#use-the-new-run-command
+```
+
+ทั้งสองคำสั่งอยู่เต็มไปหมดใน tutorial ยุคก่อน 1.1 ดังนั้นอยู่เต็ม training data ของ AI ด้วย CLI redesign ของ Terragrunt 1.1 แทนที่ทั้งคู่
+
+**วิธีแก้ — คำสั่งจริงปัจจุบัน รันจริงกับ tree สองหน่วย:**
+
+```hcl
+# entries/16-run-all-removed/root.hcl
+remote_state {
+  backend  = "local"
+  generate = { path = "backend.tf", if_exists = "overwrite" }
+  config   = { path = "${get_terragrunt_dir()}/terraform.tfstate" }
+}
+```
+
+```hcl
+# entries/16-run-all-removed/modules/vpc/main.tf
+variable "cidr" {
+  type    = string
+  default = "10.0.0.0/16"
+}
+resource "terraform_data" "vpc" {
+  input = var.cidr
+}
+```
+
+```hcl
+# entries/16-run-all-removed/live/dev/vpc/terragrunt.hcl
+include "root" {
+  path = find_in_parent_folders("root.hcl")
+}
+
+terraform {
+  source = "${get_terragrunt_dir()}/../../../modules/vpc"
+}
+```
+
+```text
+$ terragrunt run --all plan --working-dir .
+[live/dev/vpc] terraform: Plan: 1 to add, 0 to change, 0 to destroy.
+
+❯❯ Run Summary  1 units  56ms
+   Succeeded    1
+```
+
+**จับได้โดย:** ทันที ทุกครั้ง — Terragrunt ปฏิเสธไม่ยอมเริ่มด้วยซ้ำ ไม่เคยหลุดไปแบบเงียบๆ
+
+### 17. `terragrunt.hcl` เดียวกัน copy-paste จาก `dev` มา `prod` โดยไม่แตะ inputs เลย
+
+```hcl
+# entries/17-hardcoded-account-copy/live/dev/vpc/terragrunt.hcl
+terraform {
+  source = "${get_terragrunt_dir()}/../../../modules/vpc"
+}
+
+inputs = {
+  account_id = "111111111111"
+  region     = "us-east-1"
+}
+```
+
+```hcl
+# entries/17-hardcoded-account-copy/live/prod/vpc/terragrunt.hcl
+terraform {
+  source = "${get_terragrunt_dir()}/../../../modules/vpc"
+}
+
+inputs = {
+  account_id = "111111111111"
+  region     = "us-east-1"
+}
+```
+
+**อาการ — reproduce จริงในเครื่อง:**
+
+```text
+$ terragrunt hcl validate --working-dir live/prod/vpc
+(no output — both files are syntactically valid HCL)
+
+$ diff live/dev/vpc/terragrunt.hcl live/prod/vpc/terragrunt.hcl
+(no output — the files are byte-identical)
+```
+
+ไม่มีอะไรในนี้เป็น HCL ที่ invalid เลย `prod/vpc` deploy ทับ **account AWS ของ dev อย่างเงียบๆ** — `terragrunt hcl validate` ไม่มีทางรู้ว่า `account_id = "111111111111"` ภายใต้ `live/prod/` ผิด เพราะไม่มีอะไรในไฟล์ที่บอกว่า account ไหนคือ "ถูกต้อง" สำหรับ path นั้น
+
+**วิธีแก้:** derive `account_id`/`region` จาก directory path เอง เพื่อให้ `dev` กับ `prod` ไม่สามารถแชร์ค่าผ่าน copy-paste ได้จริงๆ:
+
+```hcl
+# entries/17-hardcoded-account-copy-fixed/live/prod/env.hcl
+locals {
+  account_id = "222222222222"
+  region     = "us-east-1"
+}
+```
+
+```hcl
+# entries/17-hardcoded-account-copy-fixed/live/prod/vpc/terragrunt.hcl
+locals {
+  env_vars = read_terragrunt_config(find_in_parent_folders("env.hcl"))
+}
+
+terraform {
+  source = "${get_terragrunt_dir()}/../../../modules/vpc"
+}
+
+inputs = {
+  account_id = local.env_vars.locals.account_id
+  region     = local.env_vars.locals.region
+}
+```
+
+**จับได้โดย:** ไม่มีอะไรอัตโนมัติเลย — `hcl validate`/`hcl format --check` ผ่านทั้งคู่ มีแค่ `terragrunt run --all plan` จริงต่อ environment ที่ diff โดยมนุษย์ที่รู้ว่า environment ไหนควรเล็งไป account ไหนเท่านั้นที่จับ copy-paste ที่สะอาดขนาดนี้ได้
+
+## CI & policy
+
+### 18. `-auto-approve` ใน CI pipeline
+
+**อาการ — จริง เทียบข้างกัน:**
+
+```text
+$ terraform apply
+Do you want to perform these actions?
+  Terraform will perform the actions described above.
+  Only 'yes' will be accepted to approve.
+  Enter a value: no
+Apply cancelled.
+
+$ terraform apply -auto-approve
+terraform_data.release: Creating...
+terraform_data.release: Creation complete after 0s [id=bb8b46af-eb1e-0b33-104a-b4b39a2559a6]
+Apply complete! Resources: 1 added, 0 changed, 0 destroyed.
+```
+
+`-auto-approve` ไม่ได้แค่ข้าม prompt ที่ CI ตอบไม่ได้อยู่แล้ว — มันเอาจุดสุดท้ายที่มนุษย์ (หรือ policy gate ที่อ่าน *plan ที่กำลังจะถูก apply เป๊ะๆ*) จะหยุดการเปลี่ยนแปลงที่ทำลายข้อมูลได้ออกไป ทางแก้ที่ถูกต้องคือแยกขั้นตอน `plan -out=tfplan`, policy check (entry 20) หรือ human approval gate กับ plan ที่ save ไว้นั้น แล้วค่อย `apply tfplan` — ไม่ใช่ `apply -auto-approve` กับ plan สดใหม่ที่ยังไม่ review เลย
+
+**วิธีแก้:**
+
+```yaml
+# .github/workflows/terraform.yml (fragment, not a collected fence)
+- run: terraform plan -out=tfplan -detailed-exitcode
+- run: conftest test --policy policy $(terraform show -json tfplan | tee plan.json | true)
+- run: terraform apply tfplan   # applies the reviewed plan file, not a fresh -auto-approve
+```
+
+**จับได้โดย:** การ review pipeline เท่านั้น ไม่เคยเป็น `validate`/`plan` — ทั้งสอง flag เป็นการใช้ CLI ที่ valid
+
+### 19. `checkov-action@master` — tag ที่เปลี่ยนได้ถูกใช้ราวกับ pin แล้ว
+
+```yaml
+# .github/workflows/checkov.yml (fragment, not a collected fence)
+- uses: bridgecrewio/checkov-action@master
+  with:
+    directory: .
+```
+
+ตาม [คู่มือ hardening ของ GitHub เอง](https://docs.github.com/en/actions/security-for-github-actions/security-guides/security-hardening-for-github-actions#using-third-party-actions): "Pinning an action to a full-length commit SHA is currently the only way to use an action as an immutable release." `@master` (หรือ `@main`, `@v1`) เป็น **branch reference** — มันชี้ไปที่ commit ที่ต่างออกไปพรุ่งนี้ก็ได้ โดยไม่มี diff ใน history ของ repo นี้เองให้ review เลย เหตุผลของ GitHub, quote ตรงๆ: bad actor ที่ compromise repo ของ action นั้นต้องใช้ "a SHA-1 collision for a valid Git object payload" เพื่อเอาชนะ SHA ที่ pin ไว้ — ทำไม่ได้ในทางคำนวณ — ในขณะที่ tag หรือ branch ที่เปลี่ยนได้สามารถถูกย้ายได้เฉยๆ
+
+<Callout title="มาจากเอกสาร ไม่ได้พิสูจน์ด้วยการรันจริง">
+การพิสูจน์ version drift ต้องให้ maintainer ของ action ต้นทาง push commit ใหม่ไปที่ `master` จริงระหว่าง session นี้ ซึ่งไม่ใช่อะไรที่ควรรอ คำแนะนำข้างบน quote ตรงจาก `docs.github.com` (ลิงก์ด้านบน)
+</Callout>
+
+**วิธีแก้:**
+
+```yaml
+# .github/workflows/checkov.yml (fragment, not a collected fence)
+- uses: bridgecrewio/checkov-action@c98096a34955fc70f684e0c1ce43b4e1b2ea3f9  # v12.2919.0
+  with:
+    directory: .
+```
+
+**จับได้โดย:** ไม่มีอะไรใน output ของ CI เองเลย — workflow รันเหมือนกันทั้งคู่ จนกว่าจะถึงวันที่ไม่เหมือน มีแค่ linter ที่ pin dependency (`zizmor`, การเตือนเรื่อง pin version ของ Dependabot เอง) หรือการ review ด้วยมือเท่านั้นที่จับได้
+
+### 20. Rego ก่อน v1 (`deny[msg] { ... }`) load ไม่ผ่านอย่างเงียบๆ ภายใต้ OPA v1
+
+```rego
+# entries/20-rego-v1/policy/deny_no_labels.rego — @expect-error rego_parse_error: `if` keyword is required before rule body
+package main
+
+deny[msg] {
+  resource := input.resource_changes[_]
+  resource.type == "terraform_data"
+  msg := sprintf("%s must set labels for cost allocation", [resource.address])
+}
+```
+
+**อาการ — `conftest test` จริง, `openpolicyagent/conftest` ปัจจุบันที่ default เป็น syntax Rego v1, กับ plan `terraform show -json` จริง (plan ของ config provider `google` สำหรับ resource marker `terraform_data` — plan จริงของ `google` ต้องการ Application Default Credentials จริงซึ่งคอร์สนี้ไม่มี ดู entry 9 ดังนั้น policy target ที่นี่คือ resource `terraform_data` ที่ไม่ผูกกับ provider เดียวกับที่ใช้ทั่ว catalog นี้):**
+
+```text
+Error: running test: load: loading policies: load: 2 errors occurred during loading:
+policy/deny_no_labels.rego:3: rego_parse_error: `if` keyword is required before rule body
+policy/deny_no_labels.rego:3: rego_parse_error: `contains` keyword is required for partial set rules
+```
+
+รูปแบบ bracket-set rule (`deny[msg] { ... }`) ที่เต็มไป tutorial Rego มาหลายปี ซึ่ง training data ของ AI ดึงมา คือสิ่งที่ OPA v1 (default ตั้งแต่ OPA 1.0 / `conftest` ปัจจุบัน) ปฏิเสธตรงๆ — `deny` กลายเป็น error ที่ *load ไม่ผ่านเลย* ไม่ใช่แค่ rule ที่ไม่เคยทำงาน
+
+**วิธีแก้ — syntax v1 จริง, policy เดียวกัน, รันกับ plan จริง:**
+
+```rego
+# entries/20-rego-v1-fixed/policy/deny_no_labels.rego
+package main
+
+import rego.v1
+
+deny contains msg if {
+  resource := input.resource_changes[_]
+  resource.type == "terraform_data"
+  msg := sprintf("%s must set labels for cost allocation", [resource.address])
+}
+```
+
+```text
+$ docker run --rm -v "$(pwd)":/project openpolicyagent/conftest test --policy policy plan.json
+FAIL - plan.json - main - terraform_data.app_marker must set labels for cost allocation
+
+1 test, 0 passed, 0 warnings, 1 failure, 0 exceptions
+```
+
+**จับได้โดย:** `conftest test` เอง จริงและทันที — แต่ในรูปแบบ load error ที่ดูเหมือนปัญหา CI/tooling ได้ ทั้งที่จริงๆ แล้วคือ syntax policy ที่ล้าสมัย
+
+### 21. tflint check ที่ไม่มีอยู่จริงสำหรับ resource type นี้ — และไม่เหมือน ruleset บางตัว จับได้ทันที
+
+```hcl
+# entries/21-invented-rule-id/.tflint.hcl — @expect-error Rule not found: google_compute_instance_invalid_zone
+plugin "google" {
+  enabled = true
+  version = "0.30.0"
+  source  = "github.com/terraform-linters/tflint-ruleset-google"
+}
+
+rule "google_compute_instance_invalid_zone" {
+  enabled = true
+}
+```
+
+Rule catalog จริงของ `tflint-ruleset-google` (ยืนยันกับ `github.com/terraform-linters/tflint-ruleset-google/tree/master/docs/rules`) มีแค่ **หก** rule ทั้งหมด ทุกตัวเป็น check `_invalid_member` บน resource ของ IAM (`google_project_iam_member_invalid_member`, `google_project_iam_binding_invalid_member` และคล้ายกัน) — ไม่มี rule เช็ค zone แบบไหนเลย สำหรับ resource ใดก็ตาม ผู้ช่วย AI จับรูปแบบชื่อ rule ต่อ resource แบบ `aws_instance_previous_type` จาก ruleset ที่ใหญ่กว่าของ cloud อื่น แล้ว hallucinate ตัวที่เทียบเท่ามาให้ ruleset เล็กๆ ที่เน้น IAM นี้ ซึ่งไม่เคยถูกสร้างมาให้มีแบบนั้นเลย
+
+**อาการ — reproduce จริงด้วย image `ghcr.io/terraform-linters/tflint` ที่ pin ไว้:**
+
+```text
+$ docker run --rm -v "$(pwd)":/data -v <plugin-cache>:/root/.tflint.d -w /data ghcr.io/terraform-linters/tflint
+Failed to check rule config; Rule not found: google_compute_instance_invalid_zone
+```
+
+ต่างจาก entry ของ aws sibling ของคอร์สนี้ (ที่ rule `aws_instance_invalid_type` ที่คิดขึ้นเองไม่เคยถูกเอาไปใช้เลยอย่างเงียบๆ โดย tflint รายงานว่าการรันสำเร็จ) ruleset plugin ของ `google` validate ชื่อ rule อย่างเข้มงวดตอนเริ่มและปฏิเสธไม่ยอมรันเลย — error จริง ดัง ทันที การจับชื่อ rule ที่คิดขึ้นเองได้หรือไม่ขึ้นอยู่กับ implementation ของ ruleset plugin นั้นๆ เอง ไม่ใช่ตัว tflint เอง
+
+**วิธีแก้:** ไม่มี tflint rule ต่อ zone จริงให้เปิดใช้สำหรับ `google_compute_instance` เลย — เอา rule ที่คิดขึ้นเองออก แล้วพึ่ง `terraform validate`/policy Sentinel หรือ OPA ที่กำหนดเอง (entry 20) สำหรับ check รูปแบบ zone ที่ ruleset นี้ไม่ครอบคลุม:
+
+```hcl
+# entries/21-invented-rule-id-fixed/.tflint.hcl
+plugin "google" {
+  enabled = true
+  version = "0.30.0"
+  source  = "github.com/terraform-linters/tflint-ruleset-google"
+}
+```
+
+**จับได้โดย:** `tflint` เอง ทันที ใน ruleset นี้เจาะจง — บทเรียนตรงข้ามจาก entry ของ aws sibling ของคอร์สนี้ และเป็นข้อพิสูจน์ว่า "tflint จะจับชื่อ rule ที่คิดขึ้นเองได้" ไม่ควรสมมติเป็นกฎเดียวกันทุก ruleset ของทุก cloud
+
+## Secrets
+
+### 22. `terraform.tfvars` ที่มี secret จริง commit เข้าไป
+
+```hcl
+# entries/22-tfvars-secret-committed/terraform.tfvars
+db_password = "Sup3rSecret!2024"
+api_token   = "ghp_1234567890abcdefghijklmnopqrstuvwxyz"
+```
+
+```text
+# entries/22-tfvars-secret-committed/.gitignore
+.terraform/
+*.tfstate
+```
+
+`*.tfvars` ไม่อยู่ใน `.gitignore` เลย — `.gitignore` ของ Terraform ทั่วไป (ดู entry 4) ป้องกัน state และ provider cache แต่หลาย template จริงไม่เคยพูดถึง `.tfvars` เลย เพราะไฟล์ `*.tfvars.example`/ไฟล์ `.tfvars` ที่ *ไม่ใช่ secret* ที่ commit เข้าไปเป็น pattern ที่ถูกต้องและพบได้ทั่วไป ผู้ช่วย AI ที่สร้าง `.gitignore` จาก prompt ทั่วไปก็สร้างช่องว่างแบบเดียวกันซ้ำ
+
+**วิธีแก้:**
+
+```text
+# entries/22-tfvars-secret-committed-fixed/.gitignore
+.terraform/
+*.tfstate
+*.tfvars
+!*.tfvars.example
+```
+
+...บวกกับการย้าย secret จริงออกจากไฟล์ใดๆ เลย — environment variable (`TF_VAR_db_password`), reference ไปยัง secrets manager, หรือ write-only argument (entry 23) — เพราะการแก้ `.gitignore` ทีหลังไม่ได้เอา secret ที่ commit เข้าไปแล้วออกจาก git history เลย
+
+**จับได้โดย:** `git log -p -- '*.tfvars'` บน repo ที่มีอยู่แล้ว หรือ pre-commit secret scanner (`gitleaks`, `trufflehog`) — ไม่เคยเป็น `validate`/`plan` ซึ่งไม่ตรวจ `.gitignore` เลย
+
+### 23. `sensitive = true` ซ่อนแค่ CLI ไม่ใช่ state file
+
+```hcl
+# entries/23-sensitive-state-plaintext/main.tf
+resource "random_password" "db" {
+  length  = 16
+  special = false
+}
+
+output "db_password" {
+  value     = random_password.db.result
+  sensitive = true
+}
+```
+
+**อาการ — จริง เทียบข้างกัน:**
+
+```text
+$ terraform apply -auto-approve
+Outputs:
+db_password = <sensitive>
+
+$ grep -A1 '"result"' terraform.tfstate
+            "result": "QxDS75iFGBWDNsqc",
+```
+
+`sensitive = true` ซ่อน CLI output และ `terraform show` โดย default — มัน**ไม่** encrypt หรือละค่าออกจาก `terraform.tfstate` บน disk เลย ใครก็ตามที่อ่าน state file ได้ (disk ในเครื่อง, GCS bucket ที่ไม่มี IAM รัดกุม, CI log artifact ที่ดันไป `cat` state) อ่าน password จริงเป็น plaintext ได้เลย ไม่ว่าจะติด label "sensitive" หรือไม่ `random_password` ไม่มี write-only argument ให้หลีกเลี่ยงเรื่องนี้ — แต่ `google_sql_database_instance` มี: `root_password_wo` + `root_password_wo_version` ยืนยันตรงกับ schema ของ provider `hashicorp/google` 8.4.0 ที่ติดตั้งจริง ซึ่งไม่ถูกเขียนเข้า state เลย
+
+**วิธีแก้:** สำหรับค่าที่ไม่จำเป็นต้อง persist ใน state เลยจริงๆ ใช้ write-only argument ที่ resource ปลายทางรองรับ และถือว่า `sensitive = true` เป็นแค่ตัวควบคุม CLI output — ไม่ใช่ security boundary เลย:
+
+```hcl
+# entries/23-sensitive-state-plaintext-fixed/main.tf
+resource "random_password" "db" {
+  length  = 16
+  special = false
+}
+
+resource "google_sql_database_instance" "primary" {
+  name                     = "primary-db"
+  database_version         = "POSTGRES_15"
+  region                   = "us-central1"
+  root_password_wo         = random_password.db.result
+  root_password_wo_version = 1
+  settings {
+    tier = "db-f1-micro"
+  }
+}
+```
+
+**จับได้โดย:** `grep` บน `terraform.tfstate`/`terraform show -json` ดิบๆ — ไม่เคยเป็น CLI output ที่ถูกซ่อนไว้เอง ซึ่งเป็นสิ่งที่ทำให้ pattern นี้ถูกเชื่อผิดๆ ได้ง่าย
+
+<Callout title="อะไรจับได้จริง และจับตอนไหน">
+จาก 23 entry นี้ มีแค่ 6 ตัว — 3 (module + count/for_each), 6 (remote_state), 11 (for_each on unknown), 13 (hallucinated argument), 15 (cycle), และ 16 (removed Terragrunt commands) — ที่ถูก `validate`/`plan`/`terragrunt` ปฏิเสธตรงๆ อีกสองตัว (2, 20) ปรากฏเป็น warning หรือ load error ที่พลาดง่ายถ้า CI เช็คแค่ exit code ที่เหลืออีก 15 ตัวเป็น configuration ที่ schema valid, plan สะอาด แต่ผิดตรงๆ — จับได้แค่ด้วยการ review, policy gate, หรือการสแกน git history เท่านั้น ไม่เคยเป็นตัวเครื่องมือเอง
+</Callout>
+
+export const quizAiBugCatalog = [
+  {
+    q: "ทำไม provider block ข้างใน module ของ entry 3 ถึง validate ผ่านสบายๆ ด้วยตัวเอง และพังก็ต่อเมื่อเพิ่ม `count = 2` เข้าไปที่ module call เท่านั้น?",
+    options: [
+      "เป็น bug ของ Terraform ที่ trigger บางครั้งเท่านั้น",
+      "Module ที่มี provider configuration ของตัวเองเป็น Terraform ที่ valid จนกว่าผู้เรียกใช้จะต้องการ count/for_each/depends_on — ถึงจุดนั้น Terraform ไม่มีทางรู้ว่าแต่ละ instance ควรใช้ provider configuration ไหน จึงปฏิเสธ plan ทั้งหมด",
+      "count ต้องมี provider block ข้างใน module เสมอ",
+      "Error นี้ปรากฏเฉพาะ Terraform version เก่ากว่า 1.16 เท่านั้น",
+    ],
+    answer: 1,
+    explain: "พิสูจน์ตรงๆ: terraform validate บน module อย่างเดียว (ไม่มี count) ผ่านสำเร็จ การเพิ่ม count = 2 เข้าไปที่ module call เดียวกันเป๊ะสร้าง error 'Module is incompatible with count, for_each, and depends_on' จริง",
+  },
+  {
+    q: "```text\n$ terraform apply -auto-approve\nChanges to Outputs:\n  + child_effective_count = 3\n```\nจาก `var.override = null` ที่ส่งเข้า variable ที่ `nullable = false` พร้อม `default = 3` output จริงนี้พิสูจน์อะไร?",
+    options: [
+      "ว่าการส่ง null มาจะ error เสมอ",
+      "ว่า nullable = false แทนที่ default ของ variable อย่างเงียบๆ เมื่อได้รับ null ตรงๆ โดยไม่มี error และไม่มีสัญญาณใดๆ ว่ามีการพยายาม override เลย",
+      "ว่า nullable ไม่มีผลกับ module variable เลย",
+      "ว่า child module เพิกเฉยต่อ input ทั้งหมด",
+    ],
+    answer: 1,
+    explain: "พิสูจน์ตรงๆ: การเปลี่ยน variable ตัวเดียวกันเป็น nullable = true แล้วรัน apply ซ้ำแบบเดิมเปลี่ยน output เป็น null แทนที่จะเป็น 3 — ยืนยันว่า nullable = false คือสาเหตุของการแทนที่อย่างเงียบๆ นี้",
+  },
+  {
+    q: "ทำไม entry 9 ถึงย้าย `lifecycle { prevent_destroy = true }` จาก `google_storage_bucket.scratch_logs` ไปยัง `google_sql_database_instance.primary` แทนที่จะเพิ่มมันเข้าไปทั้งสองตัว?",
+    options: [
+      "Terraform อนุญาต prevent_destroy แค่หนึ่ง resource ต่อไฟล์เท่านั้น",
+      "prevent_destroy ป้องกันเฉพาะ resource ที่ประกาศไว้เท่านั้น — กลไกระดับ graph เดียวกับที่พิสูจน์ด้วย plan -destroy จริงใน aws sibling ของคอร์สนี้ ซึ่งบล็อก resource ที่ทิ้งได้ แต่ปล่อยให้ database จริงข้างๆ destroy ได้โดยไม่มีอะไรต้านเลย จนกว่าจะเพิ่ม prevent_destroy เข้าไปที่มันโดยตรง",
+      "google_storage_bucket ไม่รองรับ lifecycle block",
+      "การเพิ่มเข้าไปทั้งสอง resource จะสร้าง cycle",
+    ],
+    answer: 1,
+    explain: "กลไกนี้เป็น Terraform หลัก เหมือนกันทุก provider: พิสูจน์ด้วย plan -destroy จริงสองครั้งใน aws sibling ของคอร์สนี้ เมื่อมี prevent_destroy แค่ที่ resource ที่ทิ้งได้ 'Plan: 0 to add, 0 to change, 2 to destroy' ยังรวม database จริงข้างๆ อยู่ด้วย — มีแค่การ destroy ของ resource ที่ถูกป้องกันเท่านั้นที่ถูกบล็อก",
+  },
+  {
+    q: "Rego ก่อน v1 ของ entry 20 (`deny[msg] { ... }`) และ tflint rule ที่คิดขึ้นเองของ entry 21 (`google_compute_instance_invalid_zone`) ทั้งคู่เป็น policy check ที่พัง — แต่พังต่างกันอย่างไรที่นี่?",
+    options: [
+      "พังเหมือนกันเป๊ะ ด้วย error 'ไม่พบ rule' ที่ชัดเจน",
+      "Rego policy load ไม่ผ่านเลย (parse error จริง ดังทุกครั้งที่รัน) — ส่วน tflint rule ที่คิดขึ้นเอง ก็ถูกปฏิเสธทันทีเช่นกัน ด้วย error 'Rule not found' จริง ต่างจาก entry ของ aws sibling ของคอร์สนี้ที่ชื่อ rule ที่คิดขึ้นเองไม่เคยถูกเอาไปใช้เลยอย่างเงียบๆ",
+      "ทั้งคู่ไม่พังเลยจริงๆ",
+      "Rego policy ถูกเพิกเฉยอย่างเงียบๆ ในขณะที่ tflint crash เสมอ",
+    ],
+    answer: 1,
+    explain: "พิสูจน์ด้วยการรันจริง: output จริงของ conftest คือ 'rego_parse_error: `if` keyword is required before rule body' — ดังและทันที การรัน tflint จริงที่นี่ (ruleset google) ให้ 'Failed to check rule config; Rule not found: google_compute_instance_invalid_zone' — ดังและทันทีเช่นกัน ตรงข้ามกับพฤติกรรมเงียบๆ ของ ruleset aws ที่พิสูจน์ใน aws sibling ของคอร์สนี้",
+  },
+  {
+    q: "ทำไม entry 23 ถึงบอกว่า `sensitive = true` ไม่ใช่ security boundary ทั้งที่มันซ่อน `db_password` จาก output ของ `terraform apply` จริงที่แสดงไว้?",
+    options: [
+      "sensitive = true ไม่ได้ซ่อนอะไรเลยจริงๆ",
+      "มันควบคุมแค่การแสดงผล CLI/UI เท่านั้น — terraform.tfstate จริงบน disk พิสูจน์แล้วว่ามี password เป็น plaintext ('\"result\": \"QxDS75iFGBWDNsqc\"') ไม่ว่าจะมี label sensitive หรือไม่",
+      "sensitive = true encrypt state file ให้อัตโนมัติ",
+      "password ที่เห็นใน state เป็นค่าอื่นที่ไม่เกี่ยวข้องกัน",
+    ],
+    answer: 1,
+    explain: "พิสูจน์ตรงๆ: apply เดียวกันที่พิมพ์ 'db_password = <sensitive>' ไปที่ CLI ทิ้ง password จริงที่ไม่ถูก redact ไว้ให้อ่านได้ด้วย grep ธรรมดาบน terraform.tfstate บน disk",
+  },
+];
+
+<Quiz client:visible id="reading-terraform/ai-bug-catalog" questions={quizAiBugCatalog} />
+
+<ProgressTracker client:visible id="reading-terraform/ai-bug-catalog" />

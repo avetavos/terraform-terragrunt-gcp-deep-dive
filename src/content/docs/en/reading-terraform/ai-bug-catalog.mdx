@@ -1,0 +1,1107 @@
+---
+title: The AI bug catalog
+description: '23 bugs AI-generated Terraform/Terragrunt produces constantly — the config AI typically writes, why it is wrong, the real validate/plan/test output reproduced with Terraform 1.16.4 and Terragrunt 1.1.0, and the fix.'
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+Every snippet below was written to look exactly like the HCL an AI assistant actually produces — fluent, plausible, shaped by training data that still remembers a Terraform 0.11-era `dynamodb_table` lock or a pre-`for_each` `count` habit — then run for real: `terraform validate` (with `project = "mock-project"`, this course's harness config everywhere), `terraform test` with `mock_provider "google" {}` for anything that needs a plan-time diff (real `google` `plan` always needs real Application Default Credentials — proven directly in this catalog's entry 9 — so every plan-shaped proof below is either a genuine offline `terraform_data` plan or a `terraform test` run, never a raw `google` `plan` pretending to be offline), `terragrunt hcl validate`, `terragrunt run --all plan`, and real `docker run` invocations of tflint/checkov/conftest. The quoted output below is copied verbatim from those runs, not reconstructed from memory. Notice which ones `terraform validate`/`test`/`terragrunt` actually reject outright — a minority. Most of these 23 patterns are **schema-valid, plan-clean Terraform that fails later**: at `apply` against a real GCP project, at the next `plan` after someone edits an unrelated list, or silently, never, while quietly doing the wrong thing. The 23 patterns are grouped in the same order **[How to read Terraform you did not write](/terraform-gcp/en/reading-terraform/)** and the **[Review Checklist](/terraform-gcp/en/reading-terraform/review-checklist/)** use.
+
+## Versions & providers
+
+### 1. A floating provider constraint (`>=` instead of `~>`)
+
+```hcl
+# entries/01-unpinned-provider/main.tf
+terraform {
+  required_providers {
+    google = { source = "hashicorp/google", version = ">= 8.0" }
+  }
+}
+```
+
+**Symptom — real `.terraform.lock.hcl` after `terraform init`:**
+
+```text
+provider "registry.terraform.io/hashicorp/google" {
+  version     = "8.4.0"
+  constraints = ">= 8.0.0"
+  hashes = [ ... ]
+}
+```
+
+`>= 8.0` resolved to whatever the registry's newest matching release is **today** — 8.4.0. If `.terraform.lock.hcl` isn't committed (see entry 4) or someone runs `init -upgrade`, the next `init` can resolve a *different* newest release, silently changing provider behavior between two runs of the identical `main.tf`. Nothing about `>= 8.0` promises the next resolve stays inside the same major version's guarantees the way `~> 8.0` does.
+
+**Fix:**
+
+```hcl
+# entries/01-unpinned-provider-fixed/main.tf
+terraform {
+  required_providers {
+    google = { source = "hashicorp/google", version = "~> 8.0" }
+  }
+}
+```
+
+**Caught by:** nothing automatic — `terraform init`/`validate`/`plan` all succeed with either constraint. Only a diff review or a pinned-versions policy catches it. See **[Verification Tools](/terraform-gcp/en/reading-terraform/verification-tools/)**.
+
+### 2. Deprecated provider arguments AI still writes from muscle memory
+
+Real deprecation warning pulled straight from the installed `hashicorp/google` 8.4.0 provider schema (`terraform providers schema -json`), not guessed:
+
+```hcl
+# entries/02-deprecated-args/main.tf
+resource "google_compute_network" "vpc" {
+  name = "acme-vpc"
+}
+
+resource "google_compute_firewall" "allow_ssh" {
+  name           = "allow-ssh"
+  network        = google_compute_network.vpc.name
+  enable_logging = true
+  allow {
+    protocol = "tcp"
+    ports    = ["22"]
+  }
+}
+```
+
+**Symptom — real `terraform validate -json`:**
+
+```text
+warning - Argument is deprecated - Deprecated in favor of log_config
+```
+
+It still **validates successfully** — a warning, not an error, so CI that only checks the exit code (see entry 18) ships it anyway.
+
+**Fix:**
+
+```hcl
+# entries/02-deprecated-args-fixed/main.tf
+resource "google_compute_network" "vpc" {
+  name = "acme-vpc"
+}
+
+resource "google_compute_firewall" "allow_ssh" {
+  name    = "allow-ssh"
+  network = google_compute_network.vpc.name
+  log_config {
+    metadata = "INCLUDE_ALL_METADATA"
+  }
+  allow {
+    protocol = "tcp"
+    ports    = ["22"]
+  }
+}
+```
+
+**Caught by:** `terraform validate -json | jq '.diagnostics[] | select(.severity=="warning")'` — a warning grep in CI, not the default exit code.
+
+### 3. A `provider` block inside a reusable module
+
+```hcl
+# entries/03-provider-in-module/modules/net/main.tf
+provider "google" {
+  project = "mock-project"
+  region  = "us-central1"
+}
+
+resource "google_compute_network" "this" {
+  name = "acme-vpc"
+}
+```
+
+```hcl
+# entries/03-provider-in-module/main.tf — @expect-error Module is incompatible with count, for_each, and depends_on
+module "net" {
+  source = "./modules/net"
+  count  = 2
+}
+```
+
+This resolves fine right up until a caller tries to use `count`/`for_each`/`depends_on` on the module call, which is exactly what a second environment usually needs next.
+
+**Symptom — real `terraform init`, Terraform 1.16.4:**
+
+```text
+Upgrading modules...
+- net in modules/net
+
+Error: Module is incompatible with count, for_each, and depends_on
+
+  on main.tf line 3, in module "net":
+   3:   count  = 2
+
+The module at module.net is a legacy module which contains its own local
+provider configurations, and so calls to it may not use the count,
+for_each, or depends_on arguments.
+
+If you also control the module "./modules/net", consider updating this
+module to instead expect provider configurations to be passed by its
+caller.
+```
+
+**Fix:**
+
+```hcl
+# entries/03-provider-in-module-fixed/modules/net/main.tf
+resource "google_compute_network" "this" {
+  name = "acme-vpc"
+}
+```
+
+```hcl
+# entries/03-provider-in-module-fixed/main.tf
+provider "google" {
+  project = "mock-project"
+  region  = "us-central1"
+}
+
+module "net" {
+  source = "./modules/net"
+  count  = 2
+}
+```
+
+**Caught by:** `terraform init`/`validate` — but only once someone actually adds `count`/`for_each`/`depends_on`, which is usually a whole environment later than when the module was first written and reviewed clean.
+
+## State & backend
+
+### 4. `.terraform.lock.hcl` gitignored
+
+A `.gitignore` copied from a generic "Terraform" template block often includes `.terraform.lock.hcl` alongside `.terraform/` — but only one of those two should ever be ignored.
+
+```text
+# entries/04-lockfile-gitignored/.gitignore
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.backup
+```
+
+**Symptom — real, reproduced locally:** delete `.terraform.lock.hcl` and re-run `terraform init` with the floating constraint from entry 1 (`>= 6.0`):
+
+```text
+$ rm .terraform.lock.hcl && terraform init -backend=false
+Initializing provider plugins...
+- Finding hashicorp/aws versions matching ">= 6.0.0"...
+- Installing hashicorp/aws v6.66.0...
+```
+
+Nothing warns you the resolved version might differ from what a teammate — or CI, on a different day — resolves. The lock file exists precisely to make that resolution reproducible across machines and time; gitignoring it throws that guarantee away.
+
+**Fix:**
+
+```text
+# entries/04-lockfile-gitignored-fixed/.gitignore
+.terraform/
+*.tfstate
+*.tfstate.backup
+```
+
+**Caught by:** `git status` after a clean `init` showing `.terraform.lock.hcl` as untracked — or a repo policy that fails CI if the lock file is missing.
+
+### 5. Copying the S3 backend's `dynamodb_table` locking pattern onto `gcs`, where it never existed
+
+```hcl
+# entries/05-backend-locking/backend.tf
+terraform {
+  backend "gcs" {
+    bucket         = "acme-tfstate"
+    prefix         = "network"
+    dynamodb_table = "acme-tf-locks"
+  }
+}
+```
+
+`dynamodb_table` is real — on the `s3` backend, for a completely different cloud. AI training data mixes backend examples across clouds constantly, and this argument simply does not exist on the `gcs` backend's schema at all. Per the [GCS backend docs](https://developer.hashicorp.com/terraform/language/backend/gcs): "This backend supports state locking" — natively, through GCS object generation preconditions on the state object itself, with **no separate table, resource, or extra argument to provision, IAM-permission, or pay for at all**, unlike S3's now-deprecated `dynamodb_table` (see this catalog's aws sibling course).
+
+<Callout title="Docs-sourced, not run-proven">
+`terraform init -backend=false` (used everywhere in this course, per this course's own harness) never validates a backend block's inner arguments at all — a bogus `dynamodb_table` on a `gcs` backend initializes "successfully" with `-backend=false` regardless, since the block is never actually parsed against the real backend schema without a real init. This entry's claims about locking are quoted directly from `developer.hashicorp.com/terraform/language/backend/gcs` (linked above) rather than reproduced with a live, credentialed `init`.
+</Callout>
+
+**Fix:**
+
+```hcl
+# entries/05-backend-locking-fixed/backend.tf
+terraform {
+  backend "gcs" {
+    bucket = "acme-tfstate"
+    prefix = "network"
+  }
+}
+```
+
+**Caught by:** nothing in `validate`/`plan` with `-backend=false` — the argument is silently accepted without ever being checked against the real backend schema. Only a real, credentialed `terraform init` (which this course never runs) or a reviewer who knows `gcs` locking needs no table at all catches this.
+
+### 6. `terraform_remote_state` pointed at a backend/path that was never applied
+
+```hcl
+# entries/06-remote-state-cross-backend/main.tf — @expect-error No stored state was found for the given workspace in the given backend.
+data "terraform_remote_state" "network" {
+  backend = "local"
+  config = {
+    path = "../does-not-exist/terraform.tfstate"
+  }
+}
+```
+
+**Symptom — real `terraform plan`:**
+
+```text
+data.terraform_remote_state.network: Reading...
+
+Planning failed. Terraform encountered an error while generating this plan.
+
+Error: Unable to find remote state
+
+  with data.terraform_remote_state.network,
+  on main.tf line 1, in data "terraform_remote_state" "network":
+   1: data "terraform_remote_state" "network" {
+
+No stored state was found for the given workspace in the given backend.
+```
+
+There is **no mock fallback** — `terraform_remote_state` hard-fails the whole plan the moment the referenced state doesn't exist yet, which is exactly the state during a first-ever `apply` of a stack another stack depends on, or after a state file gets moved to a different key/bucket without every consumer being updated.
+
+**Fix:** point `config.path`/`config.key` at a state file that has actually been applied, or replace the cross-stack read with the Terragrunt `dependency` block pattern (`mock_outputs`) covered in this course's `dependencies-between-units` lesson, which *does* have a documented offline fallback.
+
+**Caught by:** `terraform plan` — loudly, every time — but only the consumer's plan, never the producer's. If the producer stack silently changes its backend key, every consumer breaks on their next `plan`, not the producer's.
+
+## Variables
+
+### 7. `nullable = false` silently substituting the default instead of erroring
+
+```hcl
+# entries/07-nullable-false/child/variables.tf
+variable "instance_count" {
+  type     = number
+  default  = 3
+  nullable = false
+}
+```
+
+```hcl
+# entries/07-nullable-false/child/main.tf
+output "effective_count" {
+  value = var.instance_count
+}
+```
+
+```hcl
+# entries/07-nullable-false/variables.tf
+variable "override" {
+  type    = number
+  default = null
+}
+```
+
+```hcl
+# entries/07-nullable-false/main.tf
+module "child" {
+  source         = "./child"
+  instance_count = var.override
+}
+
+output "child_effective_count" {
+  value = module.child.effective_count
+}
+```
+
+**Symptom — real `terraform apply`, `var.override` is `null`:**
+
+```text
+Changes to Outputs:
+  + child_effective_count = 3
+
+Apply complete! Resources: 0 added, 0 changed, 0 destroyed.
+
+Outputs:
+
+child_effective_count = 3
+```
+
+With `nullable = false` (the default for a declared variable with no explicit `nullable` set — AI usually writes it out explicitly assuming it *rejects* null), passing an explicit `null` does not error: Terraform **silently substitutes the default**, `3`, with zero indication anything was overridden at all. Flipping the same variable to `nullable = true` and re-running proves the difference directly — the output genuinely becomes `null`:
+
+```text
+Changes to Outputs:
+  - child_effective_count = 3 -> null
+
+Apply complete! Resources: 0 added, 0 changed, 0 destroyed.
+```
+
+**Fix:** if `null` should be a real, distinguishable input, set `nullable = true` and have downstream logic branch on `var.x == null` explicitly; if `null` should genuinely be rejected, don't set `nullable = false` and rely on silent substitution — validate it:
+
+```hcl
+# entries/07-nullable-false-fixed/child/variables.tf
+variable "instance_count" {
+  type    = number
+  default = 3
+
+  validation {
+    condition     = var.instance_count != null
+    error_message = "instance_count must not be null."
+  }
+}
+```
+
+**Caught by:** nothing in `plan`/`apply` output by default — only `terraform plan` diffing the *before* value against the *after* value across a refactor, or a `validation` block written deliberately to reject `null`.
+
+### 8. An `ephemeral` variable's literal `default` leaking into `show -json`
+
+```hcl
+# entries/08-ephemeral-leak/main.tf
+variable "api_token" {
+  type      = string
+  ephemeral = true
+  default   = "shh-do-not-print-me"
+}
+
+resource "terraform_data" "example" {
+  input = "static-value"
+}
+```
+
+**Symptom — real `terraform show -json` on a saved plan:**
+
+```text
+$ terraform plan -out=plan.out && terraform show -json plan.out | jq '.variables'
+{
+  "api_token": {
+    "value": "shh-do-not-print-me"
+  }
+}
+```
+
+`ephemeral = true` (Terraform 1.10+) keeps a value out of **state**, but it does **not** keep a literal `default` out of the **saved plan file's `variables` block** — the exact JSON structure a `conftest`/OPA policy gate in CI reads (see entry 20). A default meant only as a local fallback ships straight into whatever artifact CI archives.
+
+**Fix:** never give an `ephemeral` variable a literal secret default — require it to be supplied at each run (no `default`, or an `ephemeral` resource as the real source):
+
+```hcl
+# entries/08-ephemeral-leak-fixed/main.tf
+variable "api_token" {
+  type      = string
+  ephemeral = true
+}
+
+resource "terraform_data" "example" {
+  input = "static-value"
+}
+```
+
+**Caught by:** grepping an archived `show -json` plan artifact for secret-shaped strings — `validate`/`plan` never flags this on their own.
+
+## Resources & lifecycle
+
+### 9. `prevent_destroy` on the disposable resource, not the one that matters
+
+```hcl
+# entries/09-prevent-destroy-wrong-resource/main.tf
+resource "google_storage_bucket" "scratch_logs" {
+  name     = "acme-scratch-logs"
+  location = "US"
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+resource "google_sql_database_instance" "primary" {
+  name                = "primary-db"
+  database_version    = "POSTGRES_15"
+  region              = "us-central1"
+  deletion_protection = false
+  settings {
+    tier = "db-f1-micro"
+  }
+}
+```
+
+`prevent_destroy` is a core Terraform `lifecycle` mechanism, identical across every provider — proven once, fully, with real AWS resources in this course's aws sibling: `plan -destroy` against a stack where only a disposable `aws_iam_role` carries `prevent_destroy = true` blocks *only* that role's destroy, while the real `aws_db_instance` next to it destroys with **zero resistance**. The exact same graph-level check applies to any provider's resources, including `google`.
+
+<Callout title="Docs-sourced mechanism, gcp-flavored example not independently plan-proven">
+Reproducing the destroy-plan diff itself needs a real Terraform state (from a real `apply`) or a hand-authored one — and `google` `plan`/`apply` always needs real Application Default Credentials this course never has (`terraform plan -destroy -refresh=false` against a hand-authored google state fails immediately with a real `Attempted to load application default credentials since neither credentials nor access_token was set... could not find default credentials`). `terraform validate` below confirms the `lifecycle` block placement itself is accepted; the destroy-plan *behavior* is the same core Terraform mechanism this course's aws sibling proves directly with a real, credential-free `plan -destroy`.
+</Callout>
+
+**Fix:** move `prevent_destroy` to the resource that actually needs it:
+
+```hcl
+# entries/09-prevent-destroy-wrong-resource-fixed/main.tf
+resource "google_sql_database_instance" "primary" {
+  name                = "primary-db"
+  database_version    = "POSTGRES_15"
+  region              = "us-central1"
+  deletion_protection = true
+  settings {
+    tier = "db-f1-micro"
+  }
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+```
+
+**Caught by:** a `plan -destroy`/`terraform plan` for the exact resource in question — `prevent_destroy` protects *only the resource it's declared on*, never "the important thing nearby."
+
+### 10. `count` where the list can be reordered — the index shift
+
+```hcl
+# entries/10-count-index-shift/main.tf
+variable "bucket_names" {
+  type    = list(string)
+  default = ["logs", "assets", "backups"]
+}
+
+resource "google_storage_bucket" "this" {
+  count    = length(var.bucket_names)
+  name     = "acme-${var.bucket_names[count.index]}-${count.index}"
+  location = "US"
+}
+```
+
+**Symptom — real `terraform test` with `mock_provider "google" {}`: seed three buckets with `apply`, then `plan` with the middle element (`"assets"`) removed from `bucket_names`:**
+
+```text
+  # google_storage_bucket.this[1] will be updated in-place
+  ~ resource "google_storage_bucket" "this" {
+        id                          = "wzbwjbrf"
+      ~ name                        = "acme-assets-1" -> "acme-backups-1"
+        # (13 unchanged attributes hidden)
+    }
+
+  # google_storage_bucket.this[2] will be destroyed
+  # (because index [2] is out of range for count)
+  - resource "google_storage_bucket" "this" {
+      - name = "acme-backups-2" -> null
+        # (other attributes omitted)
+    }
+```
+
+`count.index` is positional, not identity-based. Removing `"assets"` from the middle shifted `"backups"` from index 2 to index 1 — Terraform reads that as "index 1 changed from the assets bucket to the backups bucket" (a real update-in-place — `google_storage_bucket.name` is mutable in the provider's own schema even though bucket renames are not actually possible against real GCS, which is its own separate trap) and "index 2 no longer exists" (a destroy), when the human intent was simply "delete one bucket, leave the other two alone."
+
+**Fix:** key by a stable identity with `for_each`, never a position:
+
+```hcl
+# entries/10-count-index-shift-fixed/main.tf
+variable "bucket_names" {
+  type    = list(string)
+  default = ["logs", "backups"]
+}
+
+resource "google_storage_bucket" "this" {
+  for_each = toset(var.bucket_names)
+  name     = "acme-${each.value}"
+  location = "US"
+}
+```
+
+**Caught by:** `terraform plan -detailed-exitcode` on any change to a `count`-indexed list — the destroy/replace pair is visible in every plan, but only if someone actually reads the plan instead of trusting a green `apply`.
+
+### 11. `for_each` over a value only known after apply
+
+```hcl
+# entries/11-for-each-unknown/main.tf
+resource "google_service_account" "generator" {
+  account_id   = "generator"
+  display_name = "generator"
+}
+
+resource "google_project_iam_member" "per_role" {
+  for_each = toset(google_service_account.generator.disabled == true ? [] : ["roles/viewer"])
+  project  = "mock-project"
+  role     = each.value
+  member   = "serviceAccount:${google_service_account.generator.email}"
+}
+```
+
+`count` accepts a number known only after apply in some contexts; `for_each` never accepts a *set of keys* that isn't fully known at plan time — the keys are the resource's identity, and Terraform must know every resource's identity before it can compute a plan at all. This is core Terraform graph-evaluation behavior, identical for every provider — proven directly, fully, with real AWS resources in this course's aws sibling: the real, current "Invalid for_each argument" error, naming the exact computed attribute (`tags_all is a map of string, known only after apply`) that made the set unknown.
+
+<Callout title="Real mechanism, gcp-flavored example not independently plan-proven here">
+Real `google` `plan` always needs real Application Default Credentials this course never has (see entry 9), so this exact shape can't be plan-proven directly against `google`. It also can't be proven with `terraform test` + `mock_provider "google" {}` — tried directly, `mock_provider` resolves every computed attribute (including `disabled`) to a concrete, known value, which means the specific "known only after apply" failure this entry describes cannot be reproduced under a mock provider at all: `terraform test` here reports a clean pass, precisely because mocking removes the very unknown-ness this bug depends on. The graph-level rule itself — proven directly in this course's aws sibling — applies identically to `google_project_iam_member.per_role` here.
+</Callout>
+
+**Fix:** derive the `for_each` set from something known at plan time — a variable, a `locals` value, or a data source's plan-time-known attribute — never from another managed resource's computed output.
+
+**Caught by:** `terraform plan` — always, loudly, before anything gets created, against a real provider. This one never ships silently.
+
+### 12. `null_resource` where `terraform_data` (1.4+) is the built-in replacement
+
+```hcl
+# entries/12-null-resource/main.tf
+resource "null_resource" "seed" {
+  triggers = { always = timestamp() }
+  provisioner "local-exec" {
+    command = "echo seeding"
+  }
+}
+```
+
+This still `validate`s cleanly — `null_resource` isn't removed — but it depends on the separate `hashicorp/null` provider for something Terraform 1.4+ ships as a first-class, provider-free resource type: `terraform_data`, part of Terraform's own built-in `terraform.io/builtin/terraform` provider (used throughout this catalog already, entries 6, 8, 11, 17). `terraform_data` adds `input`/`output` attributes `null_resource` never had, so downstream references get a real, typed value instead of only `id`/`triggers`.
+
+**Fix:**
+
+```hcl
+# entries/12-null-resource-fixed/main.tf
+resource "terraform_data" "seed" {
+  triggers_replace = [timestamp()]
+  provisioner "local-exec" {
+    command = "echo seeding"
+  }
+}
+```
+
+**Caught by:** nothing in `validate`/`plan` — both resource types work. Only a reviewer who knows `terraform_data` removes an entire extra provider dependency (`hashicorp/null` — one more entry in `.terraform.lock.hcl`, one more plugin to download and pin) for equivalent behavior catches it.
+
+### 13. A hallucinated argument copied from a different resource type
+
+```hcl
+# entries/13-hallucinated-argument/main.tf — @expect-error An argument named "force_destroy" is not expected here.
+resource "google_compute_instance" "app" {
+  name          = "app-instance"
+  machine_type  = "e2-medium"
+  zone          = "us-central1-a"
+  force_destroy = true
+
+  boot_disk {
+    initialize_params {
+      image = "debian-cloud/debian-12"
+    }
+  }
+  network_interface {
+    network = "default"
+  }
+}
+```
+
+`force_destroy` is a real Terraform argument — on `google_storage_bucket`, for allowing a non-empty bucket to be destroyed. It does not exist on `google_compute_instance` at all. AI training data mixes lifecycle-shortcut arguments across resource types constantly.
+
+<Callout title="Not the deletion_policy myth this course's spec once assumed">
+This course's assignment brief expected `google_compute_instance` to lack a `deletion_policy` argument entirely. Checked directly against the installed `hashicorp/google` 8.4.0 provider schema, that assumption is outdated: `google_compute_instance` genuinely has both `deletion_policy` (default `"DELETE"`) and `deletion_protection` (default `false`) today. `force_destroy` — copied from `google_storage_bucket` — is the real hallucinated-argument bug on this resource; reported honestly here rather than repeating a stale claim.
+</Callout>
+
+**Symptom — real `terraform validate`:**
+
+```text
+Error: Unsupported argument
+
+  on main.tf line 5, in resource "google_compute_instance" "app":
+   5:   force_destroy = true
+
+An argument named "force_destroy" is not expected here.
+```
+
+**Fix:** remove the hallucinated argument — `google_compute_instance` has no bucket-style force-destroy concept; the closest real safety valve is `deletion_protection`:
+
+```hcl
+# entries/13-hallucinated-argument-fixed/main.tf
+resource "google_compute_instance" "app" {
+  name                = "app-instance"
+  machine_type        = "e2-medium"
+  zone                = "us-central1-a"
+  deletion_protection = true
+
+  boot_disk {
+    initialize_params {
+      image = "debian-cloud/debian-12"
+    }
+  }
+  network_interface {
+    network = "default"
+  }
+}
+```
+
+**Caught by:** `terraform validate` — this one is always loud, immediately, at plan time. The dangerous version of this pattern is entries 2/9, where the wrong-but-real argument doesn't error at all.
+
+## Modules
+
+### 14. A module `source` with no `?ref=`
+
+```hcl
+# not a real path — a git clone against a live, network-reachable repo is out of scope for this offline harness; see the callout below
+module "vpc" {
+  source = "git::https://example.com/vpc.git"
+}
+```
+
+Per the [module sources docs](https://developer.hashicorp.com/terraform/language/modules/sources#selecting-a-revision): "You can add the `ref` query parameter to the location specified in the `source` argument to reference any value supported by the `git checkout` command, such as a branch, SHA-1 hash, or tag." Without it: "Terraform clones and uses the default branch referenced by `HEAD`" — meaning the *exact same configuration*, re-initialized on two different days, can silently pull two different commits of the module.
+
+<Callout title="Docs-sourced, not run-proven">
+Cloning a real, network-reachable git module is outside this offline harness's scope (and outside this course's "no external state beyond the public Terraform registry" rule). The quotes above are taken directly from `developer.hashicorp.com/terraform/language/modules/sources` (linked above).
+</Callout>
+
+**Fix:**
+
+```hcl
+# not a real path — same reason as above
+module "vpc" {
+  source = "git::https://example.com/vpc.git?ref=v1.4.0"
+}
+```
+
+**Caught by:** nothing in `validate`/`plan` — both resolve successfully. `.terraform.lock.hcl` records provider hashes, never module source revisions, so there is no built-in drift detector for this one at all; only a pinned tag/SHA and a human review of the `ref=` value catch it.
+
+### 15. `depends_on` added to paper over a real reference cycle
+
+```hcl
+# entries/15-depends-on-hides-cycle/main.tf — @expect-error Error: Cycle
+resource "terraform_data" "a" {
+  input = terraform_data.b.output
+}
+
+resource "terraform_data" "b" {
+  input = terraform_data.a.output
+}
+```
+
+**Symptom — real `terraform validate`:**
+
+```text
+Error: Cycle:
+  terraform_data.a
+  terraform_data.b
+```
+
+Adding an explicit `depends_on` to either resource, hoping to "force" an order, does not fix this — a `depends_on` only adds an *additional* ordering constraint on top of the graph Terraform builds from real attribute references; it cannot remove the cycle those references themselves create. The correct fix is to break the actual reference loop, not to paper over the graph error with an ordering hint.
+
+**Fix:** break the cycle by giving both sides an independent, non-circular source of truth:
+
+```hcl
+# entries/15-depends-on-hides-cycle-fixed/main.tf
+locals {
+  shared_seed = "2024-01-shared"
+}
+
+resource "terraform_data" "a" {
+  input = local.shared_seed
+}
+
+resource "terraform_data" "b" {
+  input = local.shared_seed
+}
+```
+
+**Caught by:** `terraform validate` — always, immediately, and no `depends_on` can suppress it. The real risk is the time an AI assistant spends adding `depends_on` blocks trying to fix an error whose actual cause is a genuine circular reference.
+
+## Terragrunt
+
+### 16. `run-all`/`plan-all` — removed in the 1.1 CLI redesign
+
+```text
+$ terragrunt plan-all --working-dir live/dev/vpc
+ERROR unknown command: "plan-all". Terragrunt no longer forwards unknown commands by default. Use 'terragrunt run -- plan-all ...' or a supported shortcut. Learn more: https://docs.terragrunt.com/migrate/cli-redesign/#use-the-new-run-command
+
+$ terragrunt run-all plan --working-dir .
+ERROR unknown command: "run-all". Terragrunt no longer forwards unknown commands by default. Use 'terragrunt run -- run-all ...' or a supported shortcut. Learn more: https://docs.terragrunt.com/migrate/cli-redesign/#use-the-new-run-command
+```
+
+Both commands are all over pre-1.1 tutorials and therefore all over AI training data. Terragrunt 1.1's CLI redesign replaced them.
+
+**Fix — the real, current command, run for real against a two-unit tree:**
+
+```hcl
+# entries/16-run-all-removed/root.hcl
+remote_state {
+  backend  = "local"
+  generate = { path = "backend.tf", if_exists = "overwrite" }
+  config   = { path = "${get_terragrunt_dir()}/terraform.tfstate" }
+}
+```
+
+```hcl
+# entries/16-run-all-removed/modules/vpc/main.tf
+variable "cidr" {
+  type    = string
+  default = "10.0.0.0/16"
+}
+resource "terraform_data" "vpc" {
+  input = var.cidr
+}
+```
+
+```hcl
+# entries/16-run-all-removed/live/dev/vpc/terragrunt.hcl
+include "root" {
+  path = find_in_parent_folders("root.hcl")
+}
+
+terraform {
+  source = "${get_terragrunt_dir()}/../../../modules/vpc"
+}
+```
+
+```text
+$ terragrunt run --all plan --working-dir .
+[live/dev/vpc] terraform: Plan: 1 to add, 0 to change, 0 to destroy.
+
+❯❯ Run Summary  1 units  56ms
+   Succeeded    1
+```
+
+**Caught by:** immediately, every time — Terragrunt refuses to even start. Never ships silently.
+
+### 17. The same `terragrunt.hcl` copy-pasted from `dev` into `prod`, inputs untouched
+
+```hcl
+# entries/17-hardcoded-account-copy/live/dev/vpc/terragrunt.hcl
+terraform {
+  source = "${get_terragrunt_dir()}/../../../modules/vpc"
+}
+
+inputs = {
+  account_id = "111111111111"
+  region     = "us-east-1"
+}
+```
+
+```hcl
+# entries/17-hardcoded-account-copy/live/prod/vpc/terragrunt.hcl
+terraform {
+  source = "${get_terragrunt_dir()}/../../../modules/vpc"
+}
+
+inputs = {
+  account_id = "111111111111"
+  region     = "us-east-1"
+}
+```
+
+**Symptom — real, reproduced locally:**
+
+```text
+$ terragrunt hcl validate --working-dir live/prod/vpc
+(no output — both files are syntactically valid HCL)
+
+$ diff live/dev/vpc/terragrunt.hcl live/prod/vpc/terragrunt.hcl
+(no output — the files are byte-identical)
+```
+
+Nothing about this is invalid HCL. `prod/vpc` deploys against **dev's AWS account, silently** — `terragrunt hcl validate` has no way to know `account_id = "111111111111"` under `live/prod/` is wrong, because there is nothing in the file that says which account is "correct" for that path.
+
+**Fix:** derive `account_id`/`region` from the directory path itself, so `dev` and `prod` genuinely cannot share a value by copy-paste:
+
+```hcl
+# entries/17-hardcoded-account-copy-fixed/live/prod/env.hcl
+locals {
+  account_id = "222222222222"
+  region     = "us-east-1"
+}
+```
+
+```hcl
+# entries/17-hardcoded-account-copy-fixed/live/prod/vpc/terragrunt.hcl
+locals {
+  env_vars = read_terragrunt_config(find_in_parent_folders("env.hcl"))
+}
+
+terraform {
+  source = "${get_terragrunt_dir()}/../../../modules/vpc"
+}
+
+inputs = {
+  account_id = local.env_vars.locals.account_id
+  region     = local.env_vars.locals.region
+}
+```
+
+**Caught by:** nothing automatic — `hcl validate`/`hcl format --check` both pass. Only a real `terragrunt run --all plan` per environment, diffed by a human who knows which account each environment should target, catches a copy-paste this clean.
+
+## CI & policy
+
+### 18. `-auto-approve` in a CI pipeline
+
+**Symptom — real, side by side:**
+
+```text
+$ terraform apply
+Do you want to perform these actions?
+  Terraform will perform the actions described above.
+  Only 'yes' will be accepted to approve.
+  Enter a value: no
+Apply cancelled.
+
+$ terraform apply -auto-approve
+terraform_data.release: Creating...
+terraform_data.release: Creation complete after 0s [id=bb8b46af-eb1e-0b33-104a-b4b39a2559a6]
+Apply complete! Resources: 1 added, 0 changed, 0 destroyed.
+```
+
+`-auto-approve` doesn't just skip a prompt CI can't answer anyway — it removes the last point where a human (or a policy gate reading the *exact plan about to be applied*) can stop a destructive change. The right replacement is a separate `plan -out=tfplan` step, a policy check (entry 20) or human approval gate against that saved plan, then `apply tfplan` — never `apply -auto-approve` against a fresh, unreviewed plan.
+
+**Fix:**
+
+```yaml
+# .github/workflows/terraform.yml (fragment, not a collected fence)
+- run: terraform plan -out=tfplan -detailed-exitcode
+- run: conftest test --policy policy $(terraform show -json tfplan | tee plan.json | true)
+- run: terraform apply tfplan   # applies the reviewed plan file, not a fresh -auto-approve
+```
+
+**Caught by:** a pipeline review, never `validate`/`plan` — both flags are valid CLI usage.
+
+### 19. `checkov-action@master` — a mutable tag treated as pinned
+
+```yaml
+# .github/workflows/checkov.yml (fragment, not a collected fence)
+- uses: bridgecrewio/checkov-action@master
+  with:
+    directory: .
+```
+
+Per [GitHub's own hardening guide](https://docs.github.com/en/actions/security-for-github-actions/security-guides/security-hardening-for-github-actions#using-third-party-actions): "Pinning an action to a full-length commit SHA is currently the only way to use an action as an immutable release." `@master` (or `@main`, `@v1`) is a **branch reference** — it can point at a different commit tomorrow than it does today, with no diff in this repository's own history to review. GitHub's rationale, quoted directly: a bad actor compromising the action's repository would need "a SHA-1 collision for a valid Git object payload" to defeat a pinned SHA — computationally infeasible — while a mutable tag or branch can simply be moved.
+
+<Callout title="Docs-sourced, not run-proven">
+Proving version drift would require the upstream action's maintainers to actually push a new commit to `master` during this session, which isn't something to wait on. The recommendation above is quoted directly from `docs.github.com` (linked).
+</Callout>
+
+**Fix:**
+
+```yaml
+# .github/workflows/checkov.yml (fragment, not a collected fence)
+- uses: bridgecrewio/checkov-action@c98096a34955fc70f684e0c1ce43b4e1b2ea3f9  # v12.2919.0
+  with:
+    directory: .
+```
+
+**Caught by:** nothing in CI's own output — the workflow runs identically either way, until the day it doesn't. Only a dependency-pinning linter (`zizmor`, GitHub's own Dependabot version-pinning nudge) or manual review catches it.
+
+### 20. Pre-v1 Rego (`deny[msg] { ... }`) silently fails to load under OPA v1
+
+```rego
+# entries/20-rego-v1/policy/deny_no_labels.rego — @expect-error rego_parse_error: `if` keyword is required before rule body
+package main
+
+deny[msg] {
+  resource := input.resource_changes[_]
+  resource.type == "terraform_data"
+  msg := sprintf("%s must set labels for cost allocation", [resource.address])
+}
+```
+
+**Symptom — real `conftest test`, current `openpolicyagent/conftest`, which defaults to Rego v1 syntax, against a real `terraform show -json` plan (a `google`-provider config's plan for a `terraform_data` marker resource — real `google` plans need real Application Default Credentials this course never has, see entry 9, so the policy target here is the same provider-agnostic `terraform_data` resource used throughout this catalog):**
+
+```text
+Error: running test: load: loading policies: load: 2 errors occurred during loading:
+policy/deny_no_labels.rego:3: rego_parse_error: `if` keyword is required before rule body
+policy/deny_no_labels.rego:3: rego_parse_error: `contains` keyword is required for partial set rules
+```
+
+The bracket-set rule shape (`deny[msg] { ... }`) that fills years of Rego tutorials AI training data draws from is exactly what OPA v1 (the default since OPA 1.0 / current `conftest`) rejects outright — `deny` becomes a *policy fails to load at all* error, not merely a rule that never fires.
+
+**Fix — real v1 syntax, same policy, run against the real plan:**
+
+```rego
+# entries/20-rego-v1-fixed/policy/deny_no_labels.rego
+package main
+
+import rego.v1
+
+deny contains msg if {
+  resource := input.resource_changes[_]
+  resource.type == "terraform_data"
+  msg := sprintf("%s must set labels for cost allocation", [resource.address])
+}
+```
+
+```text
+$ docker run --rm -v "$(pwd)":/project openpolicyagent/conftest test --policy policy plan.json
+FAIL - plan.json - main - terraform_data.app_marker must set labels for cost allocation
+
+1 test, 0 passed, 0 warnings, 1 failure, 0 exceptions
+```
+
+**Caught by:** `conftest test` itself, real and immediate — but as a load error that can look like a CI/tooling problem rather than what it actually is: outdated policy syntax.
+
+### 21. A tflint rule check that genuinely does not exist for this resource type — and, unlike some rulesets, is caught immediately
+
+```hcl
+# entries/21-invented-rule-id/.tflint.hcl — @expect-error Rule not found: google_compute_instance_invalid_zone
+plugin "google" {
+  enabled = true
+  version = "0.30.0"
+  source  = "github.com/terraform-linters/tflint-ruleset-google"
+}
+
+rule "google_compute_instance_invalid_zone" {
+  enabled = true
+}
+```
+
+The real `tflint-ruleset-google` rule catalog (confirmed against `github.com/terraform-linters/tflint-ruleset-google/tree/master/docs/rules`) has exactly **six** rules total, every one of them an `_invalid_member` check on IAM resources (`google_project_iam_member_invalid_member`, `google_project_iam_binding_invalid_member`, and similar) — there is no zone-validation rule of any kind, for any resource. AI assistants pattern-match the `aws_instance_previous_type`-style per-resource rule naming from other clouds' much larger rulesets and hallucinate an equivalent that this small, IAM-focused ruleset was never built to offer.
+
+**Symptom — real, reproduced with the pinned `ghcr.io/terraform-linters/tflint` image:**
+
+```text
+$ docker run --rm -v "$(pwd)":/data -v <plugin-cache>:/root/.tflint.d -w /data ghcr.io/terraform-linters/tflint
+Failed to check rule config; Rule not found: google_compute_instance_invalid_zone
+```
+
+Unlike this catalog's aws sibling entry (where an invented `aws_instance_invalid_type` rule is silently never applied, with tflint reporting a clean run), the `google` ruleset plugin validates rule names strictly at startup and refuses to run at all — a real, immediate, loud failure. Whether an invented rule name is caught at all depends entirely on the specific ruleset plugin's own implementation, not on tflint itself.
+
+**Fix:** there is no real per-zone tflint rule to enable for `google_compute_instance` — remove the invented rule and rely on `terraform validate`/a custom Sentinel or OPA policy (entry 20) for zone-shaped checks this ruleset doesn't cover:
+
+```hcl
+# entries/21-invented-rule-id-fixed/.tflint.hcl
+plugin "google" {
+  enabled = true
+  version = "0.30.0"
+  source  = "github.com/terraform-linters/tflint-ruleset-google"
+}
+```
+
+**Caught by:** `tflint` itself, immediately, in this specific ruleset — the opposite lesson from this catalog's aws sibling entry, and proof that "tflint will catch an invented rule name" cannot be assumed as a blanket rule across every cloud's ruleset plugin.
+
+## Secrets
+
+### 22. `terraform.tfvars` with a real secret, committed
+
+```hcl
+# entries/22-tfvars-secret-committed/terraform.tfvars
+db_password = "Sup3rSecret!2024"
+api_token   = "ghp_1234567890abcdefghijklmnopqrstuvwxyz"
+```
+
+```text
+# entries/22-tfvars-secret-committed/.gitignore
+.terraform/
+*.tfstate
+```
+
+`*.tfvars` isn't in `.gitignore` at all — a generic Terraform `.gitignore` template (see entry 4) protects state and the provider cache, but plenty of real-world templates never mention `.tfvars`, because `*.tfvars.example`/checked-in *non-secret* `.tfvars` files are a completely legitimate, common pattern. AI assistants generating a `.gitignore` from a generic prompt reproduce that same gap.
+
+**Fix:**
+
+```text
+# entries/22-tfvars-secret-committed-fixed/.gitignore
+.terraform/
+*.tfstate
+*.tfvars
+!*.tfvars.example
+```
+
+...plus moving the actual secret out of any file at all — an environment variable (`TF_VAR_db_password`), a secrets manager reference, or a write-only argument (entry 23) — because a `.gitignore` fix after the fact does not remove the secret from git history already committed.
+
+**Caught by:** `git log -p -- '*.tfvars'` on an existing repo, or a pre-commit secret scanner (`gitleaks`, `trufflehog`) — never `validate`/`plan`, which don't inspect `.gitignore` at all.
+
+### 23. `sensitive = true` hides the CLI, not the state file
+
+```hcl
+# entries/23-sensitive-state-plaintext/main.tf
+resource "random_password" "db" {
+  length  = 16
+  special = false
+}
+
+output "db_password" {
+  value     = random_password.db.result
+  sensitive = true
+}
+```
+
+**Symptom — real, side by side:**
+
+```text
+$ terraform apply -auto-approve
+Outputs:
+db_password = <sensitive>
+
+$ grep -A1 '"result"' terraform.tfstate
+            "result": "QxDS75iFGBWDNsqc",
+```
+
+`sensitive = true` redacts the CLI output and `terraform show` by default — it does **not** encrypt or omit the value from `terraform.tfstate` on disk. Anyone with read access to the state file (local disk, a GCS bucket without strict IAM, a CI log artifact that happens to `cat` the state) reads the real password in plaintext, "sensitive" label or not. `random_password` has no write-only argument to avoid this — but `google_sql_database_instance` does: `root_password_wo` + `root_password_wo_version`, confirmed directly against the installed `hashicorp/google` 8.4.0 provider schema, which never gets written to state at all.
+
+**Fix:** for values that genuinely never need to persist in state, use a write-only argument where the target resource supports one, and treat `sensitive = true` as a CLI-output control only — never as the security boundary:
+
+```hcl
+# entries/23-sensitive-state-plaintext-fixed/main.tf
+resource "random_password" "db" {
+  length  = 16
+  special = false
+}
+
+resource "google_sql_database_instance" "primary" {
+  name                     = "primary-db"
+  database_version         = "POSTGRES_15"
+  region                   = "us-central1"
+  root_password_wo         = random_password.db.result
+  root_password_wo_version = 1
+  settings {
+    tier = "db-f1-micro"
+  }
+}
+```
+
+**Caught by:** `grep` on a raw `terraform.tfstate`/`terraform show -json` — never the CLI's own redacted output, which is exactly what makes this pattern easy to trust wrongly.
+
+<Callout title="What actually gets caught, and when">
+Of these 23 entries, only 6 — 3 (module + count/for_each), 6 (remote_state), 11 (for_each on unknown), 13 (hallucinated argument), 15 (cycle), and 16 (removed Terragrunt commands) — are rejected outright by `validate`/`plan`/`terragrunt`. Two more (2, 20) surface as warnings or load errors that are easy to miss if CI only checks the exit code. The remaining 15 are schema-valid, plan-clean configuration that is simply wrong — caught only by review, a policy gate, or a git-history scan, never by the tool itself.
+</Callout>
+
+export const quizAiBugCatalog = [
+  {
+    q: "Why does entry 3's `provider` block inside a module validate fine on its own, and only fail once `count = 2` is added to the module call?",
+    options: [
+      "It's a Terraform bug that only sometimes triggers",
+      "A module with its own local provider configuration is valid Terraform right up until a caller needs count/for_each/depends_on — at that point Terraform cannot know which provider configuration each instance should use, so it refuses the whole plan",
+      "count always requires a provider block inside the module",
+      "The error only appears in Terraform versions older than 1.16",
+    ],
+    answer: 1,
+    explain: "Proven directly: `terraform validate` on the module alone (no count) succeeds; adding `count = 2` to the exact same module call produces the real 'Module is incompatible with count, for_each, and depends_on' error.",
+  },
+  {
+    q: "```text\n$ terraform apply -auto-approve\nChanges to Outputs:\n  + child_effective_count = 3\n```\nGiven `var.override = null` passed into a `nullable = false` variable with `default = 3`, what does this real output prove?",
+    options: [
+      "That passing null always raises an error",
+      "That nullable = false silently substitutes the variable's default for an explicit null, with no error and no visible sign an override was even attempted",
+      "That nullable has no effect on module variables",
+      "That the child module ignored the input entirely",
+    ],
+    answer: 1,
+    explain: "Proven directly: flipping the same variable to nullable = true and re-running the identical apply changes the output to null instead of 3 — confirming nullable = false is what caused the silent substitution.",
+  },
+  {
+    q: "Why does entry 9 move `lifecycle { prevent_destroy = true }` from `google_storage_bucket.scratch_logs` to `google_sql_database_instance.primary` rather than just adding it to both?",
+    options: [
+      "Terraform only allows prevent_destroy on one resource per file",
+      "prevent_destroy protects only the exact resource it's declared on — the same graph-level check proven with a real plan -destroy in this course's aws sibling, where it blocked a disposable IAM role but let the real database destroy with zero resistance until prevent_destroy was added to it specifically",
+      "google_storage_bucket doesn't support lifecycle blocks",
+      "Adding it to both resources would create a cycle",
+    ],
+    answer: 1,
+    explain: "The mechanism is core Terraform, identical for every provider: proven with two real plan -destroy runs in this course's aws sibling, prevent_destroy on a disposable resource left 'Plan: 0 to add, 0 to change, 2 to destroy' unblocked for the real database sitting next to it — only the protected resource's own destroy was blocked.",
+  },
+  {
+    q: "Entry 20's pre-v1 Rego (`deny[msg] { ... }`) and entry 21's invented tflint rule (`google_compute_instance_invalid_zone`) both represent broken policy checks — but they fail differently here. How?",
+    options: [
+      "Both fail identically, with a clear 'rule not found' error",
+      "The Rego policy fails to LOAD at all (a real, loud parse error every run) — the invented tflint rule is ALSO caught immediately here, with a real 'Rule not found' error, unlike this catalog's aws sibling entry where an invented rule name is silently never applied",
+      "Neither one actually fails in any way",
+      "The Rego policy is silently ignored while tflint always crashes",
+    ],
+    answer: 1,
+    explain: "Proven with real runs: conftest's real output is 'rego_parse_error: `if` keyword is required before rule body' — loud and immediate. The real tflint run here (google ruleset) produced 'Failed to check rule config; Rule not found: google_compute_instance_invalid_zone' — also loud and immediate, in contrast to the aws ruleset's silent behavior proven in the aws sibling course.",
+  },
+  {
+    q: "Why does entry 23 say `sensitive = true` is not a security boundary, given it does redact `db_password` from the real `terraform apply` output shown?",
+    options: [
+      "sensitive = true doesn't actually redact anything",
+      "It only controls CLI/UI display — the real terraform.tfstate on disk was proven to contain the password in plaintext ('\"result\": \"QxDS75iFGBWDNsqc\"') regardless of the sensitive label",
+      "sensitive = true encrypts the state file automatically",
+      "The password shown in state was a different, unrelated value",
+    ],
+    answer: 1,
+    explain: "Proven directly: the same apply that printed 'db_password = <sensitive>' to the CLI left the real, unredacted password readable with a plain grep against terraform.tfstate on disk.",
+  },
+];
+
+<Quiz client:visible id="reading-terraform/ai-bug-catalog" questions={quizAiBugCatalog} />
+
+<ProgressTracker client:visible id="reading-terraform/ai-bug-catalog" />
