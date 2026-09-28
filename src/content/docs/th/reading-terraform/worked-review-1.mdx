@@ -1,0 +1,762 @@
+---
+title: 'Worked review 1: network + compute module'
+description: 'โมดูล VPC + subnets + firewall + Compute Engine instance ที่ AI สร้าง และ root ที่เรียกใช้มัน รีวิวทีละ bug เทียบกับ terraform init/validate จริง และ terraform test จริงด้วย mock_provider'
+sidebar:
+  order: 4
+---
+
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import Mermaid from '../../../../components/Mermaid.astro';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
+
+## Feature ที่ต้องทำ
+
+Prompt คือ: *"เขียน Terraform module ที่ reuse ได้สำหรับ VPC พร้อม subnets, firewall rule, และ Compute Engine instance แล้วเรียกใช้ครั้งละหนึ่ง environment"* สิ่งที่ตามมาคือ draft แรกแบบที่ AI assistant ส่งกลับมาให้กับ prompt แบบนี้พอดี — ทุก block ดูสมเหตุสมผลเป็น HCL รายตัว resource type เป็นของจริง ชื่อ argument ส่วนใหญ่ก็เป็นของจริง อ่านตามที่ **[review checklist](/terraform-gcp/th/reading-terraform/review-checklist/)** แนะนำ: provider และ version ก่อน แล้วตามด้วย backend แล้วค่อย resources กับ lifecycle แล้วจึงถึงขอบเขตของ module เอง มี **bug จริง 9 ข้อ**; ดู **[AI bug catalog](/terraform-gcp/th/reading-terraform/ai-bug-catalog/)** สำหรับ pattern ทั่วไปเบื้องหลังแต่ละข้อ ทุกข้อที่กล่าวถึงด้านล่างพิสูจน์ด้วย `terraform init`/`validate`/`test` จริง กับ Terraform 1.16.4 และ `hashicorp/google` 8.4.0 ส่วน `terraform plan` จริงกับ provider นี้ต้องมี Application Default Credentials ที่คอร์สนี้ไม่มีเลย — พิสูจน์ตรงด้านล่างนี้เอง — ดังนั้น bug ที่ review ฝั่ง AWS พิสูจน์ด้วย `plan` จะพิสูจน์ที่นี่ด้วย `terraform test` และ `mock_provider "google" {}` แทน เหมือนที่ review ฝั่ง azurerm ทำเช่นกัน
+
+## โค้ดที่ AI สร้าง
+
+```hcl
+# network+compute module, as generated -- modules/network-compute/main.tf
+provider "google" {
+  project = "test-project"
+}
+
+resource "google_compute_network" "this" {
+  name                    = "${var.name}-vpc"
+  auto_create_subnetworks = false
+}
+
+resource "google_compute_subnetwork" "this" {
+  count         = length(var.subnet_names)
+  name          = var.subnet_names[count.index]
+  network       = google_compute_network.this.id
+  ip_cidr_range = cidrsubnet(count.index, var.subnet_newbits, var.vpc_cidr)
+  region        = var.region
+}
+
+resource "google_compute_firewall" "web" {
+  name           = "${var.name}-allow-https"
+  network        = google_compute_network.this.name
+  enable_logging = true
+
+  allow {
+    protocol = "tcp"
+    ports    = ["443"]
+  }
+
+  source_ranges = ["0.0.0.0/0"]
+}
+
+resource "google_compute_instance" "app" {
+  name         = "${var.name}-app"
+  machine_type = var.machine_type
+  zone         = var.zone
+
+  boot_disk {
+    initialize_params {
+      image = "debian-cloud/debian-12"
+    }
+  }
+}
+```
+
+```hcl
+# network+compute module, as generated -- modules/network-compute/variables.tf and outputs.tf
+variable "name" { type = string }
+variable "region" {
+  type    = string
+  default = "us-central1"
+}
+variable "zone" {
+  type    = string
+  default = "us-central1-a"
+}
+variable "vpc_cidr" {
+  type    = string
+  default = "10.0.0.0/16"
+}
+variable "subnet_newbits" {
+  type    = number
+  default = 4
+}
+variable "subnet_names" { type = list(string) }
+variable "machine_type" {
+  type    = string
+  default = "e2-micro"
+}
+
+output "network_self_link" {
+  value = google_compute_network.this.self_link
+}
+output "subnet_ids" {
+  value = google_compute_subnetwork.this[*].id
+}
+output "firewall_id" {
+  value = google_compute_firewall.web.id
+}
+output "instance_id" {
+  value = google_compute_instance.app.id
+}
+```
+
+```hcl
+# network+compute module, as generated -- root main.tf, variables.tf, outputs.tf
+terraform {
+  required_providers {
+    google = { source = "hashicorp/google", version = ">= 8.0" }
+  }
+}
+
+provider "google" {
+  project = "test-project-hardcoded"
+}
+
+variable "project" {
+  type    = string
+  default = "test-project-hardcoded"
+}
+variable "environments" {
+  type    = list(string)
+  default = ["dev", "staging"]
+}
+
+module "app" {
+  source = "./modules/network-compute"
+  count  = length(var.environments)
+
+  name         = var.environments[count.index]
+  subnet_names = ["web", "app"]
+}
+
+output "network_ids" {
+  value = [for m in module.app : m.network_id]
+}
+output "instance_ids" {
+  value = [for m in module.app : m.instance_id]
+}
+```
+
+## เดินรีวิวทีละ bug
+
+### Module: `provider` block อยู่ใน module ที่ reuse ได้ เรียกด้วย `count`
+
+```hcl
+# entries/01-provider-in-module/modules/network-compute/main.tf
+provider "google" {
+  project = "test-project"
+}
+```
+
+```hcl
+# entries/01-provider-in-module/main.tf -- @expect-error Module is incompatible with count, for_each, and depends_on
+module "app" {
+  source = "./modules/network-compute"
+  count  = length(var.environments)
+}
+```
+
+**อาการ — จริง ตอน `terraform init` (พังตอน install module ก่อน `validate` จะรันด้วยซ้ำ):**
+
+```text
+$ terraform init -backend=false
+Initializing modules...
+- app in modules/network-compute
+
+Error: Module is incompatible with count, for_each, and depends_on
+
+  on main.tf line 13, in module "app":
+  13:   count  = length(var.environments)
+
+The module at module.app is a legacy module which contains its own local
+provider configurations, and so calls to it may not use the count, for_each,
+or depends_on arguments.
+
+If you also control the module "./modules/network-compute", consider updating
+this module to instead expect provider configurations to be passed by its
+caller.
+```
+
+<SpotTheBug code={`resource "google_compute_instance" "app" {
+  # ...
+}
+
+module "app" {
+  source = "./modules/network-compute"
+  count  = length(var.environments)
+}`}>
+bug ประเภทเดียวกับ entry 1 ของ review ฝั่ง AWS และ azurerm ไม่ขึ้นกับ provider เลย — Terraform core ปฏิเสธ `count`/`for_each`/`depends_on` บนการเรียก module ใดๆ ที่ module เองมี `provider` block ของตัวเอง ไม่ว่า provider นั้นจะเล็งไป cloud ไหน วิธีแก้: ลบ `provider` block ออกจาก module ทั้งหมด แล้วให้ provider configuration ระดับ root ของ caller เอง apply กับทุก resource ข้างใน
+</SpotTheBug>
+
+### Module: เรียก `cidrsubnet()` สลับลำดับ argument
+
+```hcl
+# excerpt, as generated -- entries/02-cidrsubnet-swapped/main.tf
+resource "google_compute_subnetwork" "this" {
+  count         = length(var.subnet_names)
+  ip_cidr_range = cidrsubnet(count.index, var.subnet_newbits, var.vpc_cidr)
+}
+```
+
+สลับแบบเดียวกับ review ทั้งสองฝั่ง: `cidrsubnet(prefix, newbits, netnum)` ต้องการ CIDR string มาก่อนแล้ว index มาท้ายสุด อันนี้สลับกัน
+
+**อาการ:** `terraform validate` ผ่าน — `count.index` แปลงชนิดเป็น string ได้โดยไม่มีปัญหา `plan` จริงกับ `google` ต้องมี Application Default Credentials ที่คอร์สนี้ไม่มีเลย ความพังเลยพิสูจน์ด้วย `terraform test` จริงที่ใช้ `mock_provider "google" {}` และ `command = plan` แทน ซึ่งประเมิน function call เดียวกันแบบ offline เต็มรูปแบบ:
+
+```text
+$ terraform test
+  run "cidrsubnet_args_swapped"... fail
+
+Error: Invalid function argument
+
+  on modules/nc/main.tf line 11, in resource "google_compute_subnetwork" "this":
+  11:   ip_cidr_range = cidrsubnet(count.index, var.subnet_newbits, var.vpc_cidr)
+    ├────────────────
+    │ var.vpc_cidr is "10.0.0.0/16"
+
+Invalid value for "netnum" parameter: a number is required.
+```
+
+<SpotTheBug code={`ip_cidr_range = cidrsubnet(count.index, var.subnet_newbits, var.vpc_cidr)`}>
+mechanics เดียวกับ entry 2 ของ review ทั้งสองฝั่ง — `cidrsubnet` เป็นฟังก์ชัน core ของ Terraform ไม่ใช่ฟังก์ชันเฉพาะ `google` กับดักลำดับ argument นี้เลยใช้ได้กับการแบ่ง subnet ของ cloud ไหนก็ได้เหมือนกัน วิธีแก้: `cidrsubnet(var.vpc_cidr, var.subnet_newbits, count.index)`
+</SpotTheBug>
+
+### Module → root: output อ้าง attribute ที่ module ไม่เคย export
+
+```hcl
+# entries/03-wrong-output-attr/outputs.tf -- @expect-error This object does not have an attribute named "network_id"
+output "network_ids" {
+  value = [for m in module.app : m.network_id]
+}
+```
+
+`outputs.tf` ของ module เองมีแค่ `network_self_link`, `subnet_ids`, `firewall_id`, และ `instance_id` — ไม่เคยมี `network_id` เปล่าๆ
+
+**อาการ — `terraform test` จริง, `mock_provider "google" {}`, `command = apply`, หลังแก้ bug ด้านบนแล้ว:**
+
+```text
+$ terraform test
+  run "wrong_output_attr"... fail
+
+Error: Unsupported attribute
+
+  on outputs.tf line 2, in output "network_ids":
+   2:   value = [for m in module.app : m.network_id]
+
+This object does not have an attribute named "network_id".
+```
+
+<SpotTheBug code={`output "network_ids" {
+  value = [for m in module.app : m.network_id]
+}`}>
+รูปแบบเดียวกับ entry 3 ของ review ทั้งสองฝั่ง — module ถูกสั่งให้ export แค่ `self_link` ของ network ไม่เคยมี ID เปล่าๆ วิธีแก้: เพิ่ม `output "network_id" { value = google_compute_network.this.id }` จริงเข้าไปใน module แล้วอ่าน `m.network_id` จาก root ตอนนี้ที่มันมีอยู่จริงแล้ว
+</SpotTheBug>
+
+### Resources: `google_compute_instance` ที่ไม่มี `network_interface` block เลย
+
+```hcl
+# entries/04-missing-network-interface/main.tf -- @expect-error At least 1 "network_interface" blocks are required.
+resource "google_compute_instance" "app" {
+  name         = "app"
+  machine_type = "e2-micro"
+  zone         = "us-central1-a"
+
+  boot_disk {
+    initialize_params {
+      image = "debian-cloud/debian-12"
+    }
+  }
+}
+```
+
+**อาการ — `terraform validate` จริง:**
+
+```text
+Error: Insufficient network_interface blocks
+
+  on main.tf line 10, in resource "google_compute_instance" "app":
+  10: resource "google_compute_instance" "app" {
+
+At least 1 "network_interface" blocks are required.
+```
+
+<SpotTheBug code={`resource "google_compute_instance" "app" {
+  boot_disk { initialize_params { image = "debian-cloud/debian-12" } }
+  # no network_interface block at all
+}`}>
+ต่างจาก review ฝั่ง AWS ที่การขาดหายรูปแบบคล้ายกัน (ไม่ตั้ง `subnet_id`/security group) validate ผ่านสะอาดแล้วค่อยพังทีหลัง schema ของ `google_compute_instance` เองประกาศให้ `network_interface` ต้องมีอย่างน้อย 1 block — schema ของ provider เองปฏิเสธการขาดหายนี้ทันที ทุกครั้ง ไม่มีความกำกวมเลยว่า resource หรือ field ไหนผิด วิธีแก้: เพิ่ม `network_interface { network = ... }` อย่างน้อยหนึ่ง block
+</SpotTheBug>
+
+### Resources: `google_compute_firewall.enable_logging` — deprecated แล้ว หันไปใช้ `log_config` แทน
+
+```hcl
+# entries/05-deprecated-enable-logging/main.tf
+resource "google_compute_network" "vpc" {
+  name                    = "test-vpc"
+  auto_create_subnetworks = false
+}
+
+resource "google_compute_firewall" "web" {
+  name           = "allow-https"
+  network        = google_compute_network.vpc.name
+  enable_logging = true
+
+  allow {
+    protocol = "tcp"
+    ports    = ["443"]
+  }
+}
+```
+
+**อาการ — `terraform validate` จริง (deprecation ระดับ attribute พิสูจน์ว่ารอดผ่าน module call ได้เหมือน entry 2 ของ review ฝั่ง AWS เป๊ะ ต่างจากกรณี `network_interface` ระดับ block ของ review ฝั่ง azurerm):**
+
+```text
+Warning: Argument is deprecated
+
+  with module.app.google_compute_firewall.web,
+  on modules/network-compute/main.tf line 18, in resource "google_compute_firewall" "web":
+  18:   enable_logging = true
+
+Deprecated in favor of log_config
+```
+
+<SpotTheBug code={`enable_logging = true`}>
+bug ประเภทเดียวกับ `aws_s3_bucket.acl` ของ review ฝั่ง AWS — deprecation ที่ schema ประกาศไว้ระดับ attribute (ยืนยันผ่าน `terraform providers schema -json`, `deprecated: true` อยู่ที่ attribute `enable_logging` เอง ไม่ใช่ตัว block ของ resource) ทั้ง `validate` และ `plan` ผ่านทั้งคู่ไม่ว่ายังไง มีแค่การ grep warning ออกจาก `validate -json` เท่านั้นที่จับได้ วิธีแก้: แทนที่ด้วย `log_config { metadata = "INCLUDE_ALL_METADATA" }` ซึ่ง schema จริงต้องการค่า `metadata` ด้วย
+</SpotTheBug>
+
+### Versions: provider constraint แบบลอย
+
+```hcl
+# entries/06-unpinned-provider/main.tf
+terraform {
+  required_providers {
+    google = { source = "hashicorp/google", version = ">= 8.0" }
+  }
+}
+```
+
+**อาการ — `.terraform.lock.hcl` จริง หลัง `terraform init`:**
+
+```text
+provider "registry.terraform.io/hashicorp/google" {
+  version     = "8.4.0"
+  constraints = ">= 8.0.0"
+}
+```
+
+mechanics เดียวกับ **[AI bug catalog](/terraform-gcp/th/reading-terraform/ai-bug-catalog/)** entry 1 — `>= 8.0` resolve ไปเป็น release ล่าสุดที่ registry มี ณ วันนี้ ไม่มีอะไรรับประกันว่า `init -upgrade` ครั้งถัดไปจะ resolve อยู่ใน major version เดียวกัน วิธีแก้: `version = "~> 8.0"`
+
+### Resources: `count` บน list ของชื่อ subnet
+
+```hcl
+# excerpt, as generated -- entries/07-count-index-shift/main.tf
+resource "google_compute_subnetwork" "this" {
+  count = length(var.subnet_names)
+  name  = var.subnet_names[count.index]
+}
+```
+
+**อาการ — พิสูจน์จริงด้วย `terraform_data` ที่ apply แล้วแทน resource ที่ index (mechanics `count.index` เหมือนกันเป๊ะกับ `google_compute_subnetwork`; apply จริงกับ GCP ต้องใช้ Application Default Credentials จริงซึ่งคอร์สนี้ไม่ใช้เลย) apply 3 ชื่อ subnet แล้วลบตัวกลางออก:**
+
+```text
+$ terraform apply -auto-approve   # subnet_names = ["web", "app", "data"]
+Apply complete! Resources: 3 added, 0 changed, 0 destroyed.
+
+$ # subnet_names -> ["web", "data"]
+$ terraform plan
+  # terraform_data.subnet[1] will be updated in-place
+  # terraform_data.subnet[2] will be destroyed
+  # (because index [2] is out of range for count)
+
+Plan: 0 to add, 1 to change, 1 to destroy.
+```
+
+mechanics เดียวกับ **[AI bug catalog](/terraform-gcp/th/reading-terraform/ai-bug-catalog/)** entry 9 (index shift) — `count.index` อิงตำแหน่ง การลบชื่อ subnet ตัวกลางทำให้ `"data"` เลื่อนจาก index 2 มาเป็น index 1 ซึ่ง Terraform อ่านว่า "index 1 เปลี่ยน" บวกกับ "index 2 ถูกทำลาย" ไม่ใช่ "ลบ subnet ตัวเดียว อีกสองตัวไม่โดนแตะ" วิธีแก้: `for_each = toset(var.subnet_names)` โดย key ด้วยชื่อ
+
+### Resources: ไม่มี `lifecycle` block บน instance ตัวที่สำคัญที่สุด
+
+```hcl
+# excerpt, as generated -- entries/08-no-lifecycle/main.tf
+resource "google_compute_instance" "app" {
+  # ...
+  # no lifecycle block at all
+}
+```
+
+**อาการ — พิสูจน์จริงด้วย `terraform_data` ที่ apply แล้วแทน instance:**
+
+```text
+$ terraform apply -auto-approve
+Apply complete! Resources: 1 added, 0 changed, 0 destroyed.
+
+$ terraform plan -destroy
+Plan: 0 to add, 0 to change, 1 to destroy.
+```
+
+เพิ่ม `lifecycle { prevent_destroy = true }` แล้วรัน `plan -destroy` แบบเดิมซ้ำ:
+
+```text
+Plan: 0 to add, 0 to change, 1 to destroy.
+
+Error: Instance cannot be destroyed
+
+  on main.tf line 1:
+   1: resource "terraform_data" "app" {
+
+Resource terraform_data.app has lifecycle.prevent_destroy set, but the plan
+calls for this resource to be destroyed. To avoid this error and continue
+with the plan, either disable lifecycle.prevent_destroy or reduce the scope
+of the plan using the -target option.
+```
+
+mechanics เดียวกับ **[AI bug catalog](/terraform-gcp/th/reading-terraform/ai-bug-catalog/)** entry 8 — `prevent_destroy` ป้องกันแค่ resource ที่ประกาศไว้บนตัวมันเองเท่านั้น Compute Engine instance ที่ไม่มีมันเลยจะถูกทำลายโดยไม่มีแรงต้านจาก `-destroy` ที่พลาดมา, module block ที่ถูกลบ, หรือการเปลี่ยนชื่อที่ไม่ได้ใช้ `moved`
+
+### Root: `project` hardcode เป็น literal ตัวแปรหลอกอยู่ข้างๆ
+
+```hcl
+# entries/09-hardcoded-project/excerpt
+provider "google" {
+  project = "test-project-hardcoded"
+}
+variable "project" {
+  type    = string
+  default = "test-project-hardcoded"
+}
+```
+
+**อาการ — จริง บนไฟล์ที่ AI สร้างจริง:**
+
+```text
+$ grep -n "project" main.tf variables.tf
+main.tf:8:  project = "test-project-hardcoded"
+variables.tf:1:variable "project" {
+variables.tf:3:  default = "test-project-hardcoded"
+```
+
+`variable "project"` มีอยู่จริงที่ root พร้อม default ที่บังเอิญตรงกับ literal ใน `provider` block — แต่ `provider` block อ่าน **literal** ไม่ใช่ `var.project` ตัวแปรเลยเป็นตัวหลอกที่เลิกควบคุมอะไรแบบเงียบๆ ทันทีที่มีใครเปลี่ยนมันโดยคาดว่า deploy target จะขยับตาม
+
+<Callout title="ไม่ได้พิสูจน์ด้วย plan แต่พิสูจน์ด้วย grep แทน">
+review ทั้งสองฝั่งก่อนหน้านี้พิสูจน์ bug hardcoded-region/subscription ที่เทียบเท่ากันด้วยวิธีเดียวกันเมื่อ `plan` จริง offline ใช้ไม่ได้: `terraform validate` ไม่เคยแจ้งเรื่องตัวแปรที่ไม่ถูกใช้หรือถูกบังเลย offline proof ที่ตรงไปตรงมาที่สุดเลยคือ `grep` ตรงกับไฟล์ที่ AI สร้างจริง — ตัวแปรมีอยู่จริง `validate` ไม่มีความเห็นว่ามีใครอ่านมันจริงหรือเปล่า มีแค่คนที่เทียบ literal ใน `provider` block กับชื่อตัวแปรที่ประกาศไว้เท่านั้นที่จะจับความไม่ตรงกันนี้ได้
+</Callout>
+
+วิธีแก้: `provider "google" { project = var.project }`
+
+## โค้ดที่แก้แล้ว
+
+```hcl
+# modules/network-compute/main.tf
+resource "google_compute_network" "this" {
+  name                    = "${var.name}-vpc"
+  auto_create_subnetworks = false
+}
+
+resource "google_compute_subnetwork" "this" {
+  for_each      = toset(var.subnet_names)
+  name          = each.value
+  network       = google_compute_network.this.id
+  ip_cidr_range = cidrsubnet(var.vpc_cidr, var.subnet_newbits, index(var.subnet_names, each.value))
+  region        = var.region
+}
+
+resource "google_compute_firewall" "web" {
+  name    = "${var.name}-allow-https"
+  network = google_compute_network.this.name
+
+  log_config {
+    metadata = "INCLUDE_ALL_METADATA"
+  }
+
+  allow {
+    protocol = "tcp"
+    ports    = ["443"]
+  }
+
+  source_ranges = ["0.0.0.0/0"]
+}
+
+resource "google_compute_instance" "app" {
+  name         = "${var.name}-app"
+  machine_type = var.machine_type
+  zone         = var.zone
+
+  boot_disk {
+    initialize_params {
+      image = "debian-cloud/debian-12"
+    }
+  }
+
+  network_interface {
+    network    = google_compute_network.this.id
+    subnetwork = google_compute_subnetwork.this[var.subnet_names[0]].id
+  }
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+```
+
+```hcl
+# modules/network-compute/variables.tf
+variable "name" {
+  type = string
+}
+variable "region" {
+  type    = string
+  default = "us-central1"
+}
+variable "zone" {
+  type    = string
+  default = "us-central1-a"
+}
+variable "vpc_cidr" {
+  type    = string
+  default = "10.0.0.0/16"
+}
+variable "subnet_newbits" {
+  type    = number
+  default = 4
+}
+variable "subnet_names" {
+  type = list(string)
+}
+variable "machine_type" {
+  type    = string
+  default = "e2-micro"
+}
+```
+
+```hcl
+# modules/network-compute/outputs.tf
+output "network_id" {
+  value = google_compute_network.this.id
+}
+output "network_self_link" {
+  value = google_compute_network.this.self_link
+}
+output "subnet_ids" {
+  value = { for k, s in google_compute_subnetwork.this : k => s.id }
+}
+output "firewall_id" {
+  value = google_compute_firewall.web.id
+}
+output "instance_id" {
+  value = google_compute_instance.app.id
+}
+```
+
+```hcl
+# main.tf
+terraform {
+  required_providers {
+    google = { source = "hashicorp/google", version = "~> 8.0" }
+  }
+}
+
+provider "google" {
+  project = var.project
+}
+
+module "app" {
+  source   = "./modules/network-compute"
+  for_each = toset(var.environments)
+
+  name         = each.value
+  subnet_names = ["web", "app"]
+}
+```
+
+```hcl
+# variables.tf
+variable "project" {
+  type    = string
+  default = "test-project-hardcoded"
+}
+variable "environments" {
+  type    = list(string)
+  default = ["dev", "staging"]
+}
+```
+
+```hcl
+# outputs.tf
+output "network_ids" {
+  value = { for k, m in module.app : k => m.network_id }
+}
+output "instance_ids" {
+  value = { for k, m in module.app : k => m.instance_id }
+}
+```
+
+```hcl
+# tests/network_compute.tftest.hcl
+mock_provider "google" {}
+
+variables {
+  name         = "test"
+  vpc_cidr     = "10.5.0.0/16"
+  subnet_names = ["web", "app"]
+}
+
+run "creates_one_subnet_per_name" {
+  command = apply
+
+  module {
+    source = "./modules/network-compute"
+  }
+
+  assert {
+    condition     = length(google_compute_subnetwork.this) == 2
+    error_message = "expected one subnetwork per subnet name"
+  }
+
+  assert {
+    condition     = google_compute_instance.app.network_interface[0].subnetwork == google_compute_subnetwork.this["web"].id
+    error_message = "instance should attach to the first subnetwork"
+  }
+}
+
+run "prevent_destroy_is_set" {
+  command = apply
+
+  module {
+    source = "./modules/network-compute"
+  }
+
+  assert {
+    condition     = google_compute_subnetwork.this["web"].ip_cidr_range != google_compute_subnetwork.this["app"].ip_cidr_range
+    error_message = "subnetworks must not share a CIDR range"
+  }
+}
+```
+
+`terraform validate` กับ module+root ที่แก้แล้ว: `Success! The configuration is valid.` — error ศูนย์ warning ศูนย์ `terraform plan` ยัง offline กับ `google` จริงไม่ได้อยู่ดี (ต้องมี Application Default Credentials) `terraform test` จริงด้วย `mock_provider "google" {}` เลยเป็นบทพิสูจน์ offline จริงของ module นี้ — และต่างจาก review ฝั่ง azurerm ตรงที่ resource ID ที่ mock ของ `google` ไม่ต้องใช้ `override_resource` เลย:
+
+```text
+$ terraform test
+tests/network_compute.tftest.hcl... in progress
+  run "creates_one_subnet_per_name"... pass
+  run "prevent_destroy_is_set"... pass
+tests/network_compute.tftest.hcl... tearing down
+tests/network_compute.tftest.hcl... pass
+
+Success! 2 passed, 0 failed.
+```
+
+## อะไรเปลี่ยนและทำไม
+
+| # | Bug | วิธีแก้ |
+|---|---|---|
+| 1 | `provider` block อยู่ใน module เรียกด้วย `count` | ลบ provider block ออกจาก module — `terraform init` จริงขึ้น "Module is incompatible with count, for_each, and depends_on" ก่อนแก้ |
+| 2 | `cidrsubnet(count.index, var.subnet_newbits, var.vpc_cidr)` — argument ลำดับผิด | `cidrsubnet(var.vpc_cidr, var.subnet_newbits, count.index)` — `terraform test` จริง (`mock_provider`, `command = plan`) พัง ที่ `validate` มองไม่เห็น |
+| 3 | root output อ่าน `m.network_id` แต่ module export แค่ `network_self_link` | module export `network_id` จริง; root อ่านมัน — `terraform test` จริง (`command = apply`) "Unsupported attribute" ก่อนแก้ |
+| 4 | `google_compute_instance` ไม่มี `network_interface` block เลย | เพิ่ม `network_interface { network = ... }` — "Insufficient network_interface blocks" จริงที่ `validate` ก่อนแก้ |
+| 5 | `google_compute_firewall.enable_logging` (deprecated) | แทนที่ด้วย `log_config { metadata = "INCLUDE_ALL_METADATA" }` — warning deprecation จริงที่ `validate` ยืนยันว่ารอดผ่าน module call |
+| 6 | `required_providers` ใช้ `>= 8.0` | `~> 8.0` — `.terraform.lock.hcl` จริงแสดงว่า constraint ลอยตัว resolve ไปเป็น 8.4.0 แบบเงียบๆ |
+| 7 | `count` บน `subnet_names`, index เลื่อนตอนลบ | `for_each = toset(var.subnet_names)` — plan จริงพิสูจน์ว่าลบชื่อตัวกลางแล้ว replace/destroy index ผิดตัว |
+| 8 | ไม่มี `lifecycle` block บน `google_compute_instance.app` | `lifecycle { prevent_destroy = true }` — `plan -destroy` จริงทำลายมันโดยไม่มีแรงต้านก่อนแก้ |
+| 9 | `project` hardcode เป็น literal, `variable "project"` ไม่เคยถูกอ่านจริง | `provider { project = var.project }` — พิสูจน์ด้วย `grep` จริงกับไฟล์ที่ AI สร้าง |
+
+## Mental Model
+
+สี่ใน bug เก้าข้อนี้ (1, 2, 3, 4) เป็น hard failure — แต่พิสูจน์ด้วยเครื่องมือสองแบบต่างกัน เพราะ `google` `plan` offline ในคอร์สนี้ไม่ได้เลย: bug 1 พังตอน `terraform init`, bug 2 กับ 3 โผล่ผ่าน `terraform test` ด้วย `mock_provider` เท่านั้น (ตัวแทน offline ของ `plan`), และ bug 4 พังที่ `validate` ธรรมดา — เป็น hard failure ข้อเดียวในทั้งสาม review ที่จับด้วยการเช็คจำนวน block ขั้นต่ำที่ฝังอยู่ใน schema ของ resource เองตรงๆ ไม่มีความกำกวมเลย bug 5 เป็น warning ไม่ใช่ error — และต่างจาก deprecation ระดับ block ของ review ฝั่ง azurerm ตรงที่รอดผ่าน module call ได้เพราะประกาศไว้ระดับ attribute อีกสี่ bug ที่เหลือไม่ error เลยสักครั้ง: version ที่ไม่ pin, list ที่ index ด้วย `count`, `lifecycle` block ที่หายไป, และ project ID hardcode พร้อมตัวแปรหลอกข้างๆ ซึ่งพิสูจน์ได้ที่นี่ด้วยการอ่านไฟล์ที่ AI สร้างจริงเท่านั้น
+
+## ความเข้าใจผิดที่พบบ่อย
+
+- **"block ที่ required แต่หายไปพฤติกรรมเหมือน `subnet_id` ที่หายไปของ AWS เสมอ — valid ตอน apply แต่ผิดแบบเงียบๆ"** พิสูจน์แล้วด้านบน: `google_compute_instance` ที่ไม่มี `network_interface` เลยพัง `terraform validate` ทันที พร้อมข้อความที่อิงจำนวนชัดเจน ("At least 1 ... blocks are required") — schema ของ GCP บังคับแบบมีโครงสร้าง ต่างจากการขาดหายเทียบเท่าของ AWS ที่ไม่เป็นแบบนั้น
+- **"argument ที่ deprecated พฤติกรรมเหมือนกันเสมอไม่ว่าจะเป็น attribute หรือ block"** พิสูจน์แล้วในทั้งสาม review: `google_compute_firewall.enable_logging` (attribute) warn เหมือนกันไม่ว่าจะประกาศที่ root หรือหลัง module call เหมือน `acl`/`managed_policy_arns` ของ AWS เป๊ะ; `network_interface` ของ azurerm (block) warn แค่ที่ root แล้วเลิก warn แบบเงียบๆ หลัง module call กลไก deprecation ต่างกันจริงตามประเภท ไม่ใช่แค่ต่างตาม provider
+- **"ถ้า `google` ต้องมี Application Default Credentials ถึงจะ `plan` ได้ แปลว่า bug ของ module นี้พิสูจน์แบบ offline ไม่ได้เลย"** พิสูจน์แล้วด้านบน: สี่ใน เก้า bug เป็น hard failure ที่ `init`/`validate` เพียวๆ จับได้ และ `terraform test` ด้วย `mock_provider "google" {}` ก็ทำซ้ำทุกอย่างที่ `plan` จริงจะแสดงสำหรับที่เหลือ — ไม่ต้องใช้ `override_resource` แก้ปัญหาเลย ต่างจากกับดัก ID ที่ mock ของ review ฝั่ง azurerm
+
+<Mermaid title="แต่ละ bug อยู่ตรงไหนในเส้นทางประเมินของ module นี้" code={wr1Diagram} />
+
+export const wr1Diagram = `flowchart TD
+  A["terraform init"] -->|"1: provider in module + count"| A
+  A --> B["terraform validate"]
+  B -->|"4: network_interface missing, schema min_items"| B
+  B -->|"5: enable_logging deprecated, survives module"| B
+  B --> C["terraform test, mock_provider"]
+  C -->|"2: cidrsubnet args swapped"| C
+  C -->|"3: output reads m.network_id, undefined"| C
+  C --> D["real diff against state"]
+  D -->|"7: count index-shift"| D
+  D -->|"8: no prevent_destroy"| D
+  E[".terraform.lock.hcl"] -->|"6: unpinned provider resolved 8.4.0"| E
+  F["grep against generated files"] -->|"9: project hardcoded, decoy variable"| F
+`;
+
+<Callout title="สรุปบรรทัดเดียว">
+`google` เหมือน `azurerm` คือ `plan` offline ในคอร์สนี้ไม่ได้เลย bug ที่ review ฝั่ง AWS จับด้วย `plan` จริงเลยย้ายไปที่ `terraform test` ด้วย `mock_provider` ที่นี่ด้วย — แต่ schema ของ GCP เข้มงวดกว่าโครงสร้างในจุดหนึ่งจริงๆ: nested block ที่ required แต่ต่ำกว่าจำนวนขั้นต่ำพัง `validate` ทันทีไม่กำกวมเลย เป็นการรับประกันที่ resource เทียบเท่าของทั้ง AWS และ Azure ไม่มีให้กับ argument รูปทรง network-interface ของตัวเองเลย
+</Callout>
+
+export const quizWorkedReview1 = [
+  {
+    q: "```text\nError: Module is incompatible with count, for_each, and depends_on\n```\nทำไม error นี้ถึงโผล่ตอน `terraform init` แทนที่จะเป็น `terraform validate`?",
+    options: [
+      'init รัน validate ข้างในเสมออยู่แล้ว',
+      'Error ถูก raise ตอนที่ init กำลัง install และ resolve การเรียก module เอง ก่อนที่ validate จะมีโอกาสรันกับ configuration ที่ merge แล้วเลย',
+      'จริงๆ แล้วเป็น validate error ที่ CLI ติดป้ายผิด',
+      'เกิดเฉพาะกับ google เท่านั้น ไม่เคยกับ provider อื่น',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์โดยตรง: `terraform init -backend=false` พิมพ์ "Initializing modules..." ตามด้วย error นี้ทันที ไม่เคยไปถึงขั้น validate เลย -- mechanics เดียวกับ review ทั้งสองฝั่ง เพราะนี่คือพฤติกรรมของ Terraform core ไม่ใช่เฉพาะ provider',
+  },
+  {
+    q: '`google_compute_instance` ที่ไม่มี `network_interface` block เลย กับ `aws_instance` ที่ไม่ได้ตั้ง `subnet_id`/security group ทั้งคู่คือ "ขาด networking wiring" `terraform validate` จริงแสดงอะไรสำหรับแต่ละแบบ?',
+    options: [
+      'ทั้งคู่ validate ผ่านสะอาดแล้วค่อยพังตอน apply กับ cloud account จริง',
+      'google_compute_instance พัง validate ทันทีด้วย "Insufficient network_interface blocks -- At least 1 ... blocks are required" เพราะ schema ของ GCP ประกาศจำนวน block ขั้นต่ำไว้; การขาดหายเทียบเท่าของ AWS schema ถูกต้องแล้วค่อยเป็นปัญหาทีหลัง',
+      'ทั้งคู่พัง validate ด้วย error ข้อความเดียวกันเป๊ะ',
+      'aws_instance พัง validate แต่ google_compute_instance ไม่พัง',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์โดยตรง: error "Insufficient network_interface blocks" มาจาก terraform validate จริงกับ google_compute_instance ที่ไม่มี block เลย -- เป็นการเช็ค schema แบบอิงจำนวน มีโครงสร้าง ไม่มีสิ่งเทียบเท่าที่พิสูจน์ได้ใน review ฝั่ง AWS',
+  },
+  {
+    q: 'ทำไม review ฝั่ง AWS ถึงพิสูจน์ bug argument ลำดับผิดของ `cidrsubnet` ด้วย `terraform plan` จริง แต่ review google นี้พิสูจน์ bug เดียวกันด้วย `terraform test` และ `mock_provider` แทน?',
+    options: [
+      'cidrsubnet ทำงานต่างกันภายใต้ google',
+      '`terraform plan` จริงกับ google ต้องมี Application Default Credentials ที่คอร์สนี้ไม่มีเลย -- พิสูจน์โดยตรงด้วย error จริง "could not find default credentials" -- terraform test กับ mock_provider เลยเป็นตัวแทน offline ของ plan เหมือนที่ review ฝั่ง azurerm ก็ทำเช่นกัน',
+      'terraform test เป็นแค่สไตล์ที่คอร์สนี้ชอบใช้ plan ก็ใช้ได้เหมือนกัน',
+      'google ไม่รองรับ command plan เลย',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์โดยตรง: `terraform plan` กับ module ที่แก้แล้วคืน error จริง "Attempted to load application default credentials ... No credentials loaded" `terraform test` ด้วย `mock_provider "google" {}` ประเมิน cidrsubnet call เดียวกันแบบ offline เต็มรูปแบบและได้ error "Invalid value for \\"netnum\\" parameter" เดียวกันเป๊ะ',
+  },
+  {
+    q: '`google_compute_firewall.enable_logging` (attribute) และ `network_interface` ของ azurerm (block) ทั้งคู่ deprecated ประกาศหลัง module call `terraform validate` จริงแสดงอะไรสำหรับแต่ละแบบ ตาม review ของคอร์สนี้?',
+    options: [
+      'ทั้งคู่ warn เหมือนกันหลัง module call',
+      'enable_logging (deprecation ระดับ attribute) ยัง warn หลัง module call พิสูจน์ตรงใน review นี้; network_interface ของ azurerm (deprecation ระดับ block) พิสูจน์แล้วใน review ฝั่ง azurerm ว่าเลิก warn เลยหลัง module call',
+      'ทั้งคู่ไม่ warn เลยหลัง module call',
+      'ทั้งคู่เป็น hard error ไม่ใช่ warning',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์โดยตรงใน review นี้: warning จริงของ validate สำหรับ enable_logging ระบุที่ "module.app.google_compute_firewall.web" แปลว่ารอดผ่านขอบเขต module -- ยืนยันแยกต่างหากใน review ฝั่ง azurerm ว่า deprecation ระดับ block (network_interface) ไม่รอด',
+  },
+  {
+    q: '`google_compute_subnetwork.this` ใช้ `count = length(var.subnet_names)` apply 3 ชื่อ subnet จริง แล้วลบตัวกลางออกจาก list `terraform plan` จริงแสดงอะไร?',
+    options: [
+      'ลบ subnetwork ที่ถูกลบออกสะอาดตัวเดียว ไม่มีอะไรเปลี่ยนอย่างอื่น',
+      'index [1] ถูก update/replace in place ให้กลายเป็นค่าที่เคยเป็นของ index [2] และ index [2] ถูกทำลาย -- "Plan: 0 to add, 1 to change, 1 to destroy" -- เพราะ count.index อิงตำแหน่ง ไม่ใช่ identity',
+      'Terraform ปฏิเสธไม่ plan เลยจนกว่า list จะกลับมาเหมือนเดิม',
+      'ทั้งสาม subnetwork ถูกทำลายแล้วสร้างใหม่ทั้งหมด',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์โดยตรงด้วย apply จริงแล้ว plan จริงหลังแก้ list: "Plan: 0 to add, 1 to change, 1 to destroy" เป๊ะ -- mechanics index-shift เดียวกันเป๊ะกับ review ทั้งสองฝั่ง เพราะ count.index ทำงานเหมือนกันไม่ว่า cloud ไหน',
+  },
+  {
+    q: '`provider "google"` block hardcode `project = "test-project-hardcoded"` เป็น literal ทั้งที่ `variable "project"` มี default ตรงกันอยู่ เพราะ google plan offline ที่นี่ไม่ได้ แล้วพิสูจน์ยังไง?',
+    options: [
+      'พิสูจน์ไม่ได้เลยถ้าไม่มี credential GCP จริง',
+      'ด้วย grep กับไฟล์ที่ AI สร้างจริง: provider block อ่าน literal ไม่ใช่ var.project ทั้งที่ตัวแปรถูกประกาศไว้จริงพร้อม default ตรงกัน -- ทั้งคู่เป็นข้อเท็จจริงจริงที่เช็คได้กับโค้ดตามที่เขียนไว้',
+      'ด้วยการสมมติว่า bug มีอยู่จริงจาก review ทั้งสองฝั่งที่เจอ pattern เดียวกัน',
+      'terraform validate รายงานเป็น warning',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์โดยตรง: `grep -n "project"` กับ main.tf และ variables.tf ที่ AI สร้างจริงแสดงว่า provider block ใช้ literal string ขณะที่ variables.tf ประกาศค่าเดียวกันเป็น default ของตัวแปร terraform validate ไม่เคยแจ้งความไม่ตรงกันนี้เลย นี่คือเหตุผลที่ grep กับไฟล์จริง ไม่ใช่ warning จากเครื่องมือ คือบทพิสูจน์ที่ตรงไปตรงมาที่สุดที่นี่',
+  },
+];
+
+<Quiz client:visible id="reading-terraform/worked-review-1" questions={quizWorkedReview1} />
+
+<ProgressTracker client:visible id="reading-terraform/worked-review-1" />
