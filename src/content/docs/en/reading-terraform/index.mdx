@@ -39,7 +39,7 @@ Once the provider is pinned, check what actually locks and stores state — beca
 
 - **What to look for:** does the backend's locking mechanism match what this Terraform/backend version actually supports (S3's `use_lockfile` vs the deprecated `dynamodb_table`)? Does every `terraform_remote_state` data source point at a `key`/`path` that has actually been applied? Is state ever used to separate environments via `terraform workspace` where a completely separate backend config would be safer?
 - **The question to ask:** if this exact backend config ran `init` against a brand-new bucket right now, would locking actually work — and if the state this reads via `terraform_remote_state` doesn't exist yet, does the plan fail loud, or does something silently proceed with defaults?
-- **Which lesson explains it:** the **[AI Bug Catalog](/terraform-gcp/en/reading-terraform/ai-bug-catalog/)**'s State & backend group (entries 4–6) for the real gitignored-lockfile drift and the real "Unable to find remote state" hard-fail; **[The State File](/terraform-gcp/en/state-management/the-state-file/)** and **[Why Terragrunt](/terraform-gcp/en/why-terragrunt/)** for both mechanisms in full depth.
+- **Which lesson explains it:** the **[AI Bug Catalog](/terraform-gcp/en/reading-terraform/ai-bug-catalog/)**'s State & backend group (entries 4–6) for the real gitignored-lockfile drift and the real "Unable to find remote state" hard-fail; **[The State File](/terraform-gcp/en/state-management/the-state-file/)** and **[Why Terragrunt](/terraform-gcp/en/multi-environment/why-terragrunt/)** for both mechanisms in full depth.
 
 ## 3. Variables & locals
 

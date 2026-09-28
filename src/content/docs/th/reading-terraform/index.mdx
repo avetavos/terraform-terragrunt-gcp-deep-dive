@@ -39,7 +39,7 @@ export const readingOrderDiagram = `flowchart TD
 
 - **สิ่งที่ต้องมองหา:** กลไกล็อกของ backend ตรงกับสิ่งที่ Terraform/backend version นี้รองรับจริงหรือไม่ (`use_lockfile` ของ S3 เทียบกับ `dynamodb_table` ที่ deprecated แล้ว)? `terraform_remote_state` data source ทุกตัวชี้ไปที่ `key`/`path` ที่ apply แล้วจริงหรือไม่? state เคยถูกใช้แยก environment ผ่าน `terraform workspace` ในที่ที่ backend config แยกกันจริงๆ จะปลอดภัยกว่าหรือไม่?
 - **คำถามที่ต้องถาม:** ถ้า backend config นี้รัน `init` กับ bucket ใหม่เอี่ยมตอนนี้เลย locking จะทำงานจริงหรือไม่ — และถ้า state ที่ `terraform_remote_state` นี้อ่านยังไม่มีอยู่ plan จะพังดังๆ หรือมีอะไรดำเนินต่อไปเงียบๆ ด้วยค่า default?
-- **บทที่อธิบายเรื่องนี้:** กลุ่ม State & backend ใน **[AI Bug Catalog](/terraform-gcp/th/reading-terraform/ai-bug-catalog/)** (entry 4–6) สำหรับ lock file ที่ gitignore แล้วเกิด drift จริง และ "Unable to find remote state" ที่พังหนักจริง; **[The State File](/terraform-gcp/th/state-management/the-state-file/)** และ **[Why Terragrunt](/terraform-gcp/th/why-terragrunt/)** สำหรับกลไกทั้งสองแบบเจาะลึก
+- **บทที่อธิบายเรื่องนี้:** กลุ่ม State & backend ใน **[AI Bug Catalog](/terraform-gcp/th/reading-terraform/ai-bug-catalog/)** (entry 4–6) สำหรับ lock file ที่ gitignore แล้วเกิด drift จริง และ "Unable to find remote state" ที่พังหนักจริง; **[The State File](/terraform-gcp/th/state-management/the-state-file/)** และ **[Why Terragrunt](/terraform-gcp/th/multi-environment/why-terragrunt/)** สำหรับกลไกทั้งสองแบบเจาะลึก
 
 ## 3. Variables & locals
 
