@@ -1,6 +1,6 @@
 ---
 title: 'Production Checklist'
-description: 'checklist ก่อนขึ้น production ที่รวบยอดเรื่อง backend locking, version pinning, plan review, การจัดการ secret, static analysis, dependency ordering และ testing ผูกกลับไปหาทั้งคอร์ส'
+description: 'checklist ก่อนขึ้น production ที่รวบยอด backend locking, version pinning, plan review, secrets handling, static analysis, dependency ordering และ testing เข้าด้วยกัน'
 sidebar:
   order: 4
 ---
@@ -9,77 +9,172 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## ไอเดียในหนึ่งประโยค
 
-การ ship Terraform กับ Terragrunt ขึ้น production บน GCP ไม่ใช่การตัดสินใจก้อนใหญ่ก้อนเดียว แต่เป็น checklist ของการตัดสินใจเล็ก ๆ หลายข้อ — แต่ละข้อครอบคลุมไปแล้วก่อนหน้านี้ในคอร์ส — ที่ต้องเป็นจริงพร้อมกันทั้งหมด
+การส่ง Terraform กับ Terragrunt ขึ้น production บน GCP ไม่ใช่การตัดสินใจใหญ่ครั้งเดียว แต่เป็น checklist ของการตัดสินใจเล็ก ๆ หลายข้อ — แต่ละข้อคุยไปแล้วก่อนหน้านี้ในคอร์ส — ที่ต้องเป็นจริงพร้อมกันทั้งหมด
 
-## เช็กลิสต์
+## Checklist
 
-ไม่มีข้อไหนในนี้เป็นไอเดียใหม่เลยตอนนี้ สิ่งที่ใหม่คือการเห็นทั้งหมดเรียงกันเป็นลิสต์เดียว เพราะความพร้อมสำหรับ production คือทุกข้อเป็นจริงพร้อม ๆ กัน ไม่ใช่ข้อใดข้อหนึ่งทำได้ดีเป็นพิเศษ
+ไม่มีข้อไหนเป็นไอเดียใหม่ ณ จุดนี้แล้ว สิ่งที่ใหม่คือการเห็นทุกข้อเรียงกันเป็น list เดียว เพราะความพร้อมสำหรับ production ก็คือทุกข้อเป็นจริงพร้อมกัน ไม่ใช่ข้อใดข้อหนึ่งทำได้ดีเป็นพิเศษ
 
-- **remote GCS backend ที่มี locking ในตัวตั้งไว้ตั้งแต่วันแรก** บล็อก `backend "gcs"` ตั้งไว้ก่อน `apply` ครั้งแรก ไม่ใช่มาเพิ่มทีหลังหลังจาก state file เสียหายจนต้องแก้ปัญหาแบบเร่งด่วน GCS ไม่ต้องมี lock-table resource แยกต่างหาก locking เป็นส่วนหนึ่งของ backend อยู่แล้ว ครอบคลุมไว้ใน State Management
-- **provider กับ module version ต้อง pin ไว้ ไม่ปล่อยลอย** `.terraform.lock.hcl` ที่ commit ไว้ pin provider version กับ checksum ไว้แน่นอน module `source` reference ใช้ tag หรือ version constraint ที่ระบุไว้ชัด ไม่ใช่ชื่อ branch ที่เลื่อนไปเรื่อย ๆ ใต้เท้าคุณ ครอบคลุมไว้ใน Foundations กับ Modules
-- **ทุก `plan` ถูก review ใน CI ก่อนทุก `apply`** โดย reviewer เฝ้าดู `-/+` resource replacement ที่ไม่คาดคิดโดยเฉพาะ ไม่ใช่แค่สแกนผ่าน plan แบบ code diff ครอบคลุมไว้ในบทเรียน CI/CD ของ module นี้
-- **ค่า sensitive ต้องไม่อยู่ใน variable และเท่าที่ทำได้ต้องไม่อยู่ใน state** ดึงจาก Secret Manager ผ่าน `data` source แทนที่จะพิมพ์ใส่ไฟล์ `tfvars` โดยมี IAM จำกัดสิทธิ์อย่างแน่นหนาว่าใครอ่าน state bucket ได้บ้าง ครอบคลุมไว้ใน State Management กับบทเรียน secret ของ module นี้
-- **`tflint`, security scanner, และถ้าเป็นไปได้ policy-as-code ต่อเข้ากับ CI** เพื่อให้ pattern ที่รู้อยู่แล้วว่าแย่และกฎขององค์กรถูกบังคับใช้แบบเชิงกลไก ไม่ต้องพึ่งคนคอยจับทุกเคสด้วยตา ครอบคลุมไว้ในบทเรียน policy-as-code ของ module นี้
-- **`dependency` block ของ Terragrunt เป็นตัวขับลำดับการ rollout** ไม่ใช่คนคอยจำเองว่า VPC ต้อง apply ก่อน database ครอบคลุมไว้ใน Terragrunt Fundamentals
-- **`terraform test` / `.tftest.hcl` ครอบคลุม module ไหนที่ทำอะไรที่ไม่ trivial** เพื่อให้การ refactor ภายใน module ถูกจับได้ด้วย assertion แทนที่จะให้ downstream consumer มาเจอเอาเองแบบไม่ทันตั้งตัว ครอบคลุมไว้ใน Modules
+- **Remote GCS backend พร้อม locking ในตัวตั้งแต่วันแรก** `backend "gcs"` block ตั้งไว้ก่อน `apply` ครั้งแรก ไม่ใช่ย้อนกลับมาใส่ทีหลังหลังจาก state file เสียหายจนบังคับให้ต้องทำ GCS ไม่ต้องมี lock-table resource แยกต่างหาก — locking เป็นส่วนหนึ่งของ backend เองอยู่แล้ว คุยไปแล้วใน State Management
+- **Provider กับ module version ถูก pin ไว้ ไม่ใช่ลอย** `.terraform.lock.hcl` ที่ commit ไว้ pin provider version กับ checksum แน่นอน module `source` reference ใช้ tag หรือ version constraint เจาะจง ไม่ใช่ชื่อ branch ที่เคลื่อนไหวได้ใต้เท้าเรา คุยไปแล้วใน Foundations กับ Modules
+- **`plan` ทุกอันถูก review ใน CI ก่อน `apply` ทุกครั้ง** โดย reviewer เฝ้าดู `-/+` resource replacement ที่ไม่คาดคิดโดยเฉพาะ ไม่ใช่อ่านผ่าน ๆ แบบ code diff คุยไปแล้วในบท CI/CD ของ module นี้
+- **ค่า sensitive อยู่นอก variable และนอก state ให้มากที่สุดเท่าที่ทำได้** ดึงจาก Secret Manager ผ่าน `data` source แทนที่จะพิมพ์ลงไฟล์ `tfvars` พร้อม IAM จำกัดคนอ่าน state bucket เข้มงวด คุยไปแล้วใน State Management และบท secrets ของ module นี้
+- **`tflint`, security scanner, และ policy-as-code (ถ้าทำได้) wired เข้า CI** เพื่อให้ pattern ที่รู้อยู่แล้วว่าไม่ดีและ rule ขององค์กรถูก enforce แบบ mechanical แทนที่จะพึ่งคนคอยจับด้วยตาทุกครั้ง คุยไปแล้วในบท policy-as-code ของ module นี้
+- **Terragrunt `dependency` block ขับเคลื่อนลำดับ rollout** ไม่ใช่คนคอยจำว่า VPC ต้อง apply ก่อน database คุยไปแล้วใน Terragrunt Fundamentals
+- **`terraform test` / `.tftest.hcl` coverage สำหรับ module ที่ทำอะไรไม่ธรรมดา** เพื่อให้การ refactor internals ของ module ถูกจับได้ด้วย assertion แทนที่จะไปเจอกับ downstream consumer ที่งงว่าเกิดอะไรขึ้น คุยไปแล้วใน Modules
+- **`lifecycle.prevent_destroy` บน resource ที่แทนที่ไม่ได้จริง ๆ และ `deletion_protection`/`deletion_policy` บน GCP resource ที่มีของตัวเอง** เพื่อให้ config change ที่จะทำลายข้อมูล production fail plan แบบดัง ๆ แทนที่จะสำเร็จแบบเงียบ ๆ พิสูจน์ข้างล่าง
+- **`precondition` block ที่ validate สมมติฐานก่อนจะกลายเป็น resource** จับ input ที่ผิดตอน plan time ด้วย message ที่บอกปัญหาจริง แทนที่จะเป็น provider error ลึกลับกลาง apply พิสูจน์ข้างล่าง
+- **`force-unlock` runbook ที่ซ้อมมาแล้ว และนิสัย backup state ที่ทำจริง** เพื่อให้ lock ที่ค้างหรือ apply ที่พังมี recovery path ที่ซ้อมมาแล้ว แทนที่จะกลายเป็น incident ที่มีคนต้อง improvise กับ production state เป็นครั้งแรก พิสูจน์ข้างล่าง
 
-```hcl
-# gke/terragrunt.hcl and cloudsql/terragrunt.hcl both use dependency blocks
-# so rollout order is driven by Terragrunt, not a person's memory.
-dependency "vpc" {
-  config_path = "../vpc"
+### Guardrail ที่ enforce จริง: `prevent_destroy`, `precondition`, และ `deletion_protection`/`deletion_policy` ของ GCP เอง
 
-  mock_outputs = {
-    network_self_link         = "mock-network-self-link"
-    private_subnet_self_links = ["mock-subnet-self-link"]
-  }
-  mock_outputs_allowed_terraform_commands = ["plan"]
-}
-
-inputs = {
-  network_self_link = dependency.vpc.outputs.network_self_link
-  subnetwork        = dependency.vpc.outputs.private_subnet_self_links[0]
-}
-```
+`prevent_destroy = true` ทำให้ Terraform ปฏิเสธ plan ที่จะทำลาย resource นั้น จบ ไม่มี flag ไหน bypass ได้นอกจากลบ `lifecycle` block ทิ้งเอง พิสูจน์จริง โดยใช้ `local_file` แทน resource ไหนก็ได้ที่ความผิดพลาดอาจทำลายได้ (กลไกเป็นของ Terraform-core เหมือนกันไม่ว่า provider ไหน):
 
 ```hcl
-# modules/cloudsql/tests/main.tftest.hcl
-run "sets_expected_database_version" {
-  command = plan
+# main.tf
+resource "local_file" "critical" {
+  filename = "${path.module}/generated/critical.conf"
+  content  = "important=true\n"
 
-  variables {
-    instance_name = "app-db-test"
-  }
-
-  assert {
-    condition     = google_sql_database_instance.this.database_version == "POSTGRES_15"
-    error_message = "Cloud SQL module did not default to the POSTGRES_15 engine"
+  lifecycle {
+    prevent_destroy = true
   }
 }
 ```
 
-## ระบบเดียวที่เชื่อมกันหมด: repo layout จริง
+```text
+$ terraform destroy -input=false -auto-approve
+...
+Plan: 0 to add, 0 to change, 1 to destroy.
 
-เอาทุกอย่างมารวมกันแล้วคอร์สนี้ก็รวมเป็นรูปทรงเดียวที่ชัดเจน ไม่ใช่ลิสต์ข้อเท็จจริงที่แยกกันเดี่ยว ๆ แต่เป็น repo หนึ่งอันที่หน้าตาแบบนี้จริง ๆ
+Error: Instance cannot be destroyed
+
+  on main.tf line 3:
+   3: resource "local_file" "critical" {
+
+Resource local_file.critical has lifecycle.prevent_destroy set, but the
+plan calls for this resource to be destroyed. To avoid this error and
+continue with the plan, either disable lifecycle.prevent_destroy or reduce
+the scope of the plan using the -target option.
+```
+
+ปฏิเสธจริง exit code จริงเป็น `1` `precondition` คือ guardrail ที่เสริมกัน validate สมมติฐานเกี่ยวกับ *input* ก่อนที่ Terraform จะ commit เข้า resource เลย:
+
+```hcl
+variable "environment" {
+  type    = string
+  default = "prod"
+}
+
+resource "local_file" "config" {
+  filename = "${path.module}/generated/app.conf"
+  content  = "env=${var.environment}\n"
+
+  lifecycle {
+    precondition {
+      condition     = contains(["dev", "staging", "prod"], var.environment)
+      error_message = "environment must be one of dev, staging, prod — got \"${var.environment}\"."
+    }
+  }
+}
+```
+
+```text
+$ terraform plan -var="environment=bogus"
+...
+Error: Resource precondition failed
+
+  on main.tf line 21, in resource "local_file" "config":
+  21:       condition     = contains(["dev", "staging", "prod"], var.environment)
+    ├────────────────
+    │ var.environment is "bogus"
+
+environment must be one of dev, staging, prod — got "bogus".
+```
+
+fail จริง และสำเร็จจริงเมื่อ `environment` ถูกต้อง (exit `0`) — พิสูจน์ทั้งสองฝั่งของ `condition` เดียวกัน ไม่ใช่แค่ฝั่ง fail
+
+GCP มี guard เฉพาะ resource ซ้อนอยู่บน `prevent_destroy` อีกชั้น: resource ที่ stateful หลายตัว ship deletion guard ของตัวเอง *อยู่ใน provider เลย* แยกจาก `lifecycle` ของ Terraform-core `google_sql_database_instance` คือตัวอย่างจริงที่มี document ไว้ — ดึงมาตรง ๆ จาก `terraform providers schema -json` ของคอร์สนี้เองกับ google provider 8.4.0 ไม่ใช่เดาเอา:
+
+```text
+$ terraform providers schema -json | jq '.provider_schemas["registry.terraform.io/hashicorp/google"].resource_schemas.google_sql_database_instance.block.attributes.deletion_protection'
+{
+  "type": "bool",
+  "description": "Used to block Terraform from deleting a SQL Instance. Defaults to true.",
+  "description_kind": "plain",
+  "optional": true
+}
+
+$ terraform providers schema -json | jq '.provider_schemas["registry.terraform.io/hashicorp/google"].resource_schemas.google_sql_database_instance.block.attributes.deletion_policy'
+{
+  "type": "string",
+  "description": "Whether Terraform will be prevented from destroying the instance. Defaults to \"DELETE\".\nWhen a 'terraform destroy' or 'terraform apply' would delete the instance,\nthe command will fail if this field is set to \"PREVENT\" in Terraform state.\nWhen set to \"ABANDON\", the command will remove the resource from Terraform\nmanagement without updating or deleting the resource in the API.\nWhen set to \"DELETE\", deleting the resource is allowed.\n",
+  "description_kind": "plain",
+  "optional": true,
+  "computed": true
+}
+```
+
+guard จริงสองตัวแยกกันบน resource เดียวกัน: `deletion_protection` (boolean **default เป็น `true`**) กับ `deletion_policy` (string — `DELETE`/`PREVENT`/`ABANDON` default เป็น `DELETE`) output จริงของ `terraform plan` ยืนยันว่า default ทั้งสองมีผลแม้ config จะไม่พูดถึงมันเลย — `terraform show -json` ของ plan จริงสำหรับ resource นี้:
+
+```json
+{ "deletion_protection": true, "deletion_policy": "DELETE" }
+```
+
+`deletion_protection` default เป็น *เปิด* — `google_sql_database_instance` ถูก destroy-protect ตั้งแต่แรกเริ่ม ก่อนที่ใครจะเขียน `lifecycle` block ด้วยซ้ำ `deletion_policy = "PREVENT"` คือ opt-in ที่เข้มกว่า ชัดเจนกว่า สำหรับ resource ที่ checklist นี้เรียกว่าแทนที่ไม่ได้จริง ๆ ซ้อนอยู่บน `deletion_protection` ไม่ใช่แทนที่มัน และ `"ABANDON"` คือตัวเลือกที่สามจริง ๆ ที่ resource คู่กันของ AWS หรือ Azure ไม่มี: มันเอา resource ออกจากการจัดการของ Terraform โดยไม่แตะ GCP resource จริงเลย มีประโยชน์สำหรับการส่งต่อแบบตั้งใจ ไม่ใช่การ destroy
+
+### `force-unlock` runbook — พิสูจน์แล้ว รวมถึงเรื่องเซอร์ไพรส์จริง
+
+lock ที่ค้าง (CI job ที่ถูก kill กลาง apply, laptop ที่หลุด network กลางทาง) บล็อก `plan`/`apply` ทุกครั้งถัดไปจนกว่าจะมีคนรัน `terraform force-unlock` runbook จริง ที่ test กับ `local` backend ของคอร์สนี้ พร้อม lock ที่ active จริง (`time_sleep` ถือ lock ไว้ 20 วินาทีระหว่างที่ `apply` แบบ background รันอยู่):
+
+```text
+$ cat .terraform.tfstate.lock.info
+{"ID":"564d6b33-65bd-5b30-f952-c2d2a2297461","Operation":"OperationTypeApply", ...}
+
+$ terraform force-unlock -force 00000000-0000-0000-0000-000000000000
+Failed to unlock state: LocalState not locked
+
+$ terraform force-unlock -force 564d6b33-65bd-5b30-f952-c2d2a2297461
+Failed to unlock state: LocalState not locked
+```
+
+เซอร์ไพรส์จริง: แม้แต่ lock ID ที่ *ถูกต้อง* กับ lock ที่ *active จริง* ก็ให้ message เหมือนกัน `terraform force-unlock --help` อธิบายว่าทำไม: `"Local state files cannot be unlocked by another process."` lock ของ `local` backend เป็น OS-level file lock ผูกกับ process ที่ถือมันไว้ ไม่ใช่ named lock ที่ backend เป็นตัวกลางแบบ locking ในตัวของ GCS เลย process `terraform` ตัวที่*สอง*ที่รัน `force-unlock` จึงไม่มีอะไรให้ release ได้อย่างมีความหมาย คอร์สนี้พิสูจน์ message จริงของ ID-mismatch จาก locking ของ GCS เองไม่ได้ (ต้องมี GCS bucket จริง) เลยไม่ claim message เฉพาะนั้นที่นี่ — แต่บทเรียนของ runbook เป็นจริงและไม่ผูกกับ provider: **`force-unlock` คือ recovery tool สำหรับ remote backend** กับ `local` state ทางแก้จริงคือ kill process ที่ค้างอยู่ หรือลบไฟล์ `.terraform.tfstate.lock.info` ที่ค้างอยู่ตรง ๆ
+
+### backup จริง ก่อน operation ที่เสี่ยง — ไม่ใช่หลัง
+
+กลไก backup ที่เป็นจริงมีสองแบบ ควรแยกให้ออก แบบแรกคืออัตโนมัติ: `local` backend เขียน `terraform.tfstate.backup` ทุกครั้งที่มี state-changing operation เก็บ state *ก่อนหน้า* ไว้ — พิสูจน์ด้วยการ apply config change สองครั้งแล้ว diff ไฟล์ทั้งสอง:
+
+```text
+$ cat terraform.tfstate.backup | grep content
+      "content": "listen=8080\n",
+
+$ cat terraform.tfstate | grep content
+      "content": "listen=9090\n",
+```
+
+แบบที่สองคือตั้งใจทำเอง: `terraform state pull > backup-$(date +%Y%m%d-%H%M%S).tfstate` ก่อน operation ไหนก็ตามที่ operator กังวล — snapshot จริงที่มี timestamp แยกต่างหากจากไฟล์ `.backup` อัตโนมัติที่มีอยู่ `the-state-file.mdx` พิสูจน์ไปแล้วว่า `state push` enforce `lineage`/`serial` ก่อนจะรับการ restore ซึ่งคือ safety net ที่ทำให้ backup แบบนี้ใช้ได้จริง
+
+## ระบบเดียวที่สอดคล้องกัน: repo layout จริง
+
+เอาทุกอย่างมารวมกันแล้วคอร์สนี้ก็รวมเป็นรูปเดียว เจาะจง — ไม่ใช่ list ของ fact ที่แยกกัน แต่เป็น repository เดียวที่หน้าตาแบบนี้จริง ๆ:
 
 ```text
 infra/
 ├── root.hcl
 ├── vpc/
 │   └── terragrunt.hcl
-├── gke/
-│   └── terragrunt.hcl
 └── cloudsql/
     └── terragrunt.hcl
 ```
 
-`root.hcl` อยู่บนสุดถือ configuration ของ backend และการ generate provider ที่ใช้ร่วมกัน ถูก include โดยทุก unit ข้างล่าง
+`root.hcl` สำหรับ production มี GCS backend จริงพร้อม locking ในตัว — รูปแบบที่ `remote-backends-and-locking.mdx` พิสูจน์จริงไปแล้ว:
 
 ```hcl
-# infra/root.hcl
+# Production shape only — needs a real GCS bucket, so it is not collected/run by this lesson's harness proof below.
 remote_state {
   backend = "gcs"
 
@@ -97,14 +192,90 @@ remote_state {
 }
 ```
 
+proof ของบทนี้เองข้างล่างใช้ `local` backend แทน ให้ทั้ง tree validate และ plan ได้แบบ offline เต็มรูปแบบ:
+
 ```hcl
-# infra/cloudsql/terragrunt.hcl
+# root.hcl
+remote_state {
+  backend = "local"
+  config = {
+    path = "${get_parent_terragrunt_dir()}/${path_relative_to_include()}/terraform.tfstate"
+  }
+}
+
+generate "provider" {
+  path      = "provider.tf"
+  if_exists = "overwrite"
+  contents  = <<EOF
+provider "google" {
+  project = "acme-prod-123456"
+  region  = "us-central1"
+}
+EOF
+}
+
+generate "backend" {
+  path      = "backend.tf"
+  if_exists = "overwrite"
+  contents  = <<EOF
+terraform {
+  backend "local" {}
+}
+EOF
+}
+```
+
+```hcl
+# vpc/terragrunt.hcl
 include "root" {
   path = find_in_parent_folders("root.hcl")
 }
 
 terraform {
-  source = "../../modules/cloudsql"
+  source = "../modules/vpc"
+}
+```
+
+```hcl
+# modules/vpc/main.tf
+terraform {
+  required_providers {
+    google = {
+      source  = "hashicorp/google"
+      version = "~> 8.0"
+    }
+  }
+}
+
+resource "google_compute_network" "this" {
+  name                    = "app-vpc"
+  auto_create_subnetworks = false
+}
+
+resource "google_compute_subnetwork" "private" {
+  name          = "app-private"
+  ip_cidr_range = "10.0.1.0/24"
+  region        = "us-central1"
+  network       = google_compute_network.this.id
+}
+
+output "network_self_link" {
+  value = google_compute_network.this.self_link
+}
+
+output "private_subnet_self_links" {
+  value = [google_compute_subnetwork.private.self_link]
+}
+```
+
+```hcl
+# cloudsql/terragrunt.hcl
+include "root" {
+  path = find_in_parent_folders("root.hcl")
+}
+
+terraform {
+  source = "../modules/cloudsql"
 }
 
 dependency "vpc" {
@@ -118,73 +289,185 @@ dependency "vpc" {
 
 inputs = {
   network_self_link = dependency.vpc.outputs.network_self_link
-  subnetwork        = dependency.vpc.outputs.private_subnet_self_links[0]
 }
 ```
 
-ทุกชิ้นส่วนตรงนี้ย้อนกลับไปหาบทเรียนก่อนหน้าได้หมด GCS locking ในตัวคือเรื่อง locking ของ module State Management, `root.hcl` คู่กับ `include` คือ DRY backend pattern ของ Terragrunt Fundamentals, `dependency` block คือสิ่งที่ให้ `cloudsql` reference output จริงของ `vpc` ได้โดยไม่ต้องมีคนจำว่า unit ไหนต้อง apply ก่อน และ source `../../modules/cloudsql` ที่ pin ไว้กับ tag ใน repo จริง ไม่ปล่อยลอย คือวินัยเรื่อง versioning ของ Modules
+```hcl
+# modules/cloudsql/terraform.tfvars — harness fixture only, so the raw
+# `terraform plan` proof for modules/cloudsql can attempt to run standalone;
+# a real deployment gets this value from Terragrunt's dependency block instead.
+network_self_link = "mock-network-self-link"
+```
 
-ทั้ง tree นี้ถูก ship ผ่าน CI/CD shape เดียวกับที่ผ่านมาใน module นี้เป๊ะ `terragrunt run --all plan` รันทุก pull request ที่แตะ `infra/` โพสต์ output ให้ review และ `terragrunt run --all apply` รันแค่หลัง merge เข้า main authenticate ผ่าน Workload Identity Federation ตัวเดียวกัน ไม่ใช่ key ที่ดาวน์โหลดมา ไม่มีอะไรตรงนี้เป็นกลไกใหม่เลย ทั้งหมดคือชิ้นส่วนเดียวกันจากทุก module ก่อนหน้า เอามาต่อกันเป็นระบบเดียวที่ deploy `vpc` แล้วตามด้วย `gke` กับ `cloudsql` ตามลำดับที่ `dependency` block บอกไว้ gate ด้วย plan ที่มีคนอ่านจริง ๆ
+```hcl
+# modules/cloudsql/main.tf
+terraform {
+  required_providers {
+    google = {
+      source  = "hashicorp/google"
+      version = "~> 8.0"
+    }
+  }
+}
 
-<Mermaid title="root.hcl บวกกับสาม unit ที่พึ่งพากัน ship ผ่าน CI pipeline ที่ gate ทั้ง plan และ apply" code={productionRepoDiagram} />
+variable "network_self_link" {
+  type = string
+}
+
+resource "google_sql_database_instance" "this" {
+  name             = "app-db"
+  database_version = "POSTGRES_15"
+  region           = "us-central1"
+  settings {
+    tier = "db-f1-micro"
+  }
+}
+```
+
+ต่างจาก `azurerm` (พิสูจน์ในคอร์ส Azure พี่น้องว่าต้องมี session จริงแม้แค่จะ plan การสร้างล้วน ๆ) `google` proceed ได้ด้วย service-account credential ปลอมแต่ shape ถูก — พฤติกรรมเดียวกับที่คอร์สนี้ใช้ไปแล้วใน `policy-as-code-and-static-analysis.mdx` และ `secrets-and-credential-management.mdx` การชี้ provider block ไปที่ไฟล์แบบนั้น (นอกเหนือจาก fence ที่ collect ไว้ของบทนี้ เพราะ JSON key ดิบไม่ใช่ HCL) ทำให้ `terragrunt run --all plan` แบบ end-to-end จริงเต็มรูปแบบเป็นไปได้:
+
+```text
+$ terragrunt run --all plan --non-interactive
+INFO  The following units will be run, starting with dependencies and then their dependents:
+.
+╰── vpc
+    ╰── cloudsql
+...
+[cloudsql] terraform: Plan: 1 to add, 0 to change, 0 to destroy.
+
+❯❯ Run Summary  2 units  5s
+   ────────────────────────────
+   Succeeded    2
+```
+
+`vpc` plan ก่อน คำนวณ `network_self_link` จริง `cloudsql` plan ทีหลัง ใช้ `mock_outputs` ของ `vpc` สำหรับ `plan` (output จริงของ `vpc` จะไหลผ่านอัตโนมัติทันทีที่ `vpc` ถูก apply จริงแล้ว) ทุกชิ้นตรงนี้โยงกลับไปที่บทเรียนก่อนหน้า: GCS locking ในตัวใน production `root.hcl` ข้างบนคือเรื่อง locking ของ module State Management; `root.hcl` บวก `include` คือ pattern DRY backend ของ Terragrunt Fundamentals; `dependency` block คือสิ่งที่ทำให้ `cloudsql` reference output จริงของ `vpc` ได้โดยไม่ต้องมีใครจำว่า unit ไหนต้อง apply ก่อน และ source `../../modules/cloudsql` ที่ pin ไว้เป็น tag ใน repo จริงแทนที่จะปล่อยลอย คือวินัยเรื่อง versioning ของ Modules
+
+ทั้ง tree ship ผ่าน CI/CD shape เดียวกับที่คุยไปแล้วก่อนหน้าใน module นี้เป๊ะ ๆ: `terragrunt run --all plan` รันทุก pull request ที่แตะ `infra/` post output ให้ review และ `terragrunt run --all apply` รันแค่หลัง merge เข้า main authenticate ผ่าน Workload Identity Federation ตัวเดียวกันแทนที่จะเป็น key ที่ดาวน์โหลดมา ไม่มีกลไกใหม่อะไรเลยตรงนี้ — เป็นชิ้นส่วนเดียวกันจากทุก module ก่อนหน้า ประกอบกันเป็นระบบเดียวที่ deploy `vpc` แล้วตามด้วย `cloudsql` ตามลำดับที่ `dependency` block บอก โดยมี plan ที่คนอ่านจริงเป็น gate
+
+<Mermaid title="root.hcl กับ unit ที่ผูกกันด้วย dependency, deploy ผ่าน CI pipeline ที่ gate plan และ apply" code={productionRepoDiagram} />
 
 export const productionRepoDiagram = `flowchart TB
   root["root.hcl: shared GCS backend, built-in locking"]
   root --> vpc["vpc unit"]
-  root --> gke["gke unit"]
   root --> cloudsql["cloudsql unit"]
-  vpc -->|dependency block: network_self_link, subnet links| gke
   vpc -->|dependency block: network_self_link, subnet links| cloudsql
   pr["Pull request"] -->|terragrunt run --all plan| review["Reviewed for -/+ replacements"]
   review -->|merge to main| apply["terragrunt run --all apply"]
   apply --> vpc
-  apply --> gke
   apply --> cloudsql`;
 
+## Mental Model
+
+ทุกข้อใน checklist นี้คือ guardrail กันไว้จาก failure mode ที่*เจาะจง* *ระบุชื่อได้* `prevent_destroy` กับ `precondition` (พิสูจน์ข้างบนด้วยการปฏิเสธจริง) คุ้มกันจังหวะที่ plan ถูกคำนวณ `deletion_protection`/`deletion_policy` ของ GCP เอง (พิสูจน์ข้างบนด้วยการดึง schema จริงและ plan JSON จริง) คือ guard ชั้นที่สองที่ผูกกับ resource เอง — default เป็น *เปิด* สำหรับ `google_sql_database_instance` ก่อนที่ใครจะเขียน `lifecycle` block ด้วยซ้ำ `force-unlock` (พิสูจน์ข้างบนพร้อมเซอร์ไพรส์จริงบน `local` state) คุ้มกันจังหวะที่ lock อยู่นานกว่า process ที่ถือมัน state backup คุ้มกันจังหวะที่มีอะไรผิดพลาดไปแล้ว และ DAG ของ `dependency` block (พิสูจน์ข้างบนด้วย offline proof ที่ครบถ้วนที่สุดในคอร์สนี้ — `terragrunt run --all plan` จริงที่สำเร็จเต็มรูปแบบ) คุ้มกันจังหวะที่ rollout หลาย unit ต้องเกิดตามลำดับที่ถูกต้องโดยไม่ต้องพึ่งความจำของใครเลย
+
+## ข้อแลกเปลี่ยน
+
+| ทางเลือก | ได้อะไร | เสียอะไร |
+|---|---|---|
+| `lifecycle.prevent_destroy` บน resource สำคัญ | พิสูจน์ข้างบน: destroy หรือ forced replacement ถูกปฏิเสธตรง ๆ | ต้องเอาออกอย่างตั้งใจก่อน destroy ที่ตั้งใจจริง ๆ จะไปต่อได้ |
+| `deletion_protection`/`deletion_policy` แบบ native ของ GCP | พิสูจน์ข้างบน: `deletion_protection` default เป็น `true` — destroy-protected ก่อนที่ Terraform-side lifecycle block จะมีอยู่เลย | เฉพาะ resource: พิสูจน์จริงแค่กับ `google_sql_database_instance` ที่นี่ — resource อื่นอาจไม่มี guard แบบเดียวกัน เลยต้องเช็ค schema ไม่ใช่สมมติเอา |
+| `precondition` block | พิสูจน์ข้างบน: input ที่ผิด fail ตอน plan time บอกปัญหาจริง | เป็นอีกสิ่งที่ต้องคอยตามให้ทันเมื่อ constraint จริงของ module เปลี่ยนไป |
+| พิสูจน์ DAG เต็มรูปแบบผ่าน `terragrunt run --all plan` จริง (credential ปลอมแต่ shape ถูก) | offline proof ที่ครบถ้วนที่สุดในคอร์สนี้ — สำเร็จแบบ end-to-end จริง ไม่ใช่แค่เช็ค schema/wiring | เป็นไปได้เพราะ `google` ยอมรับ shape ของ credential file ปลอมสำหรับการสร้างล้วน ๆ เท่านั้น คอร์ส Azure พี่น้องทำแบบเดียวกันไม่ได้ |
+| backup แบบ `state pull` ที่ตั้งใจทำก่อน operation เสี่ยง | snapshot ที่ operator คุมเอง แยกจาก `.tfstate.backup` อัตโนมัติที่มีอยู่ | เป็นอีกขั้นตอนที่ต้องจำก่อน `state rm`/`import`/provider upgrade |
+
+## ความเข้าใจผิดที่พบบ่อย
+
+- **"`prevent_destroy` หยุด change ทุกแบบกับ resource"** พิสูจน์ข้างบน: มันบล็อกแค่ *destroy* โดยเฉพาะ — in-place update ไปต่อได้ปกติ
+- **"GCP resource ต้องมี `lifecycle` block ฝั่ง Terraform ถึงจะ destroy-protected ได้"** พิสูจน์ข้างบนด้วยการดึง schema จริง: `google_sql_database_instance.deletion_protection` default เป็น `true` ใน provider เองเลย — protection มีอยู่ก่อนที่ `lifecycle` block ไหนจะถูกเขียนด้วยซ้ำ
+- **"`force-unlock` คือทางแก้ที่ถูกต้องสำหรับ Terraform run ที่ค้างไหนก็ได้"** พิสูจน์ข้างบน พร้อมเซอร์ไพรส์จริง: กับ `local` state `force-unlock` release lock ที่ process อื่นถืออยู่ไม่ได้เลย `terraform force-unlock --help` บอกตรง ๆ
+- **"`.tfstate.backup` อัตโนมัติของ Terraform เป็น backup strategy ที่พอแล้ว"** พิสูจน์ข้างบน: มันเก็บแค่ state *ก่อนหน้าตัวเดียว* — snapshot แบบ `state pull` ที่ตั้งใจทำ คือ backup เดียวที่รอดเกินกว่าหนึ่ง apply
+
+## อ่านโค้ดที่ AI เขียน
+
+เวลา review Terraform/Terragrunt setup บน GCP ที่ AI เขียนแล้วบอกว่า "production-ready" ให้เช็ค:
+
+- resource ที่ stateful (`google_sql_database_instance`, `google_storage_bucket` ที่มีข้อมูลจริง, อะไรก็ตามที่เก็บ state) ที่ตั้ง `deletion_protection` เป็น `false` หรือ `deletion_policy` เป็น `"ABANDON"`/`"DELETE"` ตรง ๆ โดยไม่มี comment อธิบายว่าทำไม — พิสูจน์ข้างบน default ของ provider เอง (`deletion_protection = true`) คือตัวที่ปลอดภัย การ override ตรง ๆ ควรมีเหตุผลชัดเจน
+- input validation ที่เกิดแค่ใน application code ไม่เคยเป็น `precondition` เลย — พิสูจน์ข้างบน `precondition` ตอน plan time จับความผิดพลาดได้ก่อนเรียก provider เลย
+- runbook ที่ claim ว่า `terraform force-unlock <id>` "ใช้ได้เลย" กับ backend ไหนก็ตามที่ใช้อยู่ — พิสูจน์ข้างบน claim นั้นผิดสำหรับ `local` state โดยเฉพาะ
+- `dependency` block ที่ reference output ของ unit ต้นทางโดยไม่มี `mock_outputs`/`mock_outputs_allowed_terraform_commands` — พิสูจน์ข้างบน `terragrunt run --all plan` ต้องมีสองอย่างนี้ถึงจะ plan unit ปลายทางได้ก่อนที่ unit ต้นทางจะถูก apply จริง
+- module `source` ที่ pin ไว้เป็นชื่อ branch แทนที่จะเป็น tag หรือ commit SHA — ความเสี่ยง unpinned-dependency แบบเดียวกับที่ checklist นี้ flag ไว้กับ provider version
+
+<SpotTheBug lang="hcl" code={`resource "google_sql_database_instance" "main" {
+  name             = "app-db-prod"
+  database_version = "POSTGRES_15"
+  region           = "us-central1"
+
+  deletion_protection = false
+
+  settings {
+    tier = "db-f1-micro"
+  }
+}`}>
+`deletion_protection = false` ปิด guard ตัวเดียวที่ resource นี้ ship มา *เปิดไว้ default* ตรง ๆ พิสูจน์ข้างบน `google_sql_database_instance.deletion_protection` default เป็น `true` ตั้งใจไว้เพื่อบล็อก accidental destroy การตั้งเป็น `false` บน resource ที่ชื่อ `app-db-prod` เอา protection นั้นออกไปเลยทั้งหมด โดยไม่มี `lifecycle.prevent_destroy` เขียนแทนที่ — `terraform destroy` ครั้งถัดไป หรือ config change ที่บังคับ replacement ไปต่อตามแผนแบบเงียบ ๆ ต่างจาก `lifecycle` block override นี้เป็นแค่ boolean ตัวเดียวที่มองข้ามตอน review ได้ง่ายมาก ทางแก้คือลบบรรทัดนี้ (เก็บ default จริงไว้) หรือถ้าต้องการ protection ที่เข้มกว่า default `deletion_policy = "PREVENT"` (พิสูจน์ข้างบนว่าเป็น guard จริงแยกต่างหาก) ซ้อนไว้ด้านบน
+</SpotTheBug>
+
 <Callout title="สรุปหนึ่งบรรทัด">
-ความพร้อมสำหรับ production คือ **checklist** ไม่ใช่การตัดสินใจข้อเดียว มี GCS backend ที่มี locking ในตัวตั้งแต่วันแรก, provider กับ module version ที่ pin ไว้, ทุก `plan` ถูก review ใน CI หา replacement ที่ไม่คาดคิด, secret ไม่อยู่ใน variable และ state เท่าที่ทำได้โดยมี IAM จำกัดสิทธิ์ state bucket แน่นหนา, `tflint`/scanner/policy-as-code ต่อเข้ากับ CI, `dependency` block ของ Terragrunt ขับลำดับ rollout แทนความจำของคน และ `terraform test` ครอบคลุม module ที่ไม่ trivial เอามารวมกันแล้วคือระบบเดียวที่เชื่อมกันหมด backend ที่ใช้ร่วมกันผ่าน **`root.hcl`**, หลาย unit ต่อกันด้วย `dependency` block, ship ผ่าน pipeline ที่รัน `terragrunt run --all plan` ทุก pull request และ `terragrunt run --all apply` แค่หลัง merge เท่านั้น ไม่ใช่กองข้อเท็จจริงแยกกัน
+ความพร้อมสำหรับ production คือ **checklist** ไม่ใช่การตัดสินใจครั้งเดียว: GCS backend พร้อม locking ในตัวตั้งแต่วันแรก, provider กับ module version ที่ pin ไว้, `plan` ทุกอันถูก review ใน CI หา replacement ที่ไม่คาดคิด, secret อยู่นอก variable และ state ให้มากที่สุดพร้อม IAM จำกัด state bucket เข้มงวด, `tflint`/scanner/policy-as-code wired เข้า CI, guardrail **`prevent_destroy`**/**`precondition`** (พิสูจน์ข้างบนทั้งคู่ด้วยการปฏิเสธจริง) บวกกับ **`deletion_protection`**/**`deletion_policy`** ของ GCP เอง (พิสูจน์ข้างบนด้วยการดึง schema จริง — `deletion_protection` default เป็น `true`), `force-unlock` runbook ที่ซ้อมแล้ว (พิสูจน์ข้างบน: มันทำอะไรกับ `local` state ไม่ได้เลย โดยการออกแบบ), นิสัย backup state ที่ตั้งใจทำ, Terragrunt **`dependency`** block ขับเคลื่อนลำดับ rollout — พิสูจน์ข้างบนด้วย offline proof ที่ครบถ้วนที่สุดในคอร์สนี้ `terragrunt run --all plan` จริงที่สำเร็จแบบ end-to-end (`Run Summary 2 units, Succeeded 2`) — และ `terraform test` coverage สำหรับ module ที่ไม่ธรรมดา รวมกันแล้วมันคือระบบเดียวที่สอดคล้องกัน ไม่ใช่กองของ fact ที่แยกกัน
 </Callout>
 
 export const quizProductionChecklist = [
   {
-    q: 'ทำไมการ pin module version ไว้กับ tag ที่ระบุถึงสำคัญ แทนที่จะชี้ source ไปที่ branch ที่ลอยไปเรื่อย ๆ',
+    q: 'ทำไมการ pin module version ไว้เป็น tag เจาะจงถึงสำคัญ แทนที่จะชี้ source ไปที่ branch ที่ลอยได้',
     options: [
-      'ไม่มีผลจริงเพราะ Terraform ดาวน์โหลดโค้ดล่าสุดใหม่เสมออยู่แล้ว',
-      'module ที่ไม่ pin สามารถเปลี่ยนใต้ configuration ระหว่าง run ได้โดยไม่มี diff ให้ review เลย plan เลยขยับได้ด้วยเหตุผลที่ไม่เกี่ยวกับการเปลี่ยนแปลงของคุณเองเลย',
-      'การ pin version เกี่ยวกับ Terraform binary เองเท่านั้น ไม่เกี่ยวกับ module',
-      'branch ที่ลอยไปเรื่อย ๆ จริง ๆ แล้วคือ pattern ที่แนะนำสำหรับ production',
+      'ไม่มีผลจริง เพราะ Terraform ดาวน์โหลดโค้ดล่าสุดใหม่เสมออยู่แล้ว',
+      'module ที่ไม่ pin เปลี่ยนใต้เท้า configuration ได้ระหว่าง run โดยไม่มี diff ให้ review เลย plan อาจเปลี่ยนไปด้วยเหตุผลที่ไม่เกี่ยวกับ change ของตัวเองเลย',
+      'การ pin version เกี่ยวข้องแค่กับตัว Terraform binary เอง ไม่เกี่ยวกับ module',
+      'branch ที่ลอยได้จริง ๆ คือ pattern ที่แนะนำสำหรับ production',
     ],
     answer: 1,
   },
   {
-    q: 'ทำไม remote GCS backend ที่มี locking ในตัวควรตั้งไว้ตั้งแต่วันแรก แทนที่จะมาเพิ่มทีหลัง',
+    q: 'ทำไม remote GCS backend พร้อม locking ในตัวควร config ตั้งแต่วันแรก แทนที่จะเพิ่มทีหลัง',
     options: [
-      'locking สำคัญแค่ตอนทีมมีมากกว่าห้าสิบคนเท่านั้น',
-      'local state ไม่รอดตอนที่มีเพื่อนร่วมทีมคนที่สองหรือ CI run มาแตะ infrastructure เดียวกัน และการมาเพิ่ม backend ทีหลังหลังจาก state file เสียหายหรือชนกันยากกว่าเริ่มด้วย backend ตั้งแต่แรกมาก',
-      'locking จำเป็นแค่กับ destroy operation เท่านั้น ไม่เกี่ยวกับ apply',
-      'GCS backend ตั้งค่าไม่ได้จนกว่าจะ apply ครั้งแรกไปแล้ว',
+      'locking สำคัญก็ต่อเมื่อทีมมีเกินห้าสิบคนแล้วเท่านั้น',
+      'local state ไม่รอดจากเพื่อนร่วมทีมคนที่สองหรือ CI run ที่แตะ infrastructure เดียวกัน และการย้อนกลับมาใส่ backend หลังจาก state file เสียหายหรือขัดแย้งกันยากกว่าเริ่มด้วย backend ตั้งแต่แรกมาก',
+      'locking จำเป็นแค่กับ destroy operation ไม่ใช่ apply',
+      'GCS backend config ไม่ได้จนกว่าจะ apply ครั้งแรกเสร็จ',
     ],
     answer: 1,
   },
   {
-    q: 'ทำไม dependency block ของ Terragrunt ถึงสำคัญสำหรับการ rollout แบบหลาย unit แทนที่จะพึ่ง engineer apply unit ตามลำดับที่ถูกต้องด้วยมือ',
+    q: 'ทำไม Terragrunt dependency block ถึงสำคัญสำหรับ rollout หลาย unit แทนที่จะพึ่ง engineer apply ตามลำดับที่ถูกต้องด้วยมือ',
     options: [
-      'dependency block เป็นแค่ของตกแต่งเฉย ๆ ไม่มีผลต่อลำดับ apply จริง',
-      'ทำให้ unit หนึ่ง reference output จริงที่คำนวณแล้วของอีก unit ได้ตรง ๆ และขับลำดับ apply ให้อัตโนมัติ แทนที่จะพึ่งคนจำว่า vpc ต้อง apply ก่อน cloudsql',
-      'dependency block แทนที่ความจำเป็นของ remote backend ได้ทั้งหมด',
-      'dependency block ทำงานได้แค่ภายในไฟล์ terragrunt.hcl เดียว ไม่ข้าม unit',
+      'dependency block เป็นแค่ของตกแต่ง ไม่มีผลกับลำดับ apply เลย',
+      'มันให้ unit หนึ่ง reference output จริงที่คำนวณแล้วของอีก unit ได้ตรง ๆ และขับเคลื่อนลำดับ apply อัตโนมัติ แทนที่จะพึ่งคนจำว่า vpc ต้อง apply ก่อน cloudsql',
+      'dependency block แทนที่ความจำเป็นของ remote backend ไปเลยทั้งหมด',
+      'dependency block ใช้ได้แค่ภายในไฟล์ terragrunt.hcl เดียว ข้าม unit ไม่ได้',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ข้างบนด้วย offline proof ที่ครบถ้วนที่สุดในคอร์สนี้: terragrunt run --all plan จริงเต็มรูปแบบสำเร็จ end to end (Run Summary 2 units, Succeeded 2), vpc ก่อน cloudsql',
+  },
+  {
+    q: 'ทำไมการ review plan ใน CI โดยเฉพาะหา -/+ replacement ถึงสำคัญในฐานะส่วนหนึ่งของ checklist นี้',
+    options: [
+      'เพราะ -/+ แปลว่า syntax error ใน configuration เสมอ',
+      'เพราะ forced replacement ทำลายแล้วสร้าง resource ใหม่ ซึ่งอาจแปลว่าข้อมูลหายจริงหรือ downtime จริงถ้า plan ที่ไม่ได้ review ถูก approve แล้ว apply',
+      'เพราะ -/+ โผล่แค่ตอนใช้ Terragrunt เท่านั้น ไม่เกิดกับ Terraform เปล่า ๆ',
+      'เพราะ CI รัน terraform plan ไม่ได้ถ้ายังไม่เห็นบรรทัด -/+ ก่อน',
     ],
     answer: 1,
   },
   {
-    q: 'ทำไมการ review plan ใน CI เพื่อหา -/+ replacement โดยเฉพาะถึงสำคัญในฐานะส่วนหนึ่งของ checklist นี้',
+    q: '```text\n$ terraform providers schema -json | jq \'...deletion_protection\'\n{ "type": "bool", "description": "...Defaults to true.", "optional": true }\n```\noutput schema จริงนี้ของ google_sql_database_instance พิสูจน์อะไร?',
     options: [
-      '-/+ หมายถึง syntax error ใน configuration เสมอ',
-      'forced replacement ทำลายแล้วสร้าง resource ใหม่ ซึ่งอาจแปลว่าข้อมูลหายจริงหรือ downtime จริงถ้า plan ที่ไม่ผ่านการ review ถูก approve แล้ว apply ไป',
-      '-/+ ปรากฏแค่ตอนใช้ Terragrunt เท่านั้น ไม่เกิดกับ Terraform ธรรมดา',
-      'CI รัน terraform plan ไม่ได้ถ้ายังไม่เห็นบรรทัด -/+ ก่อน',
+      'deletion_protection ไม่มี default ต้องตั้งตรง ๆ เสมอ',
+      'resource นี้ destroy-protected ตั้งแต่ default ก่อนที่ lifecycle.prevent_destroy ฝั่ง Terraform จะถูกเขียนด้วยซ้ำ — guardrail ชั้นที่สองที่ผูกกับ resource เอง ซ้อนอยู่ใต้ตัวของ Terraform-core',
+      'field นี้มีผลแค่เรื่อง billing ไม่เกี่ยวกับ destroy behavior',
+      'deletion_protection กับ deletion_policy คือ field เดียวกันแค่คนละชื่อ',
     ],
     answer: 1,
+    explain: 'พิสูจน์ข้างบนทั้ง schema จริง (default เป็น true) และ plan JSON จริงที่ยืนยัน deletion_protection: true, deletion_policy: "DELETE" แม้ config จะไม่พูดถึงทั้งคู่เลย',
+  },
+  {
+    q: '```text\n$ terraform force-unlock -force 564d6b33-...\nFailed to unlock state: LocalState not locked\n```\nนี่คือ lock ID ที่ถูกต้องกับ local lock ที่ active จริง สิ่งนี้พิสูจน์อะไรสำหรับ force-unlock runbook?',
+    options: [
+      'force-unlock พังและไม่ควรใช้กับ backend ไหนเลย',
+      'กับ local state โดยเฉพาะ force-unlock release lock ที่ process อื่นถืออยู่ไม่ได้เลย — terraform force-unlock --help ยืนยันตรง ๆ force-unlock คือ recovery tool ของ remote backend',
+      'lock ID ต้องพิมพ์เป็นตัวพิมพ์ใหญ่เสมอถึงจะใช้ได้',
+      'สิ่งนี้เกิดแค่ตอนใช้ time_sleep สร้าง lock เท่านั้น',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ข้างบนทั้ง ID ผิดและ ID ที่ถูกต้องจริงกับ lock ที่ active จริง — ทั้งคู่ fail เหมือนกันเป๊ะ และ --help text ของ tool เองอธิบายไว้ตรง ๆ ว่าทำไมสำหรับ local state',
   },
 ];
 

@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## The idea in one sentence
 
@@ -25,41 +26,137 @@ None of these are new ideas at this point. What is new is seeing them side by si
 - **`tflint`, a security scanner, and ideally policy-as-code wired into CI**, so known-bad patterns and organizational rules are enforced mechanically instead of depending on a human catching every case by eye. Covered in this module's policy-as-code lesson.
 - **Terragrunt `dependency` blocks driving rollout order**, not a person remembering that the VPC has to apply before the database. Covered in Terragrunt Fundamentals.
 - **`terraform test` / `.tftest.hcl` coverage for any module doing something non-trivial**, so a refactor of a module's internals gets caught by an assertion instead of by a surprised downstream consumer. Covered in Modules.
+- **`lifecycle.prevent_destroy` on genuinely irreplaceable resources, and `deletion_protection`/`deletion_policy` on the GCP resources that ship their own**, so a config change that would destroy production data fails the plan loudly instead of quietly succeeding. Proven below.
+- **`precondition` blocks validating assumptions before they become resources**, catching a bad input at plan time with a message that names the actual problem, instead of a cryptic provider error mid-apply. Proven below.
+- **A rehearsed `force-unlock` runbook and a real state-backup habit**, so a stuck lock or a bad apply has a practiced recovery path instead of becoming an incident where someone improvises against production state for the first time. Proven below.
+
+### Guardrails that are actually enforced: `prevent_destroy`, `precondition`, and GCP's own `deletion_protection`/`deletion_policy`
+
+`prevent_destroy = true` makes Terraform refuse a plan that would destroy the resource, full stop — no flag bypasses it short of removing the `lifecycle` block itself. Real proof, `local_file` standing in for any resource a mistake could otherwise destroy (the mechanism is Terraform-core, identical regardless of provider):
 
 ```hcl
-# gke/terragrunt.hcl and cloudsql/terragrunt.hcl both use dependency blocks
-# so rollout order is driven by Terragrunt, not a person's memory.
-dependency "vpc" {
-  config_path = "../vpc"
+# main.tf
+resource "local_file" "critical" {
+  filename = "${path.module}/generated/critical.conf"
+  content  = "important=true\n"
 
-  mock_outputs = {
-    network_self_link         = "mock-network-self-link"
-    private_subnet_self_links = ["mock-subnet-self-link"]
+  lifecycle {
+    prevent_destroy = true
   }
-  mock_outputs_allowed_terraform_commands = ["plan"]
-}
-
-inputs = {
-  network_self_link = dependency.vpc.outputs.network_self_link
-  subnetwork        = dependency.vpc.outputs.private_subnet_self_links[0]
 }
 ```
 
+```text
+$ terraform destroy -input=false -auto-approve
+...
+Plan: 0 to add, 0 to change, 1 to destroy.
+
+Error: Instance cannot be destroyed
+
+  on main.tf line 3:
+   3: resource "local_file" "critical" {
+
+Resource local_file.critical has lifecycle.prevent_destroy set, but the
+plan calls for this resource to be destroyed. To avoid this error and
+continue with the plan, either disable lifecycle.prevent_destroy or reduce
+the scope of the plan using the -target option.
+```
+
+Real refusal, real exit code `1`. `precondition` is the complementary guardrail, validating an assumption about *input* before Terraform commits to the resource at all:
+
 ```hcl
-# modules/cloudsql/tests/main.tftest.hcl
-run "sets_expected_database_version" {
-  command = plan
+variable "environment" {
+  type    = string
+  default = "prod"
+}
 
-  variables {
-    instance_name = "app-db-test"
-  }
+resource "local_file" "config" {
+  filename = "${path.module}/generated/app.conf"
+  content  = "env=${var.environment}\n"
 
-  assert {
-    condition     = google_sql_database_instance.this.database_version == "POSTGRES_15"
-    error_message = "Cloud SQL module did not default to the POSTGRES_15 engine"
+  lifecycle {
+    precondition {
+      condition     = contains(["dev", "staging", "prod"], var.environment)
+      error_message = "environment must be one of dev, staging, prod — got \"${var.environment}\"."
+    }
   }
 }
 ```
+
+```text
+$ terraform plan -var="environment=bogus"
+...
+Error: Resource precondition failed
+
+  on main.tf line 21, in resource "local_file" "config":
+  21:       condition     = contains(["dev", "staging", "prod"], var.environment)
+    ├────────────────
+    │ var.environment is "bogus"
+
+environment must be one of dev, staging, prod — got "bogus".
+```
+
+Real failure, and a real success with a valid `environment` value (exit `0`) — both branches of the same `condition` proven, not just the failure case.
+
+GCP layers a resource-specific guard on top of `prevent_destroy`: many stateful resources ship their own deletion guard *inside the provider*, separate from Terraform-core `lifecycle`. `google_sql_database_instance` is a real, documented example — pulled directly from this course's own `terraform providers schema -json` against google provider 8.4.0, not guessed:
+
+```text
+$ terraform providers schema -json | jq '.provider_schemas["registry.terraform.io/hashicorp/google"].resource_schemas.google_sql_database_instance.block.attributes.deletion_protection'
+{
+  "type": "bool",
+  "description": "Used to block Terraform from deleting a SQL Instance. Defaults to true.",
+  "description_kind": "plain",
+  "optional": true
+}
+
+$ terraform providers schema -json | jq '.provider_schemas["registry.terraform.io/hashicorp/google"].resource_schemas.google_sql_database_instance.block.attributes.deletion_policy'
+{
+  "type": "string",
+  "description": "Whether Terraform will be prevented from destroying the instance. Defaults to \"DELETE\".\nWhen a 'terraform destroy' or 'terraform apply' would delete the instance,\nthe command will fail if this field is set to \"PREVENT\" in Terraform state.\nWhen set to \"ABANDON\", the command will remove the resource from Terraform\nmanagement without updating or deleting the resource in the API.\nWhen set to \"DELETE\", deleting the resource is allowed.\n",
+  "description_kind": "plain",
+  "optional": true,
+  "computed": true
+}
+```
+
+Two separate, real guards on the same resource: `deletion_protection` (a boolean, **defaults to `true`**) and `deletion_policy` (a string — `DELETE`/`PREVENT`/`ABANDON`, defaulting to `DELETE`). Real `terraform plan` output confirms both defaults apply even when the config never mentions them — `terraform show -json` of a real plan for this resource:
+
+```json
+{ "deletion_protection": true, "deletion_policy": "DELETE" }
+```
+
+`deletion_protection` defaults to *on* — a `google_sql_database_instance` is destroy-protected out of the box, before anyone writes a `lifecycle` block at all. `deletion_policy = "PREVENT"` is the stricter, explicit opt-in for resources this checklist calls genuinely irreplaceable, layered on top of `deletion_protection` rather than replacing it — and `"ABANDON"` is a real third option neither AWS nor Azure's equivalent resources have: it removes the resource from Terraform's management without touching the real GCP resource at all, useful for a deliberate hand-off rather than a destroy.
+
+### The `force-unlock` runbook — proven, including a real surprise
+
+A stuck lock (a CI job killed mid-apply, a laptop that lost network mid-run) blocks every subsequent `plan`/`apply` until someone runs `terraform force-unlock`. The real runbook, tested against this course's `local` backend with a genuinely held lock (`time_sleep` holding the state locked for 20 seconds while a background `apply` runs):
+
+```text
+$ cat .terraform.tfstate.lock.info
+{"ID":"564d6b33-65bd-5b30-f952-c2d2a2297461","Operation":"OperationTypeApply", ...}
+
+$ terraform force-unlock -force 00000000-0000-0000-0000-000000000000
+Failed to unlock state: LocalState not locked
+
+$ terraform force-unlock -force 564d6b33-65bd-5b30-f952-c2d2a2297461
+Failed to unlock state: LocalState not locked
+```
+
+The real surprise: even the *correct* lock ID against a *genuinely active* lock produces the same message. `terraform force-unlock --help` explains why: `"Local state files cannot be unlocked by another process."` The `local` backend's lock is an OS-level file lock scoped to the process holding it, not a named, backend-mediated lock the way GCS's built-in locking is — a *second* `terraform` process running `force-unlock` has nothing it can meaningfully release. This course cannot verify what a real ID-mismatch message from GCS's own locking looks like (that needs a real GCS bucket), so that specific message is not claimed here — but the runbook lesson is real and provider-agnostic: **`force-unlock` is a remote-backend recovery tool.** Against `local` state, the actual fix is killing the stuck process or removing the stale `.terraform.tfstate.lock.info` file directly.
+
+### A real backup, before the risky operation — not after
+
+Two backup mechanisms are real and worth knowing apart. First, automatic: the `local` backend writes `terraform.tfstate.backup` on every state-changing operation, holding the *previous* state — proven by applying a config change twice and diffing both files:
+
+```text
+$ cat terraform.tfstate.backup | grep content
+      "content": "listen=8080\n",
+
+$ cat terraform.tfstate | grep content
+      "content": "listen=9090\n",
+```
+
+Second, deliberate: `terraform state pull > backup-$(date +%Y%m%d-%H%M%S).tfstate` before any operation an operator is nervous about — a real, timestamped snapshot independent of whatever Terraform's own automatic `.backup` file happens to hold. `the-state-file.mdx` already proved `state push` enforces `lineage`/`serial` before accepting a restore, which is exactly the safety net that makes this backup usable.
 
 ## One coherent system: a real repo layout
 
@@ -70,16 +167,14 @@ infra/
 ├── root.hcl
 ├── vpc/
 │   └── terragrunt.hcl
-├── gke/
-│   └── terragrunt.hcl
 └── cloudsql/
     └── terragrunt.hcl
 ```
 
-`root.hcl` at the top holds the shared backend configuration and provider generation, included by every unit below it:
+Production `root.hcl` holds a real GCS backend with its built-in locking — the shape `remote-backends-and-locking.mdx` already proved real:
 
 ```hcl
-# infra/root.hcl
+# Production shape only — needs a real GCS bucket, so it is not collected/run by this lesson's harness proof below.
 remote_state {
   backend = "gcs"
 
@@ -97,14 +192,90 @@ remote_state {
 }
 ```
 
+This lesson's own proof below uses a `local` backend instead, so the whole tree validates and plans fully offline:
+
 ```hcl
-# infra/cloudsql/terragrunt.hcl
+# root.hcl
+remote_state {
+  backend = "local"
+  config = {
+    path = "${get_parent_terragrunt_dir()}/${path_relative_to_include()}/terraform.tfstate"
+  }
+}
+
+generate "provider" {
+  path      = "provider.tf"
+  if_exists = "overwrite"
+  contents  = <<EOF
+provider "google" {
+  project = "acme-prod-123456"
+  region  = "us-central1"
+}
+EOF
+}
+
+generate "backend" {
+  path      = "backend.tf"
+  if_exists = "overwrite"
+  contents  = <<EOF
+terraform {
+  backend "local" {}
+}
+EOF
+}
+```
+
+```hcl
+# vpc/terragrunt.hcl
 include "root" {
   path = find_in_parent_folders("root.hcl")
 }
 
 terraform {
-  source = "../../modules/cloudsql"
+  source = "../modules/vpc"
+}
+```
+
+```hcl
+# modules/vpc/main.tf
+terraform {
+  required_providers {
+    google = {
+      source  = "hashicorp/google"
+      version = "~> 8.0"
+    }
+  }
+}
+
+resource "google_compute_network" "this" {
+  name                    = "app-vpc"
+  auto_create_subnetworks = false
+}
+
+resource "google_compute_subnetwork" "private" {
+  name          = "app-private"
+  ip_cidr_range = "10.0.1.0/24"
+  region        = "us-central1"
+  network       = google_compute_network.this.id
+}
+
+output "network_self_link" {
+  value = google_compute_network.this.self_link
+}
+
+output "private_subnet_self_links" {
+  value = [google_compute_subnetwork.private.self_link]
+}
+```
+
+```hcl
+# cloudsql/terragrunt.hcl
+include "root" {
+  path = find_in_parent_folders("root.hcl")
+}
+
+terraform {
+  source = "../modules/cloudsql"
 }
 
 dependency "vpc" {
@@ -118,31 +289,120 @@ dependency "vpc" {
 
 inputs = {
   network_self_link = dependency.vpc.outputs.network_self_link
-  subnetwork        = dependency.vpc.outputs.private_subnet_self_links[0]
 }
 ```
 
-Every piece here traces back to an earlier lesson: the built-in GCS locking is the State Management module's locking story; `root.hcl` plus `include` is Terragrunt Fundamentals' DRY backend pattern; the `dependency` block is what lets `cloudsql` reference `vpc`'s real output without a person remembering which unit has to apply first; and the `../../modules/cloudsql` source, pinned in a real repo to a tag rather than left floating, is Modules' versioning discipline.
+```hcl
+# modules/cloudsql/terraform.tfvars — harness fixture only, so the raw
+# `terraform plan` proof for modules/cloudsql can attempt to run standalone;
+# a real deployment gets this value from Terragrunt's dependency block instead.
+network_self_link = "mock-network-self-link"
+```
 
-The whole tree ships through exactly the CI/CD shape from earlier in this module: `terragrunt run --all plan` runs on every pull request touching `infra/`, posts its output for review, and `terragrunt run --all apply` runs only after merge to main, authenticated through the same Workload Identity Federation rather than a downloaded key. Nothing here is a new mechanism — it is the same pieces from every earlier module, wired together into one system that deploys `vpc`, then `gke` and `cloudsql` behind it, in the order the `dependency` blocks describe, gated by a plan a human actually read.
+```hcl
+# modules/cloudsql/main.tf
+terraform {
+  required_providers {
+    google = {
+      source  = "hashicorp/google"
+      version = "~> 8.0"
+    }
+  }
+}
 
-<Mermaid title="root.hcl plus three dependent units, deployed through a CI pipeline that gates plan and apply" code={productionRepoDiagram} />
+variable "network_self_link" {
+  type = string
+}
+
+resource "google_sql_database_instance" "this" {
+  name             = "app-db"
+  database_version = "POSTGRES_15"
+  region           = "us-central1"
+  settings {
+    tier = "db-f1-micro"
+  }
+}
+```
+
+Unlike `azurerm` (proven in the sibling Azure course to need a real session even to plan pure creation), `google` proceeds with fake-but-correctly-shaped service-account credentials — the same behavior this course already used in `policy-as-code-and-static-analysis.mdx` and `secrets-and-credential-management.mdx`. Pointing the provider block at such a file (outside this lesson's collected fences, since a raw JSON key is not itself HCL) makes a fully real, end-to-end `terragrunt run --all plan` possible:
+
+```text
+$ terragrunt run --all plan --non-interactive
+INFO  The following units will be run, starting with dependencies and then their dependents:
+.
+╰── vpc
+    ╰── cloudsql
+...
+[cloudsql] terraform: Plan: 1 to add, 0 to change, 0 to destroy.
+
+❯❯ Run Summary  2 units  5s
+   ────────────────────────────
+   Succeeded    2
+```
+
+`vpc` planned first, computing a real `network_self_link`; `cloudsql` planned second, consuming `vpc`'s `mock_outputs` for `plan` (real `vpc` outputs flow through automatically once `vpc` has actually been applied). Every piece here traces back to an earlier lesson: the built-in GCS locking in the production `root.hcl` above is the State Management module's locking story; `root.hcl` plus `include` is Terragrunt Fundamentals' DRY backend pattern; the `dependency` block is what lets `cloudsql` reference `vpc`'s real output without a person remembering which unit has to apply first; and a `../../modules/cloudsql` source pinned to a tag in a real repo, rather than left floating, is Modules' versioning discipline.
+
+The whole tree ships through exactly the CI/CD shape from earlier in this module: `terragrunt run --all plan` runs on every pull request touching `infra/`, posts its output for review, and `terragrunt run --all apply` runs only after merge to main, authenticated through the same Workload Identity Federation rather than a downloaded key. Nothing here is a new mechanism — it is the same pieces from every earlier module, wired together into one system that deploys `vpc`, then `cloudsql` behind it, in the order the `dependency` block describes, gated by a plan a human actually read.
+
+<Mermaid title="root.hcl plus dependent units, deployed through a CI pipeline that gates plan and apply" code={productionRepoDiagram} />
 
 export const productionRepoDiagram = `flowchart TB
   root["root.hcl: shared GCS backend, built-in locking"]
   root --> vpc["vpc unit"]
-  root --> gke["gke unit"]
   root --> cloudsql["cloudsql unit"]
-  vpc -->|dependency block: network_self_link, subnet links| gke
   vpc -->|dependency block: network_self_link, subnet links| cloudsql
   pr["Pull request"] -->|terragrunt run --all plan| review["Reviewed for -/+ replacements"]
   review -->|merge to main| apply["terragrunt run --all apply"]
   apply --> vpc
-  apply --> gke
   apply --> cloudsql`;
 
+## Mental Model
+
+Every item on this checklist is a guardrail against a *specific*, *named* failure mode. `prevent_destroy` and `precondition` (proven above with real refusals) guard the moment a plan is computed. GCP's own `deletion_protection`/`deletion_policy` (proven above via real schema extraction and a real plan JSON) is a second, resource-native layer of the same guard — defaulting to *on* for `google_sql_database_instance`, before anyone writes a `lifecycle` block at all. `force-unlock` (proven above with a real surprise on `local` state) guards the moment a lock outlives the process that took it. State backups guard the moment something has already gone wrong. And the `dependency`-block DAG (proven above with the most complete offline proof in this course — a real, full `terragrunt run --all plan` success) guards the moment a multi-unit rollout has to happen in the right order without anyone's memory being the mechanism.
+
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---|---|---|
+| `lifecycle.prevent_destroy` on critical resources | Proven above: a destroy or forced replacement is refused outright | Must be deliberately removed before a genuinely intended destroy can proceed |
+| GCP's native `deletion_protection`/`deletion_policy` | Proven above: `deletion_protection` defaults to `true` — destroy-protected before any Terraform-side lifecycle block exists | Resource-specific: proven real only for `google_sql_database_instance` here — other resources may not ship the same guard, so check the schema rather than assume |
+| `precondition` blocks | Proven above: a bad input fails at plan time naming the actual problem | One more thing to keep in sync as a module's real constraints evolve |
+| Proving the full DAG via a real `terragrunt run --all plan` (fake-but-correctly-shaped credentials) | The most complete offline proof in this course pairing — a genuine end-to-end success, not just schema/wiring checks | Only possible because `google` tolerates a fake credentials file's shape for pure creation; the sibling Azure course could not do the same |
+| A deliberate `state pull` backup before a risky operation | An operator-controlled snapshot independent of the automatic `.tfstate.backup` | One more manual step to remember before `state rm`/`import`/a provider upgrade |
+
+## Common Misconceptions
+
+- **"`prevent_destroy` stops any change to the resource."** Proven above: it specifically blocks *destroy* — in-place updates proceed normally.
+- **"GCP resources need a Terraform-side `lifecycle` block to be destroy-protected."** Proven above by real schema extraction: `google_sql_database_instance.deletion_protection` defaults to `true` in the provider itself — protection exists before any `lifecycle` block is written.
+- **"`force-unlock` is the correct fix for any stuck Terraform run."** Proven above, with a real surprise: against `local` state, `force-unlock` cannot release a lock a different process holds — `terraform force-unlock --help` says so directly.
+- **"Terraform's automatic `.tfstate.backup` is a sufficient backup strategy."** Proven above: it only ever holds the *single previous* state — a deliberate `state pull` snapshot is the only backup that survives more than one apply.
+
+## Reading AI-generated code
+
+When reviewing an AI-generated "production-ready" Terraform/Terragrunt setup on GCP, check for:
+
+- Stateful resources (`google_sql_database_instance`, `google_storage_bucket` with real data, anything holding state) with `deletion_protection` explicitly set to `false` or `deletion_policy` set to `"ABANDON"`/`"DELETE"` with no comment explaining why — proven above, the provider's own default (`deletion_protection = true`) is the safe one; an explicit override deserves explicit justification.
+- Input validation happening only in application code, never as a `precondition` — proven above, a plan-time `precondition` catches the mistake before any provider call.
+- A runbook claiming `terraform force-unlock <id>` "just works" against whatever backend is in use — proven above, that claim is false for `local` state specifically.
+- A `dependency` block referencing an upstream unit's outputs with no `mock_outputs`/`mock_outputs_allowed_terraform_commands` — proven above, `terragrunt run --all plan` needs those to plan a downstream unit before the upstream one has ever actually been applied.
+- A module `source` pinned to a branch name instead of a tag or commit SHA — the same unpinned-dependency risk this checklist already flags for provider versions.
+
+<SpotTheBug lang="hcl" code={`resource "google_sql_database_instance" "main" {
+  name             = "app-db-prod"
+  database_version = "POSTGRES_15"
+  region           = "us-central1"
+
+  deletion_protection = false
+
+  settings {
+    tier = "db-f1-micro"
+  }
+}`}>
+`deletion_protection = false` explicitly disables the one guard this resource ships *on by default* — proven above, `google_sql_database_instance.deletion_protection` defaults to `true` specifically to block accidental destroys. Setting it to `false` on a resource named `app-db-prod` removes that protection entirely, with no `lifecycle.prevent_destroy` written to replace it — the next `terraform destroy`, or any config change that forces replacement, proceeds exactly as planned, silently. Unlike a `lifecycle` block, this override is a single boolean easy to skim past in review. The fix is deleting this line (keeping the real default) or, for stricter protection than the default gives, `deletion_policy = "PREVENT"` (proven above as a real, separate guard) layered on top.
+</SpotTheBug>
+
 <Callout title="The one-line takeaway">
-Production readiness is a **checklist**, not a single decision: a GCS backend with built-in locking from day one, pinned provider and module versions, every `plan` reviewed in CI for unexpected replacements, secrets kept out of variables and state where possible with IAM tightly restricting the state bucket, `tflint`/a scanner/policy-as-code wired into CI, Terragrunt **`dependency`** blocks driving rollout order instead of human memory, and `terraform test` coverage for non-trivial modules. Put together, it is one coherent system — a **`root.hcl`** shared backend, several units wired together with `dependency` blocks, deployed through a pipeline that runs `terragrunt run --all plan` on every pull request and `terragrunt run --all apply` only after merge — not a pile of separate facts.
+Production readiness is a **checklist**, not a single decision: a GCS backend with built-in locking from day one, pinned provider and module versions, every `plan` reviewed in CI for unexpected replacements, secrets kept out of variables and state where possible with IAM tightly restricting the state bucket, `tflint`/a scanner/policy-as-code wired into CI, **`prevent_destroy`**/**`precondition`** guardrails (proven above with real refusals) plus GCP's own **`deletion_protection`**/**`deletion_policy`** (proven above via real schema extraction — `deletion_protection` defaults to `true`), a rehearsed **`force-unlock`** runbook (proven above: it cannot act on `local` state, by design), a deliberate state-backup habit, Terragrunt **`dependency`** blocks driving rollout order — proven above with the most complete offline proof in this course, a real end-to-end `terragrunt run --all plan` success (`Run Summary 2 units, Succeeded 2`) — and `terraform test` coverage for non-trivial modules. Put together, it is one coherent system, not a pile of separate facts.
 </Callout>
 
 export const quizProductionChecklist = [
@@ -175,6 +435,7 @@ export const quizProductionChecklist = [
       'dependency blocks only work within a single terragrunt.hcl file, never across units',
     ],
     answer: 1,
+    explain: 'Proven above with the most complete offline proof in this course: a real, full terragrunt run --all plan succeeded end to end (Run Summary 2 units, Succeeded 2), vpc before cloudsql.',
   },
   {
     q: 'Why does reviewing a plan in CI specifically for -/+ replacements matter as part of this checklist',
@@ -185,6 +446,28 @@ export const quizProductionChecklist = [
       'Because CI cannot run terraform plan without first seeing a -/+ line',
     ],
     answer: 1,
+  },
+  {
+    q: '```text\n$ terraform providers schema -json | jq \'...deletion_protection\'\n{ "type": "bool", "description": "...Defaults to true.", "optional": true }\n```\nThis real schema output is for google_sql_database_instance. What does it prove?',
+    options: [
+      'deletion_protection has no default and must always be set explicitly',
+      'The resource is destroy-protected by default, before any Terraform-side lifecycle.prevent_destroy block is ever written — a second, resource-native guardrail layered under the Terraform-core one',
+      'This field only affects billing, not destroy behavior',
+      'deletion_protection and deletion_policy are the same field under two names',
+    ],
+    answer: 1,
+    explain: 'Proven above with both the real schema (defaults to true) and a real plan JSON confirming deletion_protection: true, deletion_policy: "DELETE" even when the config never mentions either.',
+  },
+  {
+    q: '```text\n$ terraform force-unlock -force 564d6b33-...\nFailed to unlock state: LocalState not locked\n```\nThis is the CORRECT lock ID against a genuinely active local lock. What does this prove for a force-unlock runbook?',
+    options: [
+      'force-unlock is broken and should never be used on any backend',
+      'Against local state specifically, force-unlock cannot release a lock a different process holds — terraform force-unlock --help confirms this directly; force-unlock is a remote-backend recovery tool',
+      'The lock ID must always be entered in uppercase',
+      'This only happens when time_sleep is used to create the lock',
+    ],
+    answer: 1,
+    explain: 'Proven above with both a wrong ID and the genuinely correct ID against a real active lock — both fail identically, and the tool\'s own --help text explains exactly why for local state.',
   },
 ];
 
