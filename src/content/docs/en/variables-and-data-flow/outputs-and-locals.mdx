@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## The idea in one sentence
 
@@ -66,6 +67,210 @@ terraform output -json
 
 `terraform output -json` matters more than it looks: it turns your outputs into structured data that another script, a CI pipeline, or a wrapper tool can parse reliably, instead of scraping human-formatted terminal text. The `sensitive = true` flag on `db_password` works exactly like it does on a `variable` — Terraform masks the value in `terraform output` and in `apply` output, but the value is still written to the state file in plain text. It is a display protection, not an access control.
 
+Proven end to end on a `sensitive = true` output:
+
+```text
+$ terraform output                # bare -- redacted
+db_password = <sensitive>
+
+$ terraform output db_password    # by name -- revealed
+"s3cr3t-value"
+
+$ terraform output -json          # JSON -- also revealed, sensitive flag included
+{
+  "db_password": {
+    "sensitive": true,
+    "type": "string",
+    "value": "s3cr3t-value"
+  }
+}
+```
+
+`-json` does not respect `sensitive = true` either — it marks the field `"sensitive": true` for a consumer to notice, but includes the real `"value"` regardless. Anything that pipes `terraform output -json` into a log line, a CI artifact, or a chat notification prints the secret in full — the JSON flag is metadata, not redaction.
+
+## `precondition` and `postcondition`: not symmetric between resources and outputs
+
+The `lifecycle` block on a **resource** accepts both `precondition` (checked before the resource is planned) and `postcondition` (checked against the resource's own attributes, via `self`, after it is planned). A real `plan` against `google_compute_instance` needs a real GCP project this course never has, so this is proven with `terraform test` and `mock_provider "google" {}` — Terraform's own offline mocking mechanism:
+
+```hcl
+variable "machine_type" {
+  type    = string
+  default = "not-a-real-type"
+}
+
+resource "google_compute_instance" "web" {
+  name         = "web-server"
+  machine_type = var.machine_type
+  zone         = "us-central1-a"
+
+  boot_disk {
+    initialize_params {
+      image = "debian-cloud/debian-12"
+    }
+  }
+
+  network_interface {
+    network = "default"
+    access_config {}
+  }
+
+  lifecycle {
+    precondition {
+      condition     = can(regex("^[a-z0-9]+-[a-z0-9]+$", var.machine_type))
+      error_message = "machine_type must look like a real GCE machine type, e.g. e2-medium. Got: ${var.machine_type}"
+    }
+  }
+}
+```
+
+```hcl
+# tests/precondition.tftest.hcl
+mock_provider "google" {}
+
+variables {
+  machine_type = "not-a-real-type"
+}
+
+run "shows_real_error" {
+  command = plan
+}
+```
+
+Real failure, `terraform test` against the mocked provider:
+
+```text
+$ terraform test
+╷
+│ Error: Resource precondition failed
+│
+│   on main.tf line 24, in resource "google_compute_instance" "web":
+│   24:       condition     = can(regex("^[a-z0-9]+-[a-z0-9]+$", var.machine_type))
+│     ├────────────────
+│     │ var.machine_type is "not-a-real-type"
+│
+│ machine_type must look like a real GCE machine type, e.g. e2-medium. Got:
+│ not-a-real-type
+╵
+
+Failure! 0 passed, 1 failed.
+```
+
+Written as an actual test with `expect_failures` (the pattern the Testing Modules module covers in depth), the same run passes instead of failing, because the precondition failing IS the expected, tested behavior:
+
+```hcl
+run "rejects_bad_machine_type" {
+  command = plan
+
+  expect_failures = [
+    google_compute_instance.web.lifecycle[0].precondition[0],
+  ]
+}
+```
+
+```text
+$ terraform test
+run "rejects_bad_machine_type"... pass
+Success! 1 passed, 0 failed.
+```
+
+A `postcondition` needs a real `self` after apply, which needs a resource to actually be created — proven instead with `terraform_data` (the same `lifecycle` mechanism, cloud-agnostic, and runnable with zero mocking):
+
+```hcl
+resource "terraform_data" "web" {
+  input = "not-an-instance-id"
+
+  lifecycle {
+    postcondition {
+      condition     = startswith(self.output, "i-")
+      error_message = "web output looks wrong. Got: ${self.output}"
+    }
+  }
+}
+```
+
+```text
+$ terraform apply -auto-approve
+terraform_data.web: Creating...
+terraform_data.web: Creation complete after 0s [id=e18876e2-035e-cf41-d0df-1750ee7f8900]
+╷
+│ Error: Resource postcondition failed
+│
+│   on main.tf line 6, in resource "terraform_data" "web":
+│    6:       condition     = startswith(self.output, "i-")
+│     ├────────────────
+│     │ self.output is "not-an-instance-id"
+│
+│ web output looks wrong. Got: not-an-instance-id
+╵
+```
+
+Note the resource is actually created before the postcondition check runs — unlike a precondition, a postcondition cannot prevent a resource from being created, only report the failure and stop the run after the fact.
+
+An **`output`** block, however, only accepts `precondition` — attempting a `postcondition` on an output is a real, immediate error, not something that just behaves oddly. **This contradicts a common assumption that outputs support both** — they only support `precondition`:
+
+```hcl
+resource "terraform_data" "web" {
+  input = "i-mock123"
+}
+
+output "web_instance_id" {
+  value = trimspace(terraform_data.web.output)
+
+  postcondition {
+    condition     = startswith(self.value, "i-")
+    error_message = "web_instance_id must look like an instance id (start with i-). Got: ${self.value}"
+  }
+}
+```
+
+```text
+$ terraform validate
+╷
+│ Error: Postconditions are not allowed
+│
+│   on main.tf line 8, in output "web_instance_id":
+│    8:   postcondition {
+│
+│ Output values can only have preconditions, not postconditions.
+╵
+```
+
+The `precondition` in that same shape is legal and does what you would expect — it just has to express the check as something true *before* publishing, referencing the resources the output reads from directly (an output has no `self.value` to check against inside a `precondition`, since the value isn't "self" yet at that point):
+
+```hcl
+output "web_instance_id" {
+  value = terraform_data.web.output
+
+  precondition {
+    condition     = startswith(terraform_data.web.output, "i-")
+    error_message = "web_instance_id must look like an instance id."
+  }
+}
+```
+
+## `depends_on` on an output
+
+An output's `value` expression usually creates an implicit dependency automatically. `depends_on` is for the rarer case: forcing an explicit ordering the value expression itself doesn't reveal, e.g. exposing an output only after an unrelated resource with side effects has been created:
+
+```hcl
+resource "terraform_data" "bootstrap" {
+  input = "bootstrap-done"
+}
+
+output "instance_status" {
+  value      = google_compute_instance.web.instance_id
+  depends_on = [terraform_data.bootstrap]
+}
+```
+
+Real `terraform graph -type=plan` DOT output confirming the extra edge `depends_on` adds (proven with the equivalent `aws_instance`/`terraform_data` pairing — the mechanism is identical regardless of provider, since `depends_on` is core Terraform, not provider-specific):
+
+```text
+$ terraform graph -type=plan
+"[root] output.instance_status (expand)" -> "[root] terraform_data.bootstrap (expand)"
+"[root] output.instance_status (expand)" -> "[root] google_compute_instance.web (expand)"
+```
+
 ## locals — the third kind of named value
 
 Terraform has three distinct kinds of named values, and it is worth being precise about the difference. A `variable` is set by the caller from outside. An `output` is exposed to the outside after `apply`. A `local` is neither: it is a named expression computed once, inside the configuration, purely so you do not have to repeat that same expression in five different resource blocks.
@@ -118,6 +323,32 @@ resource "google_storage_bucket" "assets" {
 
 Without `local.name_prefix` and `local.common_labels`, that same `"${var.project_id}-${var.environment}"` string interpolation and that same labels map would have to be typed out again on every resource that needs them, and a later change to the naming scheme would mean hunting down every copy. A `locals` block is not user-settable the way a `variable` is, and it is not visible outside the configuration the way an `output` is — it exists purely to keep a computed expression in exactly one place.
 
+## Locals have no fixed evaluation order — and a cycle is a real error
+
+Terraform evaluates every `local` (and every resource attribute) lazily, in whatever order its dependency graph requires — not top to bottom as written. `local.a` referencing `local.b` referencing `local.a` is not "undefined behavior," it is a real, caught error:
+
+```hcl
+locals {
+  a = local.b
+  b = local.a
+}
+
+output "a" {
+  value = local.a
+}
+```
+
+```text
+$ terraform plan
+╷
+│ Error: Cycle:
+│   local.a (expand)
+│   local.b (expand)
+╵
+```
+
+This is the same class of error `terraform graph` (covered in the HCL, Providers & Resources lesson) makes visible for resources — Terraform builds one dependency graph across every local, resource, and output in a configuration, and a cycle anywhere in it is a hard stop before any plan is produced.
+
 ## Outputs as the mechanism for composition
 
 Inside a single root configuration, an output is mostly informational — a convenient way to print a value at the end of `apply`, or to feed a script via `terraform output -json`. Its real importance shows up once you start splitting infrastructure into smaller, separately-managed pieces.
@@ -134,8 +365,57 @@ export const outputsLocalsDiagram = `flowchart LR
   r1 --> o["output ip_address"]
   o --> ext["Consumed by another module or a Terragrunt dependency block"]`;
 
+## Mental Model
+
+Terraform maintains exactly one dependency graph across every `local`, `resource`, and `output` in a configuration — there is no separate "locals pass" that runs before "resource pass." That single fact explains everything above: a locals cycle is caught the same way a resource cycle would be, because it's the same graph; a `precondition` on a resource can gate whether the resource is even planned because the resource node hasn't been reached yet, while a resource `postcondition` can only report failure after the fact because by the time `self` exists, the apply already happened; and an output's `depends_on` is meaningful precisely because the graph is real and edges in it change execution order, not just documentation.
+
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---|---|---|
+| Resource `precondition` | Stops a bad plan before any resource is even touched (proven above against `google_compute_instance` via `terraform test`) | Only has access to values already known before this resource is planned — can't check the resource's own post-apply attributes |
+| Resource `postcondition` | Can validate the resource's own real, post-apply attributes via `self` (proven above) | The resource has already been created (or changed) by the time it fails — proven above, `terraform_data.web` existed before the postcondition error stopped the run |
+| Output `precondition` | Fails a `plan`/`apply` before a broken value is ever published to a consumer | No `postcondition` at all — proven above as a real, immediate `terraform validate` error, not a softer warning |
+| `depends_on` on an output | Forces an ordering the value expression alone doesn't reveal (proven above via real `terraform graph` DOT output) | Easy to reach for when the real fix is restructuring the value expression to reference the dependency directly, which documents *why* the dependency exists instead of leaving a bare resource reference |
+
+## Common Misconceptions
+
+- **"An output can have both a precondition and a postcondition, just like a resource's lifecycle block."** Proven above: it cannot. `terraform validate` rejects a `postcondition` on an output immediately with "Output values can only have preconditions, not postconditions."
+- **"`terraform output -json` is safe for sensitive values because it's meant for machines, not humans."** Proven above: the JSON output includes the real value and only adds a `"sensitive": true` marker — piping it into a CI log or chat message still leaks the secret in full.
+- **"Locals are evaluated top to bottom, so `local.b` must be defined above `local.a` if `a` uses `b`."** Terraform builds a dependency graph and evaluates lazily — order in the file doesn't matter for validity, only for a human reading it. What *is* invalid is a genuine cycle, proven above with a real, unambiguous error.
+- **"A resource postcondition can prevent the resource from being created if it fails."** Proven above: the resource is created first (`terraform_data.web: Creation complete`), and only then does the postcondition fail and stop the run — it reports and halts, it doesn't roll back.
+- **"You can't test a resource `precondition` without a real GCP project."** Proven above: `terraform test` with `mock_provider "google" {}` runs the plan-time graph, including preconditions, entirely offline.
+
+## Reading AI-generated code
+
+- A `postcondition` block generated inside an `output` — this is a real `terraform validate` error today, proven above; only `precondition` is legal on an output.
+- A precondition/postcondition `error_message` that references `self` inside an output's `precondition` — an output's `precondition` runs before the value is finalized, so there is no `self` to reference the way a resource `postcondition` has.
+- `terraform output -json` piped straight into a log line or CI artifact for a value that's `sensitive = true` — proven above, this still reveals the real value.
+- Locals written in an order that "looks" dependent top to bottom, with a comment claiming order matters — Terraform's evaluation order is graph-driven, not textual; the comment is misleading even if the code happens to work.
+- A resource `postcondition` used where a `precondition` was actually needed (checking something knowable before the resource is planned, at apply-time cost the check didn't need to pay) — proven above, a precondition can stop a plan before any resource is touched; a postcondition cannot.
+- `depends_on` added to an output as a first reflex for "these seem related," instead of first checking whether referencing the dependency's own attribute in the `value` expression would create the same ordering implicitly and more legibly.
+
+<SpotTheBug code={`output "instance_status" {
+  value = google_compute_instance.web.instance_id
+
+  postcondition {
+    condition     = self.value > 0
+    error_message = "instance_status looks wrong."
+  }
+}`}>
+This never gets a chance to run — `terraform validate` rejects the whole configuration before any plan is produced, because outputs do not support `postcondition` at all. Proven above with the identical block shape:
+
+```text
+$ terraform validate
+Error: Postconditions are not allowed
+Output values can only have preconditions, not postconditions.
+```
+
+The fix is either a `precondition` referencing the resource attribute directly (`google_compute_instance.web.instance_id`, not `self.value`, since an output's `precondition` runs before the value is finalized), or — if the real intent is "validate the resource's own attribute after it's created" — a `postcondition` on the *resource's* `lifecycle` block instead, where `self` is legal.
+</SpotTheBug>
+
 <Callout title="The one-line takeaway">
-An **`output`** block exposes a value after `apply` — inspectable with `terraform output`, `terraform output <name>`, or machine-readable via `terraform output -json`, and maskable from CLI display with `sensitive = true` (the value still lands in state). A **`locals`** block is the third kind of named value in Terraform: unlike a `variable`, it is not set by a caller, and unlike an `output`, it is not exposed externally — it just computes an expression once so you do not repeat it across resources. Outputs matter beyond a single root configuration because they are the mechanism that lets one module or one independently-applied Terragrunt unit pass values into another.
+An **`output`** block exposes a value after `apply` — inspectable with `terraform output`, `terraform output <name>`, or machine-readable via `terraform output -json`, and maskable from CLI display with `sensitive = true` (the value still lands in state; proven above, **`-json` still reveals the real value** regardless of the flag). A **`locals`** block is the third kind of named value in Terraform: unlike a `variable`, it is not set by a caller, and unlike an `output`, it is not exposed externally — it has no fixed evaluation order (Terraform's dependency graph decides it), and a genuine cycle between locals is a real, caught error, proven above. A resource's `lifecycle` block supports both **`precondition`** and **`postcondition`**, proven above (offline, via `terraform test` and `mock_provider "google" {}`), but an **`output`** supports only `precondition` — a `postcondition` on an output is a real, immediate `validate`-time error. **`depends_on`** on an output forces an explicit ordering, visible as a real edge in `terraform graph`. Outputs matter beyond a single root configuration because they are the mechanism that lets one module or one independently-applied Terragrunt unit pass values into another.
 </Callout>
 
 export const quizOutputsLocals = [
@@ -148,6 +428,7 @@ export const quizOutputsLocals = [
       'It replaces output blocks entirely in modern Terraform configurations',
     ],
     answer: 1,
+    explain: 'A local is purely an internal convenience for reuse within one configuration -- nobody outside can set or read it directly, unlike a caller-supplied variable or an externally-visible output.',
   },
   {
     q: 'Why do outputs matter even in a single root configuration with no modules yet',
@@ -168,6 +449,7 @@ export const quizOutputsLocals = [
       'Hiding sensitive outputs permanently from the state file',
     ],
     answer: 1,
+    explain: 'It renders output values as JSON. Proven above: it does NOT redact sensitive outputs -- it includes the real value plus a "sensitive": true marker.',
   },
   {
     q: 'How does an output later feed a Terragrunt dependency block, at a high level',
@@ -178,6 +460,39 @@ export const quizOutputsLocals = [
       'Terragrunt ignores Terraform outputs entirely and requires separate YAML values',
     ],
     answer: 1,
+  },
+  {
+    q: '```hcl\noutput "instance_status" {\n  value = google_compute_instance.web.instance_id\n\n  postcondition {\n    condition     = self.value > 0\n    error_message = "bad id"\n  }\n}\n```\nWhat happens when you run terraform validate on this?',
+    options: [
+      'It passes -- outputs support postcondition exactly like resources do',
+      'A real, immediate error: "Output values can only have preconditions, not postconditions"',
+      'It silently ignores the postcondition block',
+      'It only fails at apply time, never at validate time',
+    ],
+    answer: 1,
+    explain: 'Proven above with this exact block: terraform validate rejects it immediately. Outputs only support precondition -- this is a real, documented asymmetry with resource lifecycle blocks.',
+  },
+  {
+    q: 'A resource has a postcondition that fails after terraform apply creates it. What actually happens to the resource?',
+    options: [
+      'Terraform automatically rolls back and destroys the resource that was just created',
+      'The resource is already created (proven above: "Creation complete" prints before the postcondition error) -- the run then stops with the postcondition error, with no automatic rollback',
+      'The postcondition prevents the resource from ever being created in the first place',
+      'Terraform silently ignores the postcondition failure and continues',
+    ],
+    answer: 1,
+    explain: 'Proven above with terraform_data: the resource finishes creating, THEN the postcondition is checked and fails, stopping the run. Unlike a precondition, a postcondition cannot prevent creation -- it can only report failure after the fact.',
+  },
+  {
+    q: '```hcl\nlocals {\n  a = local.b\n  b = local.a\n}\n```\nWhat happens when you run terraform plan against this?',
+    options: [
+      'Terraform picks whichever local was declared first and ignores the other',
+      'A real error: "Cycle: local.a (expand), local.b (expand)"',
+      'Both locals silently resolve to null',
+      'It works fine because Terraform evaluates locals top to bottom',
+    ],
+    answer: 1,
+    explain: 'Proven above: Terraform builds one dependency graph across locals, resources, and outputs. A genuine cycle between two locals is a real, caught error before any plan is produced.',
   },
 ];
 

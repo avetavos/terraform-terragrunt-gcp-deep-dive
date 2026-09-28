@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## ไอเดียในหนึ่งประโยค
 
@@ -66,6 +67,210 @@ terraform output -json
 
 `terraform output -json` สำคัญกว่าที่ดูตอนแรก เพราะเปลี่ยน output ของเราให้เป็น structured data ที่ script อื่น, CI pipeline, หรือ wrapper tool อ่านต่อได้แน่นอน แทนที่จะไป parse ข้อความบน terminal ที่ format มาให้คนอ่าน `sensitive = true` บน `db_password` ทำงานเหมือนตอนอยู่บน `variable` เป๊ะ Terraform ซ่อนค่าใน `terraform output` และใน output ของ `apply` แต่ค่ายังถูกเขียนลง state file เป็น plain text อยู่ดี นี่คือการป้องกันตอนแสดงผล ไม่ใช่ access control
 
+พิสูจน์ครบทุกขั้นบน output ที่ `sensitive = true`:
+
+```text
+$ terraform output                # bare -- redacted
+db_password = <sensitive>
+
+$ terraform output db_password    # by name -- revealed
+"s3cr3t-value"
+
+$ terraform output -json          # JSON -- also revealed, sensitive flag included
+{
+  "db_password": {
+    "sensitive": true,
+    "type": "string",
+    "value": "s3cr3t-value"
+  }
+}
+```
+
+`-json` ไม่ได้ respect `sensitive = true` เลยด้วยซ้ำ — มัน mark field ว่า `"sensitive": true` ให้ consumer สังเกต แต่ยังใส่ `"value"` จริงเข้าไปอยู่ดี อะไรก็ตามที่ pipe `terraform output -json` เข้า log line, CI artifact, หรือ chat notification จะ print secret เต็ม ๆ ออกมา — JSON flag เป็นแค่ metadata ไม่ใช่การ redact
+
+## `precondition` กับ `postcondition`: ไม่สมมาตรกันระหว่าง resource กับ output
+
+`lifecycle` block บน **resource** รับได้ทั้ง `precondition` (เช็คก่อน plan resource) และ `postcondition` (เช็ค attribute ของ resource เองผ่าน `self` หลัง plan) `plan` จริงกับ `google_compute_instance` ต้องใช้ GCP project จริงที่คอร์สนี้ไม่มี เลยพิสูจน์ด้วย `terraform test` กับ `mock_provider "google" {}` — กลไก mock ของ Terraform เอง:
+
+```hcl
+variable "machine_type" {
+  type    = string
+  default = "not-a-real-type"
+}
+
+resource "google_compute_instance" "web" {
+  name         = "web-server"
+  machine_type = var.machine_type
+  zone         = "us-central1-a"
+
+  boot_disk {
+    initialize_params {
+      image = "debian-cloud/debian-12"
+    }
+  }
+
+  network_interface {
+    network = "default"
+    access_config {}
+  }
+
+  lifecycle {
+    precondition {
+      condition     = can(regex("^[a-z0-9]+-[a-z0-9]+$", var.machine_type))
+      error_message = "machine_type must look like a real GCE machine type, e.g. e2-medium. Got: ${var.machine_type}"
+    }
+  }
+}
+```
+
+```hcl
+# tests/precondition.tftest.hcl
+mock_provider "google" {}
+
+variables {
+  machine_type = "not-a-real-type"
+}
+
+run "shows_real_error" {
+  command = plan
+}
+```
+
+error จริง จาก `terraform test` กับ provider ที่ mock ไว้:
+
+```text
+$ terraform test
+╷
+│ Error: Resource precondition failed
+│
+│   on main.tf line 24, in resource "google_compute_instance" "web":
+│   24:       condition     = can(regex("^[a-z0-9]+-[a-z0-9]+$", var.machine_type))
+│     ├────────────────
+│     │ var.machine_type is "not-a-real-type"
+│
+│ machine_type must look like a real GCE machine type, e.g. e2-medium. Got:
+│ not-a-real-type
+╵
+
+Failure! 0 passed, 1 failed.
+```
+
+เขียนเป็น test จริงด้วย `expect_failures` (pattern ที่ module Testing Modules พูดถึงแบบละเอียด) run เดียวกันจะ pass แทนที่จะ fail เพราะ precondition ที่ fail คือ behavior ที่ตั้งใจ test ไว้:
+
+```hcl
+run "rejects_bad_machine_type" {
+  command = plan
+
+  expect_failures = [
+    google_compute_instance.web.lifecycle[0].precondition[0],
+  ]
+}
+```
+
+```text
+$ terraform test
+run "rejects_bad_machine_type"... pass
+Success! 1 passed, 0 failed.
+```
+
+`postcondition` ต้องมี `self` จริงหลัง apply ซึ่งต้องมี resource ถูกสร้างขึ้นมาจริง — พิสูจน์ด้วย `terraform_data` แทน (กลไก `lifecycle` เดียวกัน ไม่ผูกกับ cloud และรันได้โดยไม่ต้อง mock อะไรเลย):
+
+```hcl
+resource "terraform_data" "web" {
+  input = "not-an-instance-id"
+
+  lifecycle {
+    postcondition {
+      condition     = startswith(self.output, "i-")
+      error_message = "web output looks wrong. Got: ${self.output}"
+    }
+  }
+}
+```
+
+```text
+$ terraform apply -auto-approve
+terraform_data.web: Creating...
+terraform_data.web: Creation complete after 0s [id=e18876e2-035e-cf41-d0df-1750ee7f8900]
+╷
+│ Error: Resource postcondition failed
+│
+│   on main.tf line 6, in resource "terraform_data" "web":
+│    6:       condition     = startswith(self.output, "i-")
+│     ├────────────────
+│     │ self.output is "not-an-instance-id"
+│
+│ web output looks wrong. Got: not-an-instance-id
+╵
+```
+
+สังเกตว่า resource ถูกสร้างขึ้นจริงก่อนที่ postcondition check จะรัน — ต่างจาก precondition, postcondition ห้าม resource ไม่ให้ถูกสร้างไม่ได้ ทำได้แค่ report failure แล้วหยุด run หลังจากนั้น
+
+**`output`** block กลับรับได้แค่ `precondition` เท่านั้น — การใส่ `postcondition` บน output คือ error จริงทันที ไม่ใช่แค่พฤติกรรมแปลก ๆ **นี่ขัดกับสมมติฐานทั่วไปที่ว่า output รองรับทั้งคู่** — จริง ๆ รองรับแค่ `precondition`:
+
+```hcl
+resource "terraform_data" "web" {
+  input = "i-mock123"
+}
+
+output "web_instance_id" {
+  value = trimspace(terraform_data.web.output)
+
+  postcondition {
+    condition     = startswith(self.value, "i-")
+    error_message = "web_instance_id must look like an instance id (start with i-). Got: ${self.value}"
+  }
+}
+```
+
+```text
+$ terraform validate
+╷
+│ Error: Postconditions are not allowed
+│
+│   on main.tf line 8, in output "web_instance_id":
+│    8:   postcondition {
+│
+│ Output values can only have preconditions, not postconditions.
+╵
+```
+
+`precondition` ใน block รูปร่างเดียวกันถูกต้องและทำงานตามที่คาดหวัง — แค่ต้องเขียน check เป็นสิ่งที่ true *ก่อน* publish โดยอ้าง resource ที่ output อ่านมาโดยตรง (output ไม่มี `self.value` ให้เช็คข้างใน `precondition` เพราะค่ายังไม่ใช่ "self" ตอนนั้น):
+
+```hcl
+output "web_instance_id" {
+  value = terraform_data.web.output
+
+  precondition {
+    condition     = startswith(terraform_data.web.output, "i-")
+    error_message = "web_instance_id must look like an instance id."
+  }
+}
+```
+
+## `depends_on` บน output
+
+`value` expression ของ output ปกติจะสร้าง implicit dependency ให้เองอยู่แล้ว `depends_on` มีไว้สำหรับกรณีที่หายากกว่า — บังคับลำดับที่ explicit ซึ่ง value expression เองไม่ได้เผยให้เห็น เช่นเปิดเผย output ก็ต่อเมื่อ resource ที่ไม่เกี่ยวกันแต่มี side effect ถูกสร้างไปแล้ว:
+
+```hcl
+resource "terraform_data" "bootstrap" {
+  input = "bootstrap-done"
+}
+
+output "instance_status" {
+  value      = google_compute_instance.web.instance_id
+  depends_on = [terraform_data.bootstrap]
+}
+```
+
+`terraform graph -type=plan` DOT output จริงยืนยัน edge พิเศษที่ `depends_on` เพิ่มเข้ามา (พิสูจน์กับคู่ `aws_instance`/`terraform_data` ที่เทียบเท่ากัน — กลไกเหมือนกันทุกประการไม่ว่า provider ไหน เพราะ `depends_on` เป็นของ Terraform core ไม่ใช่ของ provider):
+
+```text
+$ terraform graph -type=plan
+"[root] output.instance_status (expand)" -> "[root] terraform_data.bootstrap (expand)"
+"[root] output.instance_status (expand)" -> "[root] google_compute_instance.web (expand)"
+```
+
 ## locals — named value แบบที่สาม
 
 Terraform มี named value ที่ต่างกันสามแบบ และควรพูดให้ชัดว่าต่างกันตรงไหน `variable` ถูกตั้งค่าจากภายนอกโดยคนเรียก `output` ถูกเปิดเผยออกไปข้างนอกหลัง `apply` ส่วน `local` ไม่ใช่ทั้งสองแบบ แต่คือ expression ที่มีชื่อ ถูกคำนวณครั้งเดียวภายใน configuration เพื่อไม่ต้องเขียน expression เดิมซ้ำใน resource block ห้าที่
@@ -118,13 +323,39 @@ resource "google_storage_bucket" "assets" {
 
 ถ้าไม่มี `local.name_prefix` กับ `local.common_labels` string interpolation `"${var.project_id}-${var.environment}"` เดิม กับ labels map เดิม ต้องพิมพ์ซ้ำในทุก resource ที่ต้องใช้ และถ้าต้องแก้ naming scheme ทีหลังก็ต้องไล่หาทุกจุดที่ copy ไว้ `locals` block ไม่ได้ให้ caller ตั้งค่าได้แบบ `variable` และไม่ได้มองเห็นจากภายนอก configuration แบบ `output` แต่มีไว้แค่เก็บ expression ที่คำนวณแล้วให้อยู่จุดเดียว
 
+## Locals ไม่มีลำดับการ evaluate ตายตัว — และ cycle คือ error จริง
+
+Terraform evaluate ทุก `local` (และทุก resource attribute) แบบ lazy ตามลำดับที่ dependency graph ต้องการ ไม่ใช่จากบนลงล่างตามที่เขียน `local.a` ที่อ้าง `local.b` ที่อ้าง `local.a` กลับไปไม่ใช่ "undefined behavior" แต่คือ error จริงที่ถูกจับได้:
+
+```hcl
+locals {
+  a = local.b
+  b = local.a
+}
+
+output "a" {
+  value = local.a
+}
+```
+
+```text
+$ terraform plan
+╷
+│ Error: Cycle:
+│   local.a (expand)
+│   local.b (expand)
+╵
+```
+
+นี่คือ error ประเภทเดียวกับที่ `terraform graph` (พูดถึงในบท HCL, Providers & Resources) ทำให้เห็นชัดสำหรับ resource — Terraform สร้าง dependency graph เดียวครอบคลุมทุก local, resource, และ output ใน configuration และ cycle ตรงไหนก็ตามคือจุดหยุดแข็ง ๆ ก่อนที่จะ produce plan ได้เลย
+
 ## output คือกลไกของการประกอบกัน
 
 ภายใน root configuration เดียว output ส่วนใหญ่เป็นแค่ข้อมูลไว้ดู เป็นวิธี print ค่าตอนจบของ `apply` หรือป้อนเข้า script ผ่าน `terraform output -json` ความสำคัญจริง ๆ จะเห็นชัดตอนเริ่มแยก infrastructure ออกเป็นชิ้นเล็ก ๆ ที่ manage แยกกัน
 
 เวลา Terraform module หนึ่งเรียกอีก module หนึ่ง module ที่เรียกจะอ่าน output ของ child module เพื่อส่งค่าเชื่อมกัน — `output "subnet_self_link"` ของ networking module กลายเป็น input ของ `variable "subnet"` ใน compute module บทเรื่อง Modules ในคอร์สนี้จะพูดถึงการประกอบกันแบบนี้ลึกกว่านี้ แนวคิดเดียวกันนี้เกิดขึ้นอีกทีในสเกลที่ใหญ่กว่าใน Terragrunt เช่นกัน Terragrunt unit ที่ apply แยกกันจะอ่าน output ของอีก unit หนึ่งผ่าน `dependency` block ทำให้ VPC ที่ deploy อยู่ใน directory หนึ่งส่งชื่อ network ให้ database ที่ deploy อยู่คนละ directory ได้ โดยไม่ต้องมี Terraform state ร่วมกันเลย output คือสิ่งที่ทำให้การประกอบทั้งสองแบบนี้เป็นไปได้ — ถ้าไม่มี output ที่ประกาศไว้ชัดเจนและ stable ก็ไม่มีอะไรให้ module หรือ unit ที่ consume อ่านได้
 
-<Mermaid title="A local computes a shared value once; an output exposes the final result after apply" code={outputsLocalsDiagram} />
+<Mermaid title="Local คำนวณค่าที่ใช้ร่วมกันครั้งเดียว ส่วน output เปิดเผยผลลัพธ์สุดท้ายหลัง apply" code={outputsLocalsDiagram} />
 
 export const outputsLocalsDiagram = `flowchart LR
   v1["var.project_id"] --> l["local.name_prefix"]
@@ -134,8 +365,57 @@ export const outputsLocalsDiagram = `flowchart LR
   r1 --> o["output ip_address"]
   o --> ext["Consumed by another module or a Terragrunt dependency block"]`;
 
-<Callout title="The one-line takeaway">
-**`output`** block เปิดเผยค่าหลัง `apply` — ดูได้ด้วย `terraform output`, `terraform output <name>`, หรืออ่านแบบ machine-readable ผ่าน `terraform output -json` และซ่อนจาก CLI display ได้ด้วย `sensitive = true` (ค่ายังลง state อยู่ดี) **`locals`** block คือ named value แบบที่สามใน Terraform ต่างจาก `variable` ตรงที่ caller ตั้งค่าเองไม่ได้ และต่างจาก `output` ตรงที่ไม่ได้เปิดเผยออกไปข้างนอก แค่คำนวณ expression ครั้งเดียวเพื่อไม่ต้องเขียนซ้ำในหลาย resource output สำคัญเกินขอบเขต root configuration เดียว เพราะเป็นกลไกที่ทำให้ module หนึ่งหรือ Terragrunt unit ที่ apply แยกกันหนึ่งส่งค่าเข้าไปอีกอันหนึ่งได้
+## Mental Model
+
+Terraform เก็บ dependency graph เดียวครอบคลุมทุก `local`, `resource`, และ `output` ใน configuration — ไม่มี "รอบ locals" แยกที่รันก่อน "รอบ resource" ข้อเท็จจริงเดียวนี้อธิบายทุกอย่างข้างบน — locals cycle ถูกจับแบบเดียวกับที่ resource cycle จะถูกจับ เพราะเป็น graph เดียวกัน; `precondition` บน resource กัน plan ได้เพราะ node ของ resource ยังไม่ถูกไปถึง ในขณะที่ resource `postcondition` report failure ได้แค่หลังจากที่ apply ไปแล้ว เพราะตอนที่ `self` มีอยู่ apply ก็เกิดไปแล้ว; และ `depends_on` บน output มีความหมายเพราะ graph เป็นของจริง edge ใน graph เปลี่ยน execution order จริง ไม่ใช่แค่ documentation
+
+## ข้อแลกเปลี่ยน
+
+| ตัวเลือก | ได้อะไร | เสียอะไร |
+|---|---|---|
+| resource `precondition` | หยุด plan ที่ผิดก่อนแตะ resource ใด ๆ เลย (พิสูจน์ข้างบนกับ `google_compute_instance` ผ่าน `terraform test`) | เข้าถึงได้แค่ค่าที่รู้อยู่แล้วก่อน plan resource นี้ — เช็ค attribute หลัง apply ของตัวเองไม่ได้ |
+| resource `postcondition` | validate attribute จริงหลัง apply ของ resource เองผ่าน `self` ได้ (พิสูจน์ข้างบน) | resource ถูกสร้าง (หรือเปลี่ยน) ไปแล้วตอนที่มัน fail — พิสูจน์ข้างบนว่า `terraform_data.web` มีอยู่แล้วก่อนที่ postcondition error จะหยุด run |
+| output `precondition` | หยุด `plan`/`apply` ก่อนที่ค่าที่ผิดจะถูก publish ไปให้ consumer | ไม่มี `postcondition` เลย — พิสูจน์ข้างบนว่าเป็น error จริงทันทีตอน `terraform validate` ไม่ใช่แค่ warning เบา ๆ |
+| `depends_on` บน output | บังคับลำดับที่ value expression เองไม่ได้เผยให้เห็น (พิสูจน์ข้างบนผ่าน `terraform graph` DOT output จริง) | ง่ายที่จะหยิบมาใช้ทั้งที่ทางแก้จริง ๆ คือปรับ value expression ให้อ้าง dependency ตรง ๆ ซึ่งจะบันทึกไว้ด้วยว่า *ทำไม* ถึงมี dependency นี้ แทนที่จะปล่อยไว้เป็น resource reference เปล่า ๆ |
+
+## ความเข้าใจผิดที่พบบ่อย
+
+- **"output มี precondition กับ postcondition ได้ทั้งคู่เหมือน resource lifecycle block"** พิสูจน์ข้างบน: ไม่ได้ `terraform validate` ปฏิเสธ `postcondition` บน output ทันทีด้วย "Output values can only have preconditions, not postconditions"
+- **"`terraform output -json` ปลอดภัยกับ sensitive value เพราะมันมีไว้ให้ machine อ่าน ไม่ใช่คน"** พิสูจน์ข้างบน: JSON output ใส่ค่าจริงเข้าไปและมีแค่ marker `"sensitive": true` เพิ่มมา — pipe เข้า CI log หรือ chat message ก็ยังรั่ว secret เต็ม ๆ
+- **"Locals ถูก evaluate จากบนลงล่าง ดังนั้น local.b ต้องประกาศไว้เหนือ local.a ถ้า a ใช้ b"** Terraform สร้าง dependency graph แล้ว evaluate แบบ lazy — ลำดับในไฟล์ไม่มีผลกับความถูกต้อง มีผลแค่กับคนอ่าน สิ่งที่ invalid จริง ๆ คือ cycle จริง ๆ พิสูจน์ข้างบนด้วย error ที่ชัดเจนไม่กำกวม
+- **"resource postcondition ป้องกันไม่ให้ resource ถูกสร้างได้ถ้า fail"** พิสูจน์ข้างบน: resource ถูกสร้างก่อน (`terraform_data.web: Creation complete`) แล้วค่อย postcondition fail และหยุด run — มัน report แล้วหยุด ไม่ได้ rollback
+- **"test resource precondition โดยไม่มี GCP project จริงทำไม่ได้"** พิสูจน์ข้างบน: `terraform test` กับ `mock_provider "google" {}` รัน plan-time graph รวมถึง precondition แบบ offline ล้วน ๆ
+
+## อ่านโค้ดที่ AI เขียน
+
+- `postcondition` block ที่ generate มาข้างใน `output` — นี่คือ error จริงตอน `terraform validate` วันนี้ พิสูจน์ข้างบน มีแค่ `precondition` ที่ legal บน output
+- `error_message` ของ precondition/postcondition ที่อ้าง `self` ข้างใน `precondition` ของ output — precondition ของ output รันก่อนที่ value จะ finalize ดังนั้นไม่มี `self` ให้อ้างแบบที่ resource `postcondition` มี
+- `terraform output -json` ที่ pipe ตรงเข้า log line หรือ CI artifact สำหรับค่าที่เป็น `sensitive = true` — พิสูจน์ข้างบนว่ายังเผยค่าจริงอยู่ดี
+- Locals ที่เขียนเรียงลำดับ "ดูเหมือน" ต่อกันจากบนลงล่าง พร้อม comment อ้างว่าลำดับมีผล — evaluation order ของ Terraform ขับเคลื่อนด้วย graph ไม่ใช่ตัวอักษร comment นั้นทำให้เข้าใจผิดถึงแม้โค้ดจะรันผ่านก็ตาม
+- resource `postcondition` ที่ถูกใช้ในจุดที่จริง ๆ ต้องการ `precondition` (เช็คสิ่งที่รู้ได้ก่อน plan resource แต่ต้องจ่าย cost ตอน apply โดยไม่จำเป็น) — พิสูจน์ข้างบนว่า precondition หยุด plan ได้ก่อนแตะ resource ใด ๆ ส่วน postcondition ทำแบบนั้นไม่ได้
+- `depends_on` ที่ใส่เข้า output เป็น reflex แรกสำหรับ "สองอย่างนี้ดูเกี่ยวข้องกัน" โดยไม่เช็คก่อนว่าการอ้าง attribute ของ dependency ตรง ๆ ใน `value` expression จะสร้างลำดับเดียวกันแบบ implicit และอ่านเข้าใจง่ายกว่าไหม
+
+<SpotTheBug code={`output "instance_status" {
+  value = google_compute_instance.web.instance_id
+
+  postcondition {
+    condition     = self.value > 0
+    error_message = "instance_status looks wrong."
+  }
+}`}>
+โค้ดนี้ไม่มีทางได้รันเลย — `terraform validate` ปฏิเสธทั้ง configuration ก่อนจะ produce plan ได้ด้วยซ้ำ เพราะ output ไม่รองรับ `postcondition` เลย พิสูจน์ข้างบนด้วย block รูปร่างเดียวกันเป๊ะ ๆ:
+
+```text
+$ terraform validate
+Error: Postconditions are not allowed
+Output values can only have preconditions, not postconditions.
+```
+
+ทางแก้คือใช้ `precondition` ที่อ้าง resource attribute ตรง ๆ (`google_compute_instance.web.instance_id` ไม่ใช่ `self.value` เพราะ precondition ของ output รันก่อน value จะ finalize) หรือถ้าเจตนาจริง ๆ คือ "validate attribute หลัง apply ของ resource เอง" ก็ใช้ `postcondition` บน `lifecycle` block ของ *resource* แทน ซึ่ง `self` ใช้ได้ตรงนั้น
+</SpotTheBug>
+
+<Callout title="สรุปหนึ่งบรรทัด">
+**`output`** block เปิดเผยค่าหลัง `apply` — ดูได้ด้วย `terraform output`, `terraform output <name>`, หรืออ่านแบบ machine-readable ผ่าน `terraform output -json` และซ่อนจาก CLI display ได้ด้วย `sensitive = true` (ค่ายังลง state อยู่ดี พิสูจน์ข้างบนว่า **`-json` ยังเผยค่าจริงอยู่ดี** ไม่ว่า flag จะเป็นอะไร) **`locals`** block คือ named value แบบที่สามใน Terraform ต่างจาก `variable` ตรงที่ caller ตั้งค่าเองไม่ได้ และต่างจาก `output` ตรงที่ไม่ได้เปิดเผยออกไปข้างนอก — ไม่มีลำดับ evaluate ตายตัว (dependency graph ของ Terraform เป็นคนตัดสิน) และ cycle จริงระหว่าง locals คือ error จริงที่ถูกจับได้ พิสูจน์ข้างบน `lifecycle` block ของ resource รองรับทั้ง **`precondition`** และ **`postcondition`** พิสูจน์ข้างบน (แบบ offline ผ่าน `terraform test` และ `mock_provider "google" {}`) แต่ **`output`** รองรับแค่ `precondition` — `postcondition` บน output คือ error จริงทันทีตอน `validate` **`depends_on`** บน output บังคับลำดับที่ explicit เห็นเป็น edge จริงใน `terraform graph` output สำคัญเกินขอบเขต root configuration เดียว เพราะเป็นกลไกที่ทำให้ module หนึ่งหรือ Terragrunt unit ที่ apply แยกกันหนึ่งส่งค่าเข้าไปอีกอันหนึ่งได้
 </Callout>
 
 export const quizOutputsLocals = [
@@ -148,6 +428,7 @@ export const quizOutputsLocals = [
       'มาแทนที่ output block ทั้งหมดใน Terraform รุ่นใหม่',
     ],
     answer: 1,
+    explain: 'local เป็นความสะดวกภายในไว้ใช้ซ้ำใน configuration เดียว ไม่มีใครนอกตั้งค่าหรืออ่านโดยตรงได้ ต่างจาก variable ที่ caller ตั้งค่า และ output ที่มองเห็นได้จากภายนอก',
   },
   {
     q: 'ทำไม output ถึงสำคัญแม้ใน root configuration เดียวที่ยังไม่มี module เลย',
@@ -168,6 +449,7 @@ export const quizOutputsLocals = [
       'ซ่อนค่า sensitive output ออกจาก state file ถาวร',
     ],
     answer: 1,
+    explain: 'render ค่า output เป็น JSON พิสูจน์ข้างบน: มันไม่ redact sensitive output เลย — ใส่ค่าจริงเข้าไปพร้อม marker "sensitive": true',
   },
   {
     q: 'output ป้อนเข้า Terragrunt dependency block ได้อย่างไรในภาพรวม',
@@ -178,6 +460,39 @@ export const quizOutputsLocals = [
       'Terragrunt ไม่สนใจ Terraform output เลยและต้องใช้ค่าจาก YAML แยกต่างหาก',
     ],
     answer: 1,
+  },
+  {
+    q: '```hcl\noutput "instance_status" {\n  value = google_compute_instance.web.instance_id\n\n  postcondition {\n    condition     = self.value > 0\n    error_message = "bad id"\n  }\n}\n```\nรัน terraform validate กับโค้ดนี้จะเกิดอะไรขึ้น',
+    options: [
+      'ผ่านฉลุย — output รองรับ postcondition เหมือน resource เป๊ะ',
+      'error จริงทันที: "Output values can only have preconditions, not postconditions"',
+      'ข้าม postcondition block ไปแบบเงียบ ๆ',
+      'fail แค่ตอน apply เท่านั้น ไม่ fail ตอน validate',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ข้างบนด้วย block เดียวกันเป๊ะ ๆ: terraform validate ปฏิเสธทันที output รองรับแค่ precondition — นี่คือความไม่สมมาตรจริงกับ resource lifecycle block',
+  },
+  {
+    q: 'resource ตัวหนึ่งมี postcondition ที่ fail หลังจาก terraform apply สร้างมันขึ้นมา เกิดอะไรขึ้นกับ resource จริง ๆ',
+    options: [
+      'Terraform rollback อัตโนมัติแล้วทำลาย resource ที่เพิ่งสร้าง',
+      'resource ถูกสร้างไปแล้ว (พิสูจน์ข้างบน: "Creation complete" print ก่อน postcondition error) — run หยุดพร้อม postcondition error โดยไม่มี rollback อัตโนมัติ',
+      'postcondition ป้องกันไม่ให้ resource ถูกสร้างตั้งแต่แรก',
+      'Terraform เพิกเฉยต่อ postcondition failure แบบเงียบ ๆ แล้วรันต่อ',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ข้างบนด้วย terraform_data: resource สร้างเสร็จก่อน แล้วค่อยเช็ค postcondition แล้ว fail หยุด run ต่างจาก precondition, postcondition ป้องกันการสร้างไม่ได้ — ทำได้แค่ report failure หลังจากนั้น',
+  },
+  {
+    q: '```hcl\nlocals {\n  a = local.b\n  b = local.a\n}\n```\nรัน terraform plan กับโค้ดนี้จะเกิดอะไรขึ้น',
+    options: [
+      'Terraform เลือก local ที่ประกาศก่อนแล้วเพิกเฉยอีกตัว',
+      'error จริง: "Cycle: local.a (expand), local.b (expand)"',
+      'ทั้งสอง local resolve เป็น null แบบเงียบ ๆ',
+      'ทำงานได้ปกติเพราะ Terraform evaluate locals จากบนลงล่าง',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ข้างบน: Terraform สร้าง dependency graph เดียวครอบคลุม locals, resources, และ outputs cycle จริงระหว่าง local สองตัวคือ error จริงที่ถูกจับก่อนจะ produce plan ได้',
   },
 ];
 
