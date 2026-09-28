@@ -1,6 +1,6 @@
 ---
 title: 'Expressions, Functions, and Conditionals'
-description: 'ใช้ built-in function กลุ่ม string, collection, และ networking ทดลอง expression อย่างปลอดภัยด้วย terraform console เขียน conditional expression และสร้าง nested block ซ้ำจำนวนไม่คงที่ด้วย dynamic'
+description: 'การใช้ built-in function สำหรับ string, collection และ network, ทดลองอย่างปลอดภัยด้วย terraform console, เขียน conditional expression และสร้าง nested block ที่ซ้ำกันด้วย dynamic'
 sidebar:
   order: 3
 ---
@@ -9,14 +9,15 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
-## ไอเดียในหนึ่งประโยค
+## แนวคิดในหนึ่งประโยค
 
-Terraform configuration ไม่ได้มีแค่ค่า static — built-in function แปลงข้อมูล, conditional expression เลือกระหว่างสองค่า, และ `dynamic` block สร้าง nested block จำนวนไม่คงที่ ทั้งหมดนี้ evaluate ตอน `plan` ก่อนที่จะไปเรียก GCP API เลยด้วยซ้ำ
+คอนฟิก Terraform ไม่ใช่แค่ค่าคงที่ — built-in function แปลงข้อมูล, conditional expression เลือกระหว่างสองค่า และ `dynamic` block สร้าง nested block จำนวนไม่คงที่ ทั้งหมดนี้ถูกประเมินตอน `plan` ก่อนที่ GCP API call ใด ๆ จะเกิดขึ้น
 
-## Built-in function แยกตามหมวด
+## Built-in function แบ่งตามหมวดหมู่
 
-Terraform มี built-in function ชุดตายตัว — เราสร้าง function เองไม่ได้ — แบ่งหมวดคร่าว ๆ ตามชนิดข้อมูลที่ทำงานด้วย มีไม่กี่ตัวที่เจอบ่อยมากใน GCP configuration:
+Terraform มีชุด built-in function ตายตัวให้มาแล้ว — ไม่มีทางนิยามของตัวเองได้ — จัดกลุ่มคร่าว ๆ ตามชนิดของข้อมูลที่มันทำงานด้วย มีไม่กี่ตัวที่เจอบ่อยมากในคอนฟิก GCP:
 
 ```hcl
 locals {
@@ -39,11 +40,11 @@ locals {
 }
 ```
 
-`join` กับ `split` เป็นด้านตรงข้ามกัน — ตัวหนึ่งเปลี่ยน list ให้เป็น string ที่มี delimiter คั่น อีกตัวเปลี่ยน string ที่มี delimiter กลับเป็น list `lookup` อ่าน map ด้วย key พร้อม fallback ที่เป็น argument ตัวที่สามชัดเจน ทำให้ key ที่หายไปไม่ทำให้เกิด error `merge` รวมหลาย map เข้าเป็นก้อนเดียว โดย argument ที่มาทีหลัง override key จาก argument ก่อนหน้า `contains` เช็คว่ามีสมาชิกอยู่ใน list ไหมและคืนค่า boolean ธรรมดา `cidrsubnet(prefix, newbits, netnum)` คือตัวที่ควรจำให้แม่นสำหรับงาน networking บน GCP function นี้รับ CIDR block ตั้งต้น ขยาย prefix length ไปอีก `newbits` บิต แล้วคืน subnet ตัวที่ `netnum` ของขนาดใหม่นั้น — เหมาะเจาะพอดีสำหรับตัด `10.0.0.0/16` ของ VPC network ให้เป็น `/24` หลายชุดโดยไม่ต้องคำนวณ address เองด้วยมือ
+`join` และ `split` เป็นด้านตรงข้ามกัน — ตัวหนึ่งแปลง list เป็น string ที่คั่นด้วยตัวคั่น อีกตัวแปลง string ที่คั่นกลับเป็น list `lookup` อ่าน map ด้วย key พร้อม fallback ชัดเจนเป็น argument ที่สาม ดังนั้น key ที่หายไปไม่ทำให้ error เลย `merge` รวมหลาย map เป็นอันเดียว โดย argument ที่มาทีหลังชนะ key ที่ซ้ำจากก่อนหน้า `contains` เช็คว่าอยู่ใน list ไหมแล้วคืน boolean ธรรมดา `cidrsubnet(prefix, newbits, netnum)` คือตัวที่ควรรู้ให้ขึ้นใจสำหรับ network ของ GCP: มันรับ CIDR block ฐาน ขยาย prefix length ด้วย `newbits` แล้วคืน subnet ลำดับที่ `netnum` ของขนาดใหม่นั้น — เครื่องมือที่เหมาะเป๊ะสำหรับแบ่ง range `10.0.0.0/16` ของ VPC network เป็นชุด subnet `/24` โดยไม่ต้องคำนวณ address เอง
 
-## terraform console — REPL สำหรับทดลอง expression
+## terraform console — REPL สำหรับ expression
 
-ก่อนจะเอา function หรือ expression ที่ยังไม่คุ้นมือไปใส่ใน resource argument จริง `terraform console` เปิด interactive REPL ที่ evaluate expression กับ configuration และ state ปัจจุบันได้เลย โดยไม่ต้อง plan หรือ apply อะไร
+ก่อนใส่ function หรือ expression ที่ไม่คุ้นเคยลงใน resource argument จริง `terraform console` เปิด REPL แบบ interactive ที่ประเมิน expression กับคอนฟิกและ state ปัจจุบัน โดยไม่ plan หรือ apply อะไรเลย
 
 ```bash
 terraform console
@@ -58,11 +59,125 @@ terraform console
 "dev"
 ```
 
-นี่คือวิธีที่เร็วที่สุดในการตอบคำถาม "expression นี้ evaluate ออกมาเป็นอะไรกันแน่" — พิมพ์เข้าไป อ่านผลลัพธ์ แล้วค่อยเอา expression ที่ใช้ได้จริงไปวางในไฟล์ `.tf` คำสั่งนี้เป็น read-only กับ infrastructure จริง `terraform console` อ่าน variable, local, และ state ที่มีอยู่ได้ แต่สร้าง เปลี่ยน หรือทำลายอะไรไม่ได้เลย
+นี่คือวิธีที่เร็วที่สุดในการตอบคำถาม "expression นี้ประเมินเป็นอะไรจริง ๆ" — พิมพ์เข้าไป อ่านผลลัพธ์ แล้วค่อย paste expression ที่ทำงานได้ลงในไฟล์ `.tf` มันอ่านอย่างเดียวกับ infrastructure จริง: `terraform console` อ่าน variable, local และ state ที่มีอยู่ได้ แต่สร้าง เปลี่ยน หรือทำลายอะไรไม่ได้เลย
+
+## `try` และ `can`: expression ที่อาจ fail ได้
+
+บาง expression ใช้ได้แค่บางเวลา — object attribute ที่เป็นตัวเลือกซึ่งอาจถูกตั้งหรือไม่ก็ได้ **`try(expr1, expr2, ...)`** ประเมินแต่ละ argument ตามลำดับแล้วคืนตัวแรกที่ไม่ error; **`can(expr)`** ประเมิน expression เดียวแล้วคืน `true`/`false` ว่ามันสำเร็จไหม ทิ้งค่าจริงไป ทั้งสองมีไว้เพื่อให้การอ้างอิงที่ผิดพลาดหนึ่งจุดไม่ทำให้ทั้ง `plan` ล้มเหลว
+
+```hcl
+variable "config" {
+  type = object({
+    name = string
+  })
+  default = {
+    name = "app"
+  }
+}
+```
+
+ผลลัพธ์จริงจาก `terraform console` — `var.config` ข้างบนไม่มี attribute `zone` เลย:
+
+```text
+> try(var.config.zone, "us-central1-a")
+"us-central1-a"
+
+> try(var.config.zone)
+╷
+│ Error: Error in function call
+│
+│ Call to function "try" failed: no expression succeeded:
+│ - Unsupported attribute
+│   This object does not have an attribute named "zone".
+│
+│ At least one expression must produce a successful result.
+╵
+
+> can(var.config.zone)
+false
+
+> can(var.config.name)
+true
+```
+
+`try()` ที่มี fallback จะคืน fallback ทันทีที่ expression แรก error โดยไม่มี error โผล่ให้เห็นเลย `try()` ที่**ไม่มี**ตัวไหนสำเร็จเลยจะโยน error จริงออกมา — ไม่ใช่ `null` แบบเงียบ ๆ `can()` ไม่เคยคืนค่าจริงเลย คืนแค่ว่าการประเมินนั้นจะสำเร็จไหม — มีประโยชน์ภายใน `validation` `condition` เพราะ `condition` ต้องประเมินเป็น boolean ธรรมดาเสมอ ห้าม raise error
+
+## `templatefile`: render ไฟล์ template จากภายนอก
+
+`templatefile(path, vars)` อ่านไฟล์จาก disk, render เป็น Terraform template แล้วคืนผลลัพธ์เป็น string — วิธีมาตรฐานในการเก็บข้อความ template (startup script, nginx config) ให้อยู่นอกไฟล์ HCL ไปเลย
+
+```text
+# config.tftpl
+server {
+  name = "${name}"
+  port = ${port}
+%{ for tag in tags ~}
+  tag "${tag}"
+%{ endfor ~}
+}
+```
+
+```hcl
+locals {
+  rendered_config = templatefile("${path.module}/config.tftpl", {
+    name = "web"
+    port = 8080
+    tags = ["prod", "us-central1"]
+  })
+}
+```
+
+ผลลัพธ์จริงจาก `terraform console` กับ template เดียวกันเป๊ะข้างบน:
+
+```text
+> templatefile("${path.module}/config.tftpl", { name = "web", port = 8080, tags = ["prod", "us-central1"] })
+<<EOT
+server {
+  name = "web"
+  port = 8080
+  tag "prod"
+  tag "us-central1"
+}
+
+EOT
+```
+
+คู่ `%{ for tag in tags ~}` / `%{ endfor ~}` เป็น template directive ไม่ใช่ HCL — มันรันหนึ่งครั้งต่อ element ของ `tags` และ `~` ท้ายบรรทัดจะลบ newline ที่ปกติจะโผล่รอบบรรทัด directive เอง ทำให้ผลลัพธ์ที่ render แล้วไม่มีบรรทัดว่างแปลก ๆ ต้องส่งค่าให้ครบทุก variable ที่ template อ้างอิง — ถ้าขาดไปหนึ่งตัวคือ error จริงตอน plan ไม่ใช่ string ว่างเปล่าแบบเงียบ ๆ `templatefile` คือวิธีมาตรฐานในการสร้าง `metadata_startup_script` ของ `google_compute_instance` จากไฟล์จริงแทน string ที่เขียนใน HCL ตรง ๆ
+
+## Provider-defined function (Terraform 1.8+)
+
+CHANGELOG ของ Terraform 1.8 ระบุชัด: "Providers can now offer functions which can be used from within the Terraform configuration language" เรียกด้วย syntax `provider::provider_name::function_name(...)` ต่างจาก standard library ที่เป็น built-in ข้างบน function พวกนี้ถูก implement *โดย provider เฉพาะ* มาพร้อม provider นั้น และมีอยู่เพราะข้อมูลของ provider นั้นเอง (GCP self-link หรือ resource ID) ต้องการ logic การ parse ที่ function library ทั่วไปไม่ควรรู้
+
+provider `hashicorp/google` (ยืนยันแล้วจากการ list `google/functions/` ใน source ของ `hashicorp/terraform-provider-google`) ตอนนี้มีเจ็ดตัว: `name_from_id`, `region_from_zone`, `region_from_id`, `zone_from_id`, `project_from_id`, `location_from_id` และ `element_from_id`
+
+```hcl
+locals {
+  instance_zone = provider::google::zone_from_id(google_compute_instance.web.id)
+}
+```
+
+ผลลัพธ์จริงจาก `terraform console` กับรูปแบบ GCP resource id/self-link จริง:
+
+```text
+> provider::google::name_from_id("projects/my-project/zones/us-central1-c/instances/my-instance")
+"my-instance"
+
+> provider::google::region_from_zone("us-central1-c")
+"us-central1"
+
+> provider::google::project_from_id("projects/my-project/zones/us-central1-c/instances/my-instance")
+"my-project"
+```
+
+`name_from_id` ดึงเฉพาะ path segment สุดท้าย (ชื่อสั้นของ resource) จากรูปแบบ id/URI/self-link ใด ๆ ที่ GCP resource คืนกลับมา — `projects/my-project/zones/us-central1-c/instances/my-instance`, self-link เต็มแบบ `https://www.googleapis.com/compute/v1/...` หรือชื่อบางส่วนแบบ `//service.googleapis.com/...` ใช้ได้หมด ตามคำอธิบาย parameter ที่ function เอกสารไว้เอง `region_from_zone` แปลง zone อย่าง `us-central1-c` เป็น region `us-central1` โดยไม่ต้องเขียน `regexall`/`join` เองกับ string ของ zone ซึ่งเป็นการผ่าตัด string ที่ function library ทั่วไปไม่ควรต้อง special-case ให้ naming convention ของ provider ตัวเดียว
+
+<Callout title="ไม่ใช่เอกสิทธิ์ของ aws ต้องเช็คทีละ provider">
+การสันนิษฐานว่า provider-defined function มีแค่ `hashicorp/aws` คือความผิดพลาด `hashicorp/azurerm` (ยืนยันแล้วใน `internal/provider/function/` ของ source `terraform-provider-azurerm`) มีของตัวเองสองตัว: `parse_resource_id` และ `normalise_resource_id` `hashicorp/aws` มี `arn_parse`, `arn_build`, `trim_iam_role_path` และ `user_agent` คอร์ส Terraform AWS Deep Dive และ Terraform Azure Deep Dive ครอบคลุมตัวที่เฉพาะกับ cloud ของตัวเองในบทเดียวกันนี้ — กลไก (`provider::name::function(...)` ใช้ได้ตั้งแต่ 1.8) เหมือนกันทุกที่ ต่างกันแค่ชื่อ function และสิ่งที่มัน parse ต่อ provider
+</Callout>
 
 ## Conditional expression
 
-conditional expression มีรูปร่าง `condition ? true_val : false_val` และ evaluate ออกมาเป็นค่าใดค่าหนึ่งในสองฝั่งตามว่า `condition` เป็น `true` หรือ `false`
+Conditional expression มีรูปแบบ `condition ? true_val : false_val` และประเมินเป็นหนึ่งในสองสาขาตามว่า `condition` เป็น `true` หรือ `false`
 
 ```hcl
 variable "environment" {
@@ -93,11 +208,11 @@ resource "google_compute_instance" "web" {
 }
 ```
 
-สามส่วนคือ `condition` (expression ที่ต้อง evaluate ออกมาเป็น boolean), `true_val` (ใช้เมื่อ `condition` เป็น `true`), และ `false_val` (ใช้เมื่อ `condition` เป็น `false`) ในตัวอย่างนี้ `local.machine_type` จะได้ `"e2-standard-4"` ก็ต่อเมื่อ `var.environment` เท่ากับ `"prod"` เป๊ะ ๆ และตกไปที่ `"e2-medium"` สำหรับค่าอื่นทั้งหมด รวมถึง `"dev"` กับ `"staging"`
+สามส่วนคือ `condition` (expression ที่ต้องประเมินเป็น boolean), `true_val` (ใช้เมื่อ `condition` เป็น `true`) และ `false_val` (ใช้เมื่อ `condition` เป็น `false`) ตรงนี้ `local.machine_type` resolve เป็น `"e2-standard-4"` เฉพาะเมื่อ `var.environment` เป็น `"prod"` เป๊ะ ๆ และตกไปใช้ `"e2-medium"` สำหรับค่าอื่นทั้งหมด รวมถึง `"dev"` และ `"staging"`
 
-## dynamic block — nested block จำนวนไม่คงที่
+## Dynamic block — nested block จำนวนไม่คงที่
 
-`count` หรือ `for_each` บน resource สร้าง resource ทั้งก้อนจำนวนไม่คงที่ ซึ่งบทถัดไปจะพูดถึง `dynamic` block แก้ปัญหาที่คล้ายกันแต่ต่างกันคือ สร้าง nested block ที่ซ้ำกันจำนวนไม่คงที่ภายใน resource เดียว
+`count` หรือ `for_each` บน resource สร้าง resource ทั้งตัวจำนวนไม่คงที่ จะพูดถึงในบทถัดไป `dynamic` block แก้ปัญหาที่เกี่ยวข้องกันแต่ต่างออกไป: สร้าง nested block ที่ซ้ำกันจำนวนไม่คงที่ภายใน resource เดียว
 
 ```hcl
 variable "allowed_ports" {
@@ -120,9 +235,9 @@ resource "google_compute_firewall" "allow_multiple" {
 }
 ```
 
-`dynamic "allow"` block วนลูปผ่าน `var.allowed_ports` และสร้าง nested block `allow { ... }` หนึ่งอันต่อหนึ่ง element ภายใน `google_compute_firewall.allow_multiple` resource เดียว ภายใน `content` `allow.value` อ้างถึง element ปัจจุบัน — ชื่อ iterator variable default เป็นชื่อ label ของ dynamic block เอง คือ `allow` ใช้ `dynamic` เมื่อสิ่งที่ซ้ำคือ nested block ภายใน resource เดียว ใช้ `count` หรือ `for_each` บนตัว resource เมื่อสิ่งที่ซ้ำคือทั้ง resource
+`dynamic "allow"` block วนซ้ำ `var.allowed_ports` และสำหรับแต่ละ element สร้าง nested block `allow { ... }` หนึ่งอันภายใน `google_compute_firewall.allow_multiple` resource เดียว ภายใน `content`, `allow.value` อ้างอิง element ปัจจุบัน — iterator variable default เป็น label ของ dynamic block เอง คือ `allow` ใช้ `dynamic` เมื่อสิ่งที่ซ้ำคือ nested block ภายใน resource เดียว; ใช้ `count` หรือ `for_each` บนตัว resource เองเมื่อสิ่งที่ซ้ำคือ resource ทั้งตัว
 
-<Mermaid title="A conditional expression and a function call resolve to one final value used in a resource argument" code={conditionalExpressionDiagram} />
+<Mermaid title="conditional expression และการเรียก function resolve เป็นค่าสุดท้ายที่ใช้ใน resource argument" code={conditionalExpressionDiagram} />
 
 export const conditionalExpressionDiagram = `flowchart LR
   a["var.environment"] --> c{"environment == prod ?"}
@@ -132,17 +247,80 @@ export const conditionalExpressionDiagram = `flowchart LR
   f --> m
   m --> r["google_compute_instance.web.machine_type"]`;
 
-<Callout title="The one-line takeaway">
-built-in **function** ของ Terraform ครอบคลุม string (`join`, `split`, `format`), collection (`lookup`, `merge`, `contains`), และ networking (`cidrsubnet` สำหรับตัด VPC range ให้เป็น subnet) — `terraform console` คือวิธีที่เร็วที่สุดในการเช็คว่า expression ไหนก็ตาม evaluate ออกมาเป็นอะไรกันแน่ ก่อนที่จะเอาไปใส่ resource argument **conditional expression** (`condition ? true_val : false_val`) เลือกระหว่างสองค่าตรง ๆ ตาม boolean condition **`dynamic`** block สร้าง nested block ที่ซ้ำกันจำนวนไม่คงที่ภายใน resource เดียว ขับเคลื่อนด้วย `for_each` บน collection — คนละแนวคิดกับ `count`/`for_each` meta-argument บน resource ที่บทถัดไปจะพูดถึง ซึ่งสร้าง resource ทั้งก้อนจำนวนไม่คงที่แทน
+## Mental Model
+
+ทุกอย่างในบทนี้จริง ๆ แล้วคือการ resolve ค่า *ก่อน* Terraform เรียก provider เลย: การเรียก function, `try`/`can`, conditional, `templatefile` และ provider-defined function ทั้งหมดรันตอนประเมิน expression ซึ่งเร็วกว่าการเรียก API ตอน `plan` เสมอ `dynamic` เป็นข้อยกเว้นเดียวที่ดูเหมือนพวกนี้แต่ไม่ใช่ — มันไม่ได้คำนวณค่า มันขยายเป็นโครงสร้าง HCL (nested block ที่ซ้ำ) ก่อนที่สคีมาของ resource เองจะถูกประเมินด้วยซ้ำ
+
+## Trade-offs
+
+| ตัวเลือก | ข้อดี | ต้นทุน |
+|---|---|---|
+| `try(a, b, ...)` | การอ้างอิงที่ผิดพลาดจุดเดียวไม่ทำให้ plan ทั้งหมดล้มเหลว — พิสูจน์ข้างบนด้วย fallback จริง | กลืน *เหตุผล* ที่ expression แรก fail แบบเงียบ ๆ ถ้าตัวถัดไปสำเร็จ |
+| `can(expr)` | boolean ที่สะอาดสำหรับ `validation` condition พิสูจน์ข้างบน | ทิ้งค่าจริงไปทั้งหมด |
+| `templatefile` | เก็บข้อความ template ก้อนใหญ่ไว้นอก HCL string ทั้งหมด พิสูจน์ข้างบนด้วยการ render จริง | ต้องส่งค่าให้ครบทุก variable ที่อ้างอิง — ขาดไปหนึ่งตัวคือ error จริงตอน plan |
+| Provider-defined function (`provider::...`) | parse GCP self-link/id โดยไม่ต้องเขียน `split()`/`regexall()` เอง พิสูจน์ข้างบน | ผูกกับ version ของ `google` provider ที่ติดตั้ง ไม่ใช่แค่ version ของ Terraform CLI |
+| `dynamic` block | สร้าง nested block จำนวนไม่คงที่จาก collection พิสูจน์ข้างบนด้วย `allow` | เพิ่มความอ้อม (`allow.value`) ทำให้ resource อ่านยากกว่า block ตายตัวจำนวนน้อยที่เขียนตรง ๆ |
+
+## ความเข้าใจผิดที่พบบ่อย
+
+- **"`try()` คืน `null` แบบเงียบ ๆ ถ้าทุก expression fail"** พิสูจน์ข้างบนแล้วว่ามันโยน error จริงออกมา ("no expression succeeded") — `try()` จะกลืน error ก็ต่อเมื่อมี argument ไหนสำเร็จจริง ๆ เท่านั้น
+- **"`can()` คืนค่าจริงถ้า expression สำเร็จ"** พิสูจน์ข้างบนแล้วว่า `can()` คืน boolean ธรรมดาเสมอ ไม่เคยคืนค่าจริง
+- **"`provider::google::name_from_id` รับแค่ id รูปแบบสั้น `projects/.../instances/name` เท่านั้น"** ไม่จริงตามที่ parameter ของ function เอกสารไว้เอง — มันรับ self-link เต็มแบบ `https://www.googleapis.com/...` และชื่อบางส่วนแบบ `//service.googleapis.com/...` ได้ด้วย
+- **"มีแค่ AWS ที่มี provider-defined function"** ขัดแย้งกับสิ่งที่พิสูจน์ข้างบนจากการอ่าน source ของทั้งสอง provider โดยตรง — `hashicorp/azurerm` มีของตัวเองสองตัว (`parse_resource_id`, `normalise_resource_id`) และ `hashicorp/aws` มีสี่ตัว
+- **"`dynamic` กับ `for_each` บน resource แก้ปัญหาเดียวกัน"** ไม่ใช่: `for_each` บน resource สร้าง resource instance ทั้งตัวหลายอัน; `dynamic` สร้าง nested block หลายอัน *ภายใน* resource instance เดียว — พิสูจน์ข้างบนด้วย `google_compute_firewall.allow_multiple` ตัวเดียวที่มี `allow` block ที่ generate มาสามอัน
+
+## อ่านโค้ดที่ AI สร้างให้
+
+- `try(a.b.c, "default")` ที่ generate มาใช้ทุกที่ที่ค่า*อาจ*หายไป โดยไม่เช็คว่าค่าที่หายไปควรเป็น error ดัง ๆ ตอน plan แทนไหม
+- `split("/", google_compute_instance.web.id)` ด้วยมือ หรือ `regexall()` ที่เขียนเองเพื่อดึง zone, region หรือชื่อสั้นจาก GCP resource id/self-link ทั้งที่ provider-defined function (`provider::google::zone_from_id`, `region_from_zone`, `name_from_id`) ทำแบบนั้นให้อยู่แล้ว พิสูจน์ข้างบนแล้ว
+- `templatefile()` ที่เรียกโดยขาด variable ที่ template อ้างอิงจริง — พิสูจน์ข้างบนแล้วว่านี่คือ error จริงตอน plan ไม่ใช่การแทนที่ด้วยค่าว่าง
+- syntax `provider::` ที่โผล่ในตัวอย่างที่ generate มาโดยไม่เช็ค version กับ version ของ `google` provider ที่ pin ไว้จริงใน `required_providers` — ความพร้อมใช้งานขึ้นกับ provider version แต่ละตัว ไม่ใช่แค่ "Terraform 1.8 ขึ้นไป"
+- `dynamic` block ที่ generate มาสำหรับ nested block จำนวนคงที่และน้อยที่รู้อยู่แล้ว (สองสามรายการ `allow` ที่ไม่เคยเปลี่ยน) — ความอ้อมที่ไม่มีประโยชน์เมื่อชุดข้อมูลไม่ได้ไม่คงที่จริง ๆ
+- `google_compute_instance` ที่ generate มาโดยไม่มี `network_interface` block เลย — นี่ไม่ใช่ตัวเลือก `terraform validate` จะปฏิเสธทันทีเพราะ `network_interface` เป็น block ที่จำเป็น
+
+<SpotTheBug code={`variable "zone_override" {
+  type    = string
+  default = null
+}
+
+locals {
+  # "Safely" fall back to a default zone
+  effective_zone = try(var.zone_override.name, "us-central1-a")
+}`}>
+นี่แย่กว่า error เสียอีก — มันคือ bug แบบเงียบ ๆ `var.zone_override` ถูก type เป็น `string` ธรรมดา (หรือ `null`) ไม่ใช่ object ดังนั้นมันไม่มี attribute `.name` เลย — `var.zone_override.name` fail *ทุกครั้ง* ไม่ว่าค่าของ `var.zone_override` จะเป็นอะไร รวมถึง override จริงที่ caller ตั้งไว้ด้วย เพราะมัน fail เสมอ fallback `"us-central1-a"` ของ `try()` เลย fire ทุกครั้งเช่นกัน โดยไม่มี error โผล่ให้เห็นเลย พิสูจน์ด้วยรูปแบบเดียวกันเป๊ะใน `terraform console` โดยตั้ง override จริง:
+
+```text
+$ TF_VAR_zone_override="europe-west1-b" terraform console
+> try(var.zone_override.name, "us-central1-a")
+"us-central1-a"
+```
+
+caller ที่ตั้ง `zone_override = "europe-west1-b"` ยังได้ `"us-central1-a"` กลับมาอยู่ดี — override ของเขาถูกทิ้งอย่างเงียบ ๆ ไม่มี error ไม่มีคำเตือน ไม่มีอะไรใน output ของ `plan` ที่บอกว่ามีอะไรผิดพลาด พิสูจน์ด้วย expression ดิบ (ไม่มี `try()`) กับ variable เดียวกัน นี่คือสิ่งที่ `try()` กำลังกลืนอยู่:
+
+```text
+$ terraform console
+> var.zone_override.name
+╷
+│ Error: Attempt to get attribute from null value
+│
+│ This value is null, so it does not have any attributes.
+╵
+```
+
+ทางแก้คือเลิกใช้ `try()` แทนการทำ type ของ variable ให้ถูกต้อง: อ้างอิง `var.zone_override` ตรง ๆ (`try(var.zone_override, "us-central1-a")` ไม่มี `.name`) เพราะมันเป็น string ธรรมดา หรือเปลี่ยน `type` ของ variable เป็น `object({ name = string })` ถ้า caller ตั้งใจส่งค่าที่มีโครงสร้างจริง ๆ
+</SpotTheBug>
+
+<Callout title="สรุปในหนึ่งบรรทัด">
+**function** library ที่เป็น built-in ของ Terraform ครอบคลุม string (`join`, `split`, `format`), collection (`lookup`, `merge`, `contains`) และ network (`cidrsubnet` สำหรับแบ่ง VPC range เป็น subnet) — `terraform console` คือวิธีที่เร็วที่สุดในการเช็คว่า expression อะไรก็ตามประเมินเป็นอะไรจริง ๆ **`try(a, b, ...)`** คืน expression แรกที่ไม่ error และโยน error จริงถ้าไม่มีตัวไหนสำเร็จ พิสูจน์ข้างบน; **`can(expr)`** คืน boolean ธรรมดาว่า expression จะสำเร็จไหม **`templatefile(path, vars)`** render ไฟล์ภายนอกเป็น Terraform template พิสูจน์ข้างบน และต้องการค่าให้ครบทุก variable ที่อ้างอิง **conditional expression** (`condition ? true_val : false_val`) เลือกระหว่างสองค่าตาม boolean condition **Provider-defined function** (`provider::name::function(...)` ใช้ได้ตั้งแต่ Terraform 1.8) มาพร้อม provider version เฉพาะ — พิสูจน์ข้างบนสำหรับ `hashicorp/google`: `name_from_id`, `region_from_zone`, `region_from_id`, `zone_from_id`, `project_from_id`, `location_from_id`, `element_from_id`; `hashicorp/aws` และ `hashicorp/azurerm` ก็มีของตัวเอง **`dynamic`** block สร้าง nested block ที่ซ้ำกันจำนวนไม่คงที่ภายใน resource เดียว ขับเคลื่อนด้วย `for_each` บน collection — เป็นคนละแนวคิดกับ `count`/`for_each` meta-argument ระดับ resource ที่จะพูดถึงต่อไป ซึ่งสร้าง resource ทั้งตัวจำนวนไม่คงที่แทน
 </Callout>
 
 export const quizExpressionsFunctions = [
   {
     q: 'terraform console ใช้ทำอะไร',
     options: [
-      'apply infrastructure change ได้เร็วกว่า terraform apply',
-      'REPL แบบ interactive สำหรับ evaluate expression และ function กับ config และ state ปัจจุบัน โดยไม่เปลี่ยน infrastructure จริงเลย',
-      'เข้ารหัสค่า sensitive ก่อนที่จะลงไปใน state file',
+      'apply การเปลี่ยนแปลง infrastructure ได้เร็วกว่า terraform apply',
+      'REPL แบบ interactive สำหรับประเมิน expression และ function กับคอนฟิกและ state ปัจจุบัน โดยไม่เปลี่ยน infrastructure เลย',
+      'เข้ารหัสค่าที่ sensitive ก่อนเข้า state file',
       'สร้าง resource จำนวนไม่คงที่จาก for_each meta-argument',
     ],
     answer: 1,
@@ -150,32 +328,76 @@ export const quizExpressionsFunctions = [
   {
     q: 'conditional expression มีสามส่วนอะไรบ้าง',
     options: [
-      'ชื่อ function, argument list, และ return type',
-      'condition ที่ evaluate ออกมาเป็น boolean, true_val, และ false_val',
-      'for_each map, key, และ value',
-      'variable, type constraint, และ default',
+      'ชื่อ function, argument list และ return type',
+      'condition ที่ประเมินเป็น boolean, true_val และ false_val',
+      'for_each map, key และ value',
+      'variable, type constraint และ default',
     ],
     answer: 1,
   },
   {
     q: 'ควรใช้ dynamic block แทน count หรือ for_each บน resource เมื่อไหร่',
     options: [
-      'เมื่อต้องการ resource ทั้งก้อนจำนวนไม่คงที่แยกกัน',
-      'เมื่อต้องการ nested block ที่ซ้ำกันจำนวนไม่คงที่ภายใน resource เดียว เช่น allow block หลายอันใน firewall resource เดียว',
+      'เมื่อต้องการ resource แยกทั้งตัวจำนวนไม่คงที่',
+      'เมื่อต้องการ nested block ที่ซ้ำกันจำนวนไม่คงที่ภายใน resource เดียว เช่น หลาย allow block ใน firewall resource เดียว',
       'เมื่อต้องการซ่อนค่าจาก CLI output',
       'เมื่อต้องการ validate ค่า variable ตอน plan',
     ],
     answer: 1,
   },
   {
-    q: 'cidrsubnet(prefix, newbits, netnum) ทำงานอย่างไร',
+    q: 'cidrsubnet(prefix, newbits, netnum) ทำอะไร',
     options: [
       'รวมสอง CIDR range แยกกันเข้าเป็น supernet เดียว',
-      'ขยาย CIDR prefix ไปอีก newbits บิต แล้วคืน subnet ตัวที่ netnum ของขนาดใหม่นั้น',
-      'เช็คว่า IP address เป็นสมาชิกของ CIDR range หรือไม่',
-      'แปลง CIDR range ให้เป็น list ของ IP address แต่ละตัว',
+      'ขยาย CIDR prefix ด้วย newbits บิตเพิ่ม แล้วคืน subnet ลำดับที่ netnum ของขนาดใหม่นั้น',
+      'เช็คว่า IP address เป็นสมาชิกของ CIDR range ไหม',
+      'แปลง CIDR range เป็น list ของ IP address แต่ละตัว',
     ],
     answer: 1,
+  },
+  {
+    q: 'เกิดอะไรขึ้นเมื่อทุก expression ที่ส่งให้ try() fail หมด',
+    options: [
+      'try() คืน null แบบเงียบ ๆ',
+      'try() คืน string ว่างเปล่า',
+      'try() โยน error จริงออกมา: "no expression succeeded"',
+      'try() คืนผลลัพธ์บางส่วนของ expression แรก',
+    ],
+    answer: 2,
+    explain: 'พิสูจน์ข้างบนด้วย terraform console: try(var.config.zone) ที่ไม่มี fallback และ attribute หายไป ให้ error จริง "Error in function call: no expression succeeded"',
+  },
+  {
+    q: 'provider::google::region_from_zone("us-central1-c") คืนค่าอะไร',
+    options: [
+      '"us-central1-c" เหมือนเดิม',
+      '"us-central1" -- ส่วน region ของ zone โดยตัดตัวอักษร zone ท้ายออก',
+      'error เพราะ zone แปลงเป็น region ไม่ได้',
+      'list ของ zone ทั้งหมดใน region นั้น',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ข้างบนด้วยการเรียก terraform console จริงกับ provider hashicorp/google: provider::google::region_from_zone("us-central1-c") คืน "us-central1"',
+  },
+  {
+    q: 'Terraform version ไหนที่เพิ่ม provider-defined function (syntax provider::name::function())',
+    options: [
+      'Terraform 1.5 พร้อมกับ import block',
+      'Terraform 1.8 -- ยืนยันจาก CHANGELOG ทางการ: "Providers can now offer functions which can be used from within the Terraform configuration language"',
+      'Terraform 1.0 มีมาตั้งแต่แรกแล้ว',
+      'ยังไม่ถูกปล่อยใน stable version ไหนเลย',
+    ],
+    answer: 1,
+    explain: 'ยืนยันแล้วจากการอ่าน CHANGELOG จริงของ Terraform 1.8.0 บน GitHub ซึ่งระบุไว้ใต้ NEW FEATURES พร้อม syntax provider::provider_name::function_name() ตัวเป๊ะ',
+  },
+  {
+    q: 'azurerm provider มี provider-defined function ให้ใช้ไหม',
+    options: [
+      'ไม่มี มีแค่ hashicorp/aws เท่านั้นที่มี provider-defined function',
+      'มี -- parse_resource_id และ normalise_resource_id ยืนยันแล้วจากการอ่าน source ของ terraform-provider-azurerm',
+      'มี แต่อยู่แค่ใน branch beta/ยังไม่ปล่อย ไม่เคยอยู่ใน tagged release',
+      'provider-defined function ใช้กับ azurerm ไม่ได้เพราะมันใช้ SDKv2 ไม่ใช่ plugin framework',
+    ],
+    answer: 1,
+    explain: 'ยืนยันแล้วจากการอ่าน internal/provider/function/ ใน GitHub repository terraform-provider-azurerm: parse_resource_id.go และ normalise_resource_id.go',
   },
 ];
 

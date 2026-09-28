@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## The idea in one sentence
 
@@ -59,6 +60,120 @@ terraform console
 ```
 
 This is the fastest way to answer "what does this expression actually evaluate to" — type it in, read the result, and only then paste the working expression into a `.tf` file. It is read-only against real infrastructure: `terraform console` can read variables, locals, and existing state, but it cannot create, change, or destroy anything.
+
+## `try` and `can`: expressions that might fail
+
+Some expressions are only valid sometimes — an optional object attribute that may or may not be set. **`try(expr1, expr2, ...)`** evaluates each argument in order and returns the first one that does not raise an error; **`can(expr)`** evaluates one expression and returns `true`/`false` for whether it succeeded, discarding the actual value. Both exist so a single bad reference does not abort the whole `plan`.
+
+```hcl
+variable "config" {
+  type = object({
+    name = string
+  })
+  default = {
+    name = "app"
+  }
+}
+```
+
+Real `terraform console` output — `var.config` above has no `zone` attribute at all:
+
+```text
+> try(var.config.zone, "us-central1-a")
+"us-central1-a"
+
+> try(var.config.zone)
+╷
+│ Error: Error in function call
+│
+│ Call to function "try" failed: no expression succeeded:
+│ - Unsupported attribute
+│   This object does not have an attribute named "zone".
+│
+│ At least one expression must produce a successful result.
+╵
+
+> can(var.config.zone)
+false
+
+> can(var.config.name)
+true
+```
+
+`try()` with a fallback returns the fallback the moment the first expression errors, with no error surfaced at all. `try()` with **no** working expression re-raises a real error — it is not a silent `null`. `can()` never returns the value itself, only whether evaluating it would have succeeded — useful inside a `validation` `condition`, since a `condition` must always evaluate to a plain boolean, never raise.
+
+## `templatefile`: rendering an external template file
+
+`templatefile(path, vars)` reads a file from disk, renders it as a Terraform template, and returns the result as a string — the standard way to keep templated text (a startup script, an nginx config) out of the HCL file entirely.
+
+```text
+# config.tftpl
+server {
+  name = "${name}"
+  port = ${port}
+%{ for tag in tags ~}
+  tag "${tag}"
+%{ endfor ~}
+}
+```
+
+```hcl
+locals {
+  rendered_config = templatefile("${path.module}/config.tftpl", {
+    name = "web"
+    port = 8080
+    tags = ["prod", "us-central1"]
+  })
+}
+```
+
+Real output from `terraform console` against the exact template above:
+
+```text
+> templatefile("${path.module}/config.tftpl", { name = "web", port = 8080, tags = ["prod", "us-central1"] })
+<<EOT
+server {
+  name = "web"
+  port = 8080
+  tag "prod"
+  tag "us-central1"
+}
+
+EOT
+```
+
+The `%{ for tag in tags ~}` / `%{ endfor ~}` pair is a template directive, not HCL — it runs once per element of `tags`, and the trailing `~` on each strips the newline that would otherwise appear around the directive line, keeping the rendered output free of stray blank lines. Every variable the template references must be supplied — an omitted one is a real error at plan time, not a silently empty string. `templatefile` is the standard way to build a `google_compute_instance` `metadata_startup_script` from a real file instead of an inline string.
+
+## Provider-defined functions (Terraform 1.8+)
+
+Terraform 1.8's changelog is explicit: "Providers can now offer functions which can be used from within the Terraform configuration language," called with the syntax `provider::provider_name::function_name(...)`. Unlike the built-in standard library above, these functions are implemented *by a specific provider*, ship with it, and exist because that provider's own data (a GCP self-link or resource ID) needs parsing logic a general-purpose function library has no business knowing about.
+
+The `hashicorp/google` provider (confirmed by listing `google/functions/` in the `hashicorp/terraform-provider-google` source) currently ships seven: `name_from_id`, `region_from_zone`, `region_from_id`, `zone_from_id`, `project_from_id`, `location_from_id`, and `element_from_id`.
+
+```hcl
+locals {
+  instance_zone = provider::google::zone_from_id(google_compute_instance.web.id)
+}
+```
+
+Real `terraform console` output against a real GCP resource id/self-link shape:
+
+```text
+> provider::google::name_from_id("projects/my-project/zones/us-central1-c/instances/my-instance")
+"my-instance"
+
+> provider::google::region_from_zone("us-central1-c")
+"us-central1"
+
+> provider::google::project_from_id("projects/my-project/zones/us-central1-c/instances/my-instance")
+"my-project"
+```
+
+`name_from_id` pulls just the final path segment (the resource's short name) out of any of the id/URI/self-link shapes GCP resources return — `projects/my-project/zones/us-central1-c/instances/my-instance`, a full `https://www.googleapis.com/compute/v1/...` self-link, or a partial `//service.googleapis.com/...` name all work, per the function's own documented parameter description. `region_from_zone` turns a zone like `us-central1-c` into its region `us-central1` without a hand-rolled `regexall`/`join` on the zone string, which is exactly the kind of string surgery a general-purpose function library should not have to special-case for one provider's naming convention.
+
+<Callout title="Not aws-exclusive, worth checking per provider">
+It would be a mistake to assume provider-defined functions are unique to `hashicorp/aws`. `hashicorp/azurerm` (confirmed in `internal/provider/function/` of the `terraform-provider-azurerm` source) has its own two: `parse_resource_id` and `normalise_resource_id`. `hashicorp/aws` has `arn_parse`, `arn_build`, `trim_iam_role_path`, and `user_agent`. The Terraform AWS Deep Dive and Terraform Azure Deep Dive courses cover the provider-specific ones for their own cloud in this same lesson — the mechanism (`provider::name::function(...)`, available since 1.8) is identical everywhere; only the function names and what they parse differ per provider.
+</Callout>
 
 ## Conditional expressions
 
@@ -132,8 +247,71 @@ export const conditionalExpressionDiagram = `flowchart LR
   f --> m
   m --> r["google_compute_instance.web.machine_type"]`;
 
+## Mental Model
+
+Every construct in this lesson is really about resolving a value *before* Terraform ever calls a provider: a function call, `try`/`can`, a conditional, `templatefile`, and a provider-defined function all run during expression evaluation, strictly earlier than any `plan`-time API interaction. `dynamic` is the one exception that looks like the others but is not — it does not compute a value, it expands into HCL structure (repeated nested blocks) before the resource's own schema is even evaluated.
+
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---|---|---|
+| `try(a, b, ...)` | A single bad reference doesn't abort the whole plan — proven above with a real fallback | Silently swallows the *reason* the first expression failed unless a later argument also fails |
+| `can(expr)` | A clean boolean for a `validation` condition, proven above | Discards the actual value entirely |
+| `templatefile` | Keeps large templated text out of HCL strings entirely, proven above with a real render | Every referenced variable must be supplied — a missing one is a real plan-time error |
+| Provider-defined function (`provider::...`) | GCP self-link/id parsing without hand-rolled `split()`/`regexall()`, proven above | Tied to the installed `google` provider version, not just the Terraform CLI version |
+| `dynamic` block | Generates a variable number of nested blocks from a collection, proven above with `allow` | Adds indirection (`allow.value`) that makes a resource harder to read at a glance than a small fixed set of literal blocks |
+
+## Common Misconceptions
+
+- **"`try()` silently returns `null` if every expression fails."** Proven above: it re-raises a real error ("no expression succeeded") — `try()` only suppresses the error when *some* argument actually succeeds.
+- **"`can()` returns the value if the expression succeeds."** Proven above: `can()` always returns a plain boolean, never the value.
+- **"`provider::google::name_from_id` only accepts the short `projects/.../instances/name` id format."** Not confirmed by the function's own documented parameters — it also accepts a full `https://www.googleapis.com/...` self-link and a partial `//service.googleapis.com/...` name, per the provider source's own description.
+- **"Only AWS has provider-defined functions."** Contradicted above by reading both providers' source directly — `hashicorp/azurerm` ships two of its own (`parse_resource_id`, `normalise_resource_id`), and `hashicorp/aws` ships four.
+- **"`dynamic` and `for_each` on a resource solve the same problem."** They don't: `for_each` on a resource creates multiple whole resource instances; `dynamic` creates multiple nested blocks *inside* one resource instance — proven above with a single `google_compute_firewall.allow_multiple` containing three generated `allow` blocks.
+
+## Reading AI-generated code
+
+- A generated `try(a.b.c, "default")` used everywhere a value *might* be missing, without checking whether a missing value should actually be a loud plan-time error instead.
+- Manual `split("/", google_compute_instance.web.id)` or a hand-rolled `regexall()` used to pull the zone, region, or short name out of a GCP resource id/self-link, when a provider-defined function (`provider::google::zone_from_id`, `region_from_zone`, `name_from_id`) already does exactly that, proven above.
+- A `templatefile()` call missing a variable the template actually references — proven above, this is a real plan-time error, not a blank substitution.
+- `provider::` function syntax appearing in a generated example with no version check against the actual `google` provider version pinned in `required_providers` — availability is per-provider-version, not just "Terraform 1.8 or later."
+- A `dynamic` block generated for a fixed, small, known set of nested blocks (two or three `allow` entries that never change) — indirection with no benefit when the set isn't actually variable.
+- A generated `google_compute_instance` with no `network_interface` block at all — this is not optional; `terraform validate` rejects it because `network_interface` is a required block.
+
+<SpotTheBug code={`variable "zone_override" {
+  type    = string
+  default = null
+}
+
+locals {
+  # "Safely" fall back to a default zone
+  effective_zone = try(var.zone_override.name, "us-central1-a")
+}`}>
+This is worse than an error — it is a silent bug. `var.zone_override` is typed as a plain `string` (or `null`), not an object, so it never has a `.name` attribute — `var.zone_override.name` fails *every single time*, for every possible value of `var.zone_override`, including a real override a caller actually set. Because it always fails, `try()`'s fallback `"us-central1-a"` fires every single time too, with no error ever surfacing. Proven with the identical shape in `terraform console`, setting a real override:
+
+```text
+$ TF_VAR_zone_override="europe-west1-b" terraform console
+> try(var.zone_override.name, "us-central1-a")
+"us-central1-a"
+```
+
+A caller who set `zone_override = "europe-west1-b"` gets `"us-central1-a"` back anyway — their override is silently discarded, with no error, no warning, nothing in the `plan` output to suggest anything went wrong. Proven with the raw expression (no `try()`) against the same variable, this is what `try()` is quietly swallowing:
+
+```text
+$ terraform console
+> var.zone_override.name
+╷
+│ Error: Attempt to get attribute from null value
+│
+│ This value is null, so it does not have any attributes.
+╵
+```
+
+The fix is to stop treating `try()` as a substitute for getting the variable's type right: reference `var.zone_override` directly (`try(var.zone_override, "us-central1-a")`, no `.name`) since it is a plain string, or change the variable's `type` to `object({ name = string })` if callers are genuinely meant to pass a structured value.
+</SpotTheBug>
+
 <Callout title="The one-line takeaway">
-Terraform's built-in **functions** cover strings (`join`, `split`, `format`), collections (`lookup`, `merge`, `contains`), and networking (`cidrsubnet` for carving VPC ranges into subnets) — `terraform console` is the fastest way to check what any expression actually evaluates to, before it goes into a resource argument. A **conditional expression** (`condition ? true_val : false_val`) picks between exactly two values based on a boolean condition. A **`dynamic`** block generates a variable number of repeated nested blocks inside one resource, driven by `for_each` over a collection — a distinct concept from the `count`/`for_each` resource meta-arguments covered next, which generate a variable number of whole resources instead.
+Terraform's built-in **functions** cover strings (`join`, `split`, `format`), collections (`lookup`, `merge`, `contains`), and networking (`cidrsubnet` for carving VPC ranges into subnets) — `terraform console` is the fastest way to check what any expression actually evaluates to. **`try(a, b, ...)`** returns the first expression that doesn't error, and re-raises a real error if none do, proven above; **`can(expr)`** returns a plain boolean for whether an expression would succeed. **`templatefile(path, vars)`** renders an external file as a Terraform template, proven above, and requires every referenced variable to be supplied. A **conditional expression** (`condition ? true_val : false_val`) picks between exactly two values based on a boolean condition. **Provider-defined functions** (`provider::name::function(...)`, since Terraform 1.8) ship with a specific provider version — proven above for `hashicorp/google`: `name_from_id`, `region_from_zone`, `region_from_id`, `zone_from_id`, `project_from_id`, `location_from_id`, `element_from_id`; `hashicorp/aws` and `hashicorp/azurerm` have their own too. A **`dynamic`** block generates a variable number of repeated nested blocks inside one resource, driven by `for_each` over a collection — a distinct concept from the `count`/`for_each` resource meta-arguments covered next, which generate a variable number of whole resources instead.
 </Callout>
 
 export const quizExpressionsFunctions = [
@@ -176,6 +354,50 @@ export const quizExpressionsFunctions = [
       'It converts a CIDR range into a list of individual IP addresses',
     ],
     answer: 1,
+  },
+  {
+    q: 'What happens when every expression passed to try() fails?',
+    options: [
+      'try() returns null silently',
+      'try() returns an empty string',
+      'try() re-raises a real error: "no expression succeeded"',
+      "try() returns the first expression's partial result",
+    ],
+    answer: 2,
+    explain: 'Proven above with terraform console: try(var.config.zone) with no fallback and a missing attribute produces a real "Error in function call: no expression succeeded".',
+  },
+  {
+    q: 'What does provider::google::region_from_zone("us-central1-c") return?',
+    options: [
+      '"us-central1-c" unchanged',
+      '"us-central1" -- the region portion of the zone, with the trailing zone letter removed',
+      'An error, because zones cannot be converted to regions',
+      'A list of all zones in that region',
+    ],
+    answer: 1,
+    explain: 'Proven above with a real terraform console call against the hashicorp/google provider: provider::google::region_from_zone("us-central1-c") returned "us-central1".',
+  },
+  {
+    q: 'Which Terraform version introduced provider-defined functions (the provider::name::function() syntax)?',
+    options: [
+      'Terraform 1.5, alongside the import block',
+      'Terraform 1.8 -- confirmed in the official CHANGELOG: "Providers can now offer functions which can be used from within the Terraform configuration language"',
+      'Terraform 1.0, they have always existed',
+      'They are not yet released in any stable version',
+    ],
+    answer: 1,
+    explain: 'Confirmed by reading the real Terraform 1.8.0 CHANGELOG on GitHub, which lists this under NEW FEATURES with the exact provider::provider_name::function_name() syntax.',
+  },
+  {
+    q: 'Does the azurerm provider ship any provider-defined functions?',
+    options: [
+      'No, only hashicorp/aws has provider-defined functions',
+      'Yes -- parse_resource_id and normalise_resource_id, confirmed by reading the terraform-provider-azurerm source',
+      'Yes, but only in a beta/unreleased branch, never in a tagged release',
+      'Provider-defined functions do not apply to azurerm because it uses the SDKv2, not the plugin framework',
+    ],
+    answer: 1,
+    explain: 'Confirmed by reading internal/provider/function/ in the terraform-provider-azurerm GitHub repository: parse_resource_id.go and normalise_resource_id.go.',
   },
 ];
 
