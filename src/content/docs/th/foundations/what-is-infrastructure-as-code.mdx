@@ -81,6 +81,14 @@ Terraform เจาะกลุ่ม **declarative, provider-based, state-track
 
 อีกชื่อหนึ่งที่ควรรู้จักคือ **OpenTofu** หลังจาก Terraform เปลี่ยน license ในปี 2023 กลุ่ม contributor และบริษัทต่าง ๆ ได้ fork release เวอร์ชันโอเพนซอร์สล่าสุดออกมาเป็น OpenTofu ซึ่งตอนนี้ดูแลโดย Linux Foundation OpenTofu เป็น alternative แบบโอเพนซอร์สที่ compatible กัน — HCL syntax, provider และ workflow ที่เรียนในคอร์สนี้ใช้กับ OpenTofu ได้ตรง ๆ
 
+## อ่านโค้ดที่ AI สร้างให้
+
+- คำแนะนำ setup ที่ generate มาบอกว่า "คลิก X แล้วคลิก Y" ใน Google Cloud console สำหรับ provision resource แทนไฟล์ `.tf` — แม้ขั้นตอน console จะถูกต้องทุกจุด ก็ยังเอาปัญหาของ ClickOps ทั้งหมดที่พูดไว้ข้างบนกลับมา: ทำซ้ำไม่ได้ ไม่มีเอกสาร drift ง่าย
+- shell script ที่ generate มาซึ่งห่อ `gcloud` CLI call ไว้ แล้วเรียกว่า "infrastructure as code" โดยไม่มี idempotency guard — รันซ้ำสองครั้งจะ error หรือสร้างซ้ำ ตรงกับความล้มเหลวแบบ imperative ที่พูดไว้ข้างบนเป๊ะ; `resource` block แบบ declarative ไม่มีปัญหานี้เลยโดยธรรมชาติของมัน
+- โค้ดหรือเอกสารที่อธิบายว่า Deployment Manager เป็น "multi-cloud" หรือ Ansible มี "state tracking ในตัวเหมือน Terraform" — ทั้งสองไม่ถูกต้อง Deployment Manager ใช้ได้แค่กับ GCP (และตอนนี้ Google เองก็ผลักดันโปรเจกต์ใหม่ไปทาง Infrastructure Manager ที่รัน Terraform ตรง ๆ) และ playbook ของ Ansible คือ task แบบ imperative เรียงลำดับ ไม่มี state file บันทึกว่าสร้างอะไรไว้บ้าง
+- คำกล่าวอ้างว่า OpenTofu กับ Terraform เป็น "เครื่องมือคู่แข่งที่ไม่เกี่ยวข้องกัน" — OpenTofu คือ fork จาก release โอเพนซอร์สล่าสุดของ Terraform ใช้ HCL, provider และ workflow เดียวกันได้
+- โค้ด Terraform ที่ generate มาโดยนำเสนอราวกับว่าขั้นตอน `plan` เป็นตัวเลือกหรือข้ามได้ "เพื่อประหยัดเวลา" — การเทียบสามทาง (state, configuration, infrastructure จริง) คือสิ่งที่ทำให้ Terraform รันซ้ำได้อย่างปลอดภัย การข้ามการ review สิ่งที่มันคำนวณทำลายโมเดล reconciliation ทั้งหมด
+
 <Callout title="สรุปหนึ่งบรรทัด">
 Infrastructure as Code แทนที่การคลิกผ่าน console แบบทำซ้ำไม่ได้และไม่มีเอกสารด้วยไฟล์ text แบบ **declarative** ใน version control คุณอธิบาย *สิ่งที่ต้องการ* Terraform อ่าน real GCP state, diff กับ configuration ของคุณ แล้วคำนวณ **plan ที่น้อยที่สุด** ของ create, update, destroy — ต่างจากเครื่องมือแบบ imperative (script ของขั้นตอนเรียงลำดับ) หรือเครื่องมือ configuration-management อย่าง Ansible; **OpenTofu** คือ fork โอเพนซอร์สที่ compatible กันซึ่งควรรู้จักไว้
 </Callout>
@@ -95,6 +103,7 @@ export const quizIac = [
       'แพงกว่าการใช้ CLI',
     ],
     answer: 1,
+    explain: 'การเปลี่ยนแปลงแบบ ClickOps ไม่มีคำสั่งที่ทำซ้ำได้ ไม่มีบันทึกว่าทำไมถึงเป็นแบบนี้ และ drift ไปเงียบ ๆ ทันทีที่มีสองคนแก้ project เดียวกันได้อย่างอิสระ',
   },
   {
     q: 'ความต่างระหว่าง declarative กับ imperative Infrastructure as Code คืออะไร',
@@ -105,6 +114,7 @@ export const quizIac = [
       'declarative IaC ใช้ได้กับ GCP เท่านั้น',
     ],
     answer: 0,
+    explain: 'Terraform resource block ไม่เคยพูดคำว่า "create" เลย — กริยานั้นถูกตัดสินใจโดย Terraform ตอน plan คำสั่งแบบ imperative อย่าง gcloud storage buckets create ไม่รู้ว่ามีอะไรอยู่แล้วบ้าง และอาจพังถ้ารันซ้ำ',
   },
   {
     q: 'Terraform คำนวณอะไรระหว่าง configuration ที่ต้องการกับ state จริงของ infrastructure',
@@ -115,6 +125,7 @@ export const quizIac = [
       'script แบบ imperative เต็มรูปแบบให้คนรันเอง',
     ],
     answer: 1,
+    explain: 'เปลี่ยนแค่ argument เดียว (เช่น label) ได้ update in-place แค่ attribute นั้น ส่วนที่เหลือที่ Terraform จัดการอยู่จะไม่ถูกแตะเลย ไม่ใช่ทุบทิ้งแล้วสร้างใหม่หมด',
   },
   {
     q: 'ข้อไหนพูดถึง alternative ของ Terraform ได้ถูกต้อง',
@@ -125,6 +136,7 @@ export const quizIac = [
       'OpenTofu เป็นคู่แข่งที่ปิดซอร์สและไม่เกี่ยวข้องกับ Terraform',
     ],
     answer: 1,
+    explain: 'Deployment Manager ใช้ได้แค่กับ GCP ไม่ใช่ multi-cloud Ansible login เข้าเครื่องที่มีอยู่แล้วแล้วรัน task เรียงลำดับ ไม่มี state file ในตัว Pulumi แลก HCL กับภาษา general-purpose (TypeScript, Python, Go) OpenTofu คือ fork โอเพนซอร์สของ Terraform ไม่ใช่คู่แข่งที่ไม่เกี่ยวข้อง',
   },
 ];
 

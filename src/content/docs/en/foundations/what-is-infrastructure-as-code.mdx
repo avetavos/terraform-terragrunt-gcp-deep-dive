@@ -81,6 +81,14 @@ Terraform's niche is **declarative, provider-based, state-tracked infrastructure
 
 One more name worth knowing: **OpenTofu**. After a 2023 licensing change to Terraform, a group of contributors and companies forked the last open-source release into OpenTofu, now maintained under the Linux Foundation. It is a compatible, open-source alternative — the HCL syntax, providers, and workflow you learn here apply to it directly.
 
+## Reading AI-generated code
+
+- Generated setup instructions that say "click X, then click Y" in the Google Cloud console for provisioning resources instead of a `.tf` file — even a fully correct set of console steps reintroduces every ClickOps problem covered above: unrepeatable, undocumented, drift-prone.
+- A generated shell script wrapping `gcloud` CLI calls, presented as "infrastructure as code," with no idempotency guard — running it twice either errors or duplicates resources, exactly the imperative failure mode above; a declarative `resource` block has no such issue by construction.
+- Code or docs describing Deployment Manager as "multi-cloud" or Ansible as having "built-in state tracking like Terraform" — neither is accurate; Deployment Manager is GCP-only (and Google itself now steers new projects toward Infrastructure Manager, which runs Terraform directly), and Ansible's playbooks are ordered imperative tasks with no state file recording what they created.
+- A claim that OpenTofu and Terraform are "unrelated, competing tools" — OpenTofu is a fork of Terraform's last open-source release, compatible with the same HCL, providers, and workflow.
+- Generated Terraform code presented as if the `plan` step were optional or skippable "to save time" — the three-way comparison (state, configuration, real infrastructure) is what makes Terraform safe to run repeatedly; skipping review of what it computed defeats the entire reconciliation model.
+
 <Callout title="The one-line takeaway">
 Infrastructure as Code replaces unrepeatable, undocumented console clicks with a **declarative** text file in version control: you describe *what* you want, Terraform reads the real GCP state, diffs it against your configuration, and computes the **minimal plan** of creates, updates, and destroys — as opposed to imperative tools (a script of ordered steps) or configuration-management tools like Ansible; **OpenTofu** is a compatible open-source fork worth knowing about.
 </Callout>
@@ -95,6 +103,7 @@ export const quizIac = [
       'It costs more money than using a CLI',
     ],
     answer: 1,
+    explain: 'ClickOps changes have no repeatable instructions, no record of why something looks the way it does, and drift silently the moment two people can independently change the same project.',
   },
   {
     q: 'What is the difference between declarative and imperative Infrastructure as Code',
@@ -105,6 +114,7 @@ export const quizIac = [
       'Declarative IaC only works with GCP',
     ],
     answer: 0,
+    explain: 'A Terraform resource block never says "create" -- that verb is decided by Terraform at plan time. An imperative command like gcloud storage buckets create has no idea what already exists and can misbehave if run twice.',
   },
   {
     q: 'What does Terraform compute between your desired configuration and the real infrastructure state',
@@ -115,6 +125,7 @@ export const quizIac = [
       'A full imperative script for a human to run manually',
     ],
     answer: 1,
+    explain: 'Changing one argument (like a label) produces an in-place update to that one attribute -- everything else Terraform manages is left untouched, not torn down and rebuilt.',
   },
   {
     q: 'Which statement about Terraform alternatives is accurate',
@@ -125,6 +136,7 @@ export const quizIac = [
       'OpenTofu is a proprietary competitor unrelated to Terraform',
     ],
     answer: 1,
+    explain: 'Deployment Manager is GCP-only, not multi-cloud. Ansible logs into existing machines and runs ordered tasks with no built-in state file. Pulumi trades HCL for a general-purpose language (TypeScript, Python, Go). OpenTofu is an open-source fork of Terraform, not an unrelated competitor.',
   },
 ];
 
