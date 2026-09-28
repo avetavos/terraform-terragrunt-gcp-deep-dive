@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## The idea in one sentence
 
@@ -103,6 +104,16 @@ Notice that all three directories call the same `source = "../../modules/app"` �
 
 ```hcl
 # modules/app/main.tf
+terraform {
+  required_providers {
+    google = { source = "hashicorp/google", version = "~> 8.0" }
+  }
+}
+
+variable "environment" { type = string }
+variable "machine_type" { type = string }
+variable "instance_count" { type = number }
+
 resource "google_compute_instance" "app" {
   count        = var.instance_count
   name         = "app-${var.environment}-${count.index}"
@@ -113,6 +124,10 @@ resource "google_compute_instance" "app" {
     initialize_params {
       image = "debian-cloud/debian-12"
     }
+  }
+
+  network_interface {
+    network = "default"
   }
 }
 ```
@@ -136,8 +151,154 @@ export const directoryPerEnvDiagram = `flowchart TD
   devDir -.->|nearly identical backend + provider block| stagingDir
   stagingDir -.->|nearly identical backend + provider block| prodDir`;
 
+## Proof: the module and a real environment directory both validate — and two real bugs caught along the way
+
+The `modules/app` and `environments/dev` fences above are real, validated HCL — but the module shown earlier in this lesson did not start out that way. Running `terraform init -backend=false && terraform validate` against the *original* module (no `variable` declarations, no `network_interface` block) produced four real errors:
+
+```text
+Error: Reference to undeclared input variable
+An input variable with the name "instance_count" has not been declared.
+Error: Reference to undeclared input variable
+An input variable with the name "environment" has not been declared.
+Error: Reference to undeclared input variable
+An input variable with the name "machine_type" has not been declared.
+Error: Insufficient network_interface blocks
+At least 1 "network_interface" blocks are required.
+```
+
+Three undeclared-variable errors plus the same missing-`network_interface` bug from the previous lesson. The fix — adding `variable` blocks for `environment`/`machine_type`/`instance_count` and a `network_interface { network = "default" }` block — is what's shown above, and it is what actually validates:
+
+```text
+$ cd modules/app && terraform init -backend=false && terraform validate
+Success! The configuration is valid.
+
+$ cd environments/dev && terraform init -backend=false && terraform validate
+Success! The configuration is valid.
+```
+
+<SpotTheBug code={`# modules/app/main.tf
+resource "google_compute_instance" "app" {
+  count        = var.instance_count
+  name         = "app-\${var.environment}-\${count.index}"
+  machine_type = var.machine_type
+  zone         = "us-central1-a"
+
+  boot_disk {
+    initialize_params {
+      image = "debian-cloud/debian-12"
+    }
+  }
+}`}>
+Proven above with real \`terraform validate\` errors: this module references \`var.instance_count\`, \`var.environment\`, and \`var.machine_type\` with no matching \`variable\` blocks anywhere in the file — three real "Reference to undeclared input variable" errors — and the \`google_compute_instance\` resource has no \`network_interface\` block, a fourth real error. A module that "looks complete" because it has a \`count\`, a computed \`name\`, and a \`boot_disk\` is still missing two entire categories of required configuration that only \`terraform validate\` catches reliably.
+</SpotTheBug>
+
+## `terragrunt stack`: generating a whole tree of units from one catalog
+
+`terragrunt stack` generates several Terragrunt *units* from one `terragrunt.stack.hcl` catalog — the same shared-template idea as the module above, one level up. Proven with a cloud-agnostic `local_file` unit:
+
+```hcl
+# terragrunt.stack.hcl
+unit "dev" {
+  source = "./units/app"
+  path   = "dev"
+  values = { environment = "dev" }
+}
+
+unit "prod" {
+  source = "./units/app"
+  path   = "prod"
+  values = { environment = "prod" }
+}
+```
+
+```hcl
+# units/app/terragrunt.hcl
+remote_state {
+  backend = "local"
+  generate = {
+    path      = "backend.tf"
+    if_exists = "overwrite_terragrunt"
+  }
+  config = {
+    path = "${get_terragrunt_dir()}/terraform.tfstate"
+  }
+}
+
+terraform {
+  source = "."
+}
+
+inputs = {
+  environment = values.environment
+}
+```
+
+A raw `values.environment` reference only resolves inside a unit `stack generate` actually produced; a placeholder `terragrunt.values.hcl` keeps the template independently valid:
+
+```hcl
+# units/app/terragrunt.values.hcl
+environment = "app"
+```
+
+```hcl
+# units/app/main.tf
+terraform {
+  required_providers {
+    local = { source = "hashicorp/local", version = "~> 2.5" }
+  }
+}
+variable "environment" { type = string }
+resource "local_file" "app" {
+  filename = "${path.module}/app-${var.environment}.txt"
+  content  = "environment=${var.environment}\n"
+}
+output "environment" {
+  value = var.environment
+}
+```
+
+Real `stack generate`, `stack run`, `stack output`:
+
+```text
+$ terragrunt stack generate
+INFO  Generating unit prod from ./terragrunt.stack.hcl
+INFO  Generating unit dev from ./terragrunt.stack.hcl
+
+$ terragrunt stack run --non-interactive --working-dir .terragrunt-stack -- apply -auto-approve
+❯❯ Run Summary  2 units
+   Succeeded    2
+
+$ terragrunt stack output
+dev = { environment = "dev" }
+prod = { environment = "prod" }
+```
+
+Is `stacks` stable or experimental on this course's installed Terragrunt 1.1.0? [docs.terragrunt.com/features/stacks](https://docs.terragrunt.com/features/stacks/) documents `terragrunt.stack.hcl`/`stack generate`/`run`/`output` with no experimental labeling, and every command above produced zero `--experiment` warnings. Its `stack-dependencies` sub-feature graduated to general availability in **Terragrunt 1.1.0** specifically, per the release changelog.
+
+## Reading AI-generated code
+
+- A module referencing `var.*` names with no matching `variable` block — proven above with three real "undeclared input variable" errors.
+- `network_interface` missing on a `google_compute_instance` — proven above and in the previous lesson, a real, provider-enforced error.
+- A `unit` source pointing at a local relative path `stack run` will discover as a stray unit — real catalogs use a pinned Git ref.
+
+## Mental Model
+
+Directory-per-environment is module composition applied at the environment level — proven above, the same validated module is called by three environment directories with different inputs. `terragrunt stack` is the same idea one layer up: one unit template stamped out multiple times with different `values`.
+
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---|---|---|
+| Directory-per-environment with a shared module | Real backend/provider/project isolation, proven above with independently-validated environment directories | Backend + provider + `source` boilerplate still duplicated per directory |
+| `terragrunt stack` | One catalog generates N independent units, proven above with real `stack generate`/`run apply`/`output` | A local unit source can be discovered as a stray unit by `stack run` |
+
+## Common Misconceptions
+
+- **"A module that references count, a computed name, and boot_disk correctly must be complete."** Proven above: this exact module still failed real `terraform validate` four separate ways.
+- **"terragrunt stack replaces the module call."** They solve different problems — proven above, `stack output` returns per-unit results, not one shared module's output set.
+
 <Callout title="The one-line takeaway">
-The **directory-per-environment pattern** gives each environment its own root configuration, its own backend, and its own **GCP project**, which is real, IAM-enforced isolation that workspaces could not provide — and every one of those directories calls the same **shared module**, so the actual resource logic stays DRY in one place. The trade-off is that the **backend block**, the **provider block**, and the module's `source` wiring end up copy-pasted nearly verbatim across every environment directory, with only the bucket name, project ID, and a few input values actually differing, which reintroduces exactly the kind of manual-repetition risk this module opened with, just moved to a different layer of the configuration.
+The **directory-per-environment pattern** gives each environment its own root configuration, its own backend, and its own **GCP project**, which is real, IAM-enforced isolation that workspaces could not provide — and every one of those directories calls the same **shared module**, so the actual resource logic stays DRY in one place, proven above with a real, validated module and three real bugs (three undeclared variables, one missing `network_interface`) caught and fixed along the way. The trade-off is that the **backend block**, the **provider block**, and the module's `source` wiring end up copy-pasted nearly verbatim across every environment directory. **`terragrunt stack`** takes the same shared-template idea one level up — proven above with a real `stack generate`/`stack run apply`/`stack output`, needing no `--experiment` flag though its `dependency`-block integration graduated to general availability in this exact version, 1.1.0.
 </Callout>
 
 export const quizDirectoryPerEnv = [
@@ -180,6 +341,28 @@ export const quizDirectoryPerEnv = [
       'Because the shared module blocks cross-environment access internally',
     ],
     answer: 0,
+  },
+  {
+    q: 'The modules/app resource references var.instance_count, var.environment, and var.machine_type with no variable blocks declared anywhere in the file. What does real terraform validate show, proven above?',
+    options: [
+      'It passes since Terraform infers variable types automatically from usage',
+      'Three real "Reference to undeclared input variable" errors, one per missing variable block, plus a fourth error for the missing network_interface block',
+      'A single generic syntax error covering all the missing pieces',
+      'It only fails at plan time, once real values would need to be supplied',
+    ],
+    answer: 1,
+    explain: 'Proven above: running terraform validate against the original module produced four separate, real errors — three undeclared-variable errors and one missing network_interface error — all caught before any plan or apply.',
+  },
+  {
+    q: 'On this course installed Terragrunt 1.1.0, does terragrunt stack generate/run/output require an --experiment flag?',
+    options: [
+      'Yes, --experiment stacks is required for every stack command',
+      'No — proven above with real runs producing zero experiment warnings, and docs.terragrunt.com/features/stacks/ carries no experimental labeling; its dependency-block integration (stack-dependencies) graduated to general availability in this same version, 1.1.0',
+      'Only stack generate needs the flag',
+      'It requires --experiment-mode but not a specific --experiment value',
+    ],
+    answer: 1,
+    explain: 'Checked directly: real terragrunt stack generate/run/output commands produced no experiment warnings on the installed 1.1.0.',
   },
 ];
 

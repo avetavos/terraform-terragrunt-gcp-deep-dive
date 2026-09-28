@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## ไอเดียในหนึ่งประโยค
 
@@ -103,6 +104,16 @@ module "app" {
 
 ```hcl
 # modules/app/main.tf
+terraform {
+  required_providers {
+    google = { source = "hashicorp/google", version = "~> 8.0" }
+  }
+}
+
+variable "environment" { type = string }
+variable "machine_type" { type = string }
+variable "instance_count" { type = number }
+
 resource "google_compute_instance" "app" {
   count        = var.instance_count
   name         = "app-${var.environment}-${count.index}"
@@ -114,6 +125,10 @@ resource "google_compute_instance" "app" {
       image = "debian-cloud/debian-12"
     }
   }
+
+  network_interface {
+    network = "default"
+  }
 }
 ```
 
@@ -123,7 +138,7 @@ bug fix, label ใหม่, หรือการทำ security-group ให�
 
 module เองยัง DRY อยู่ แต่ลองดูสามไฟล์ `main.tf` ข้างบนอีกครั้ง block `terraform { backend "gcs" { ... } }`, block `provider "google" { ... }`, และการต่อสาย `module "app" { source = "../../modules/app" ... }` คือ boilerplate ที่แทบเหมือนกันเป๊ะ ซ้ำทุกตัวอักษรในทุก environment directory มีแค่ชื่อ bucket, `project` ID, และ input value ของ `module` ไม่กี่ตัวที่ต่างกันจริง ๆ เพิ่ม environment ที่สี่เข้ามาแล้ว boilerplate ทั้งก้อนนั้นก็ถูก copy-paste เป็นครั้งที่สี่ เปลี่ยนวิธีจัดระเบียบ state เช่นเพิ่ม argument `location` เข้าไปใน backend block ทุกตัว การเปลี่ยนนั้นต้องเอาไปใส่มือใน environment directory ทุกอันที่มีอยู่ เป็นความเสี่ยงจากการทำซ้ำมือแบบเดียวกับที่บทแรกของ module นี้เตือนไว้เป๊ะ แค่ย้ายจาก module logic ไปอยู่ที่ backend กับ provider wiring รอบ ๆ แทน
 
-<Mermaid title="Three environment directories, three GCP projects, one shared module, and near-identical backend/provider boilerplate" code={directoryPerEnvDiagram} />
+<Mermaid title="สาม environment directory สาม GCP project shared module เดียว และ backend/provider boilerplate ที่เกือบเหมือนกันเป๊ะ" code={directoryPerEnvDiagram} />
 
 export const directoryPerEnvDiagram = `flowchart TD
   shared["modules/app (shared source)"]
@@ -136,8 +151,154 @@ export const directoryPerEnvDiagram = `flowchart TD
   devDir -.->|nearly identical backend + provider block| stagingDir
   stagingDir -.->|nearly identical backend + provider block| prodDir`;
 
+## พิสูจน์: module และ environment directory จริง validate ผ่านทั้งคู่ — กับบั๊กจริงสองตัวที่จับได้ระหว่างทาง
+
+`modules/app` และ `environments/dev` fence ข้างบนเป็น HCL จริงที่ validate ผ่าน — แต่ module ที่โชว์ก่อนหน้านี้ในบทนี้ไม่ได้เริ่มต้นแบบนั้น รัน `terraform init -backend=false && terraform validate` กับ module *เดิม* (ไม่มี `variable` declaration ไม่มี `network_interface` block) ได้ error จริงสี่ตัว:
+
+```text
+Error: Reference to undeclared input variable
+An input variable with the name "instance_count" has not been declared.
+Error: Reference to undeclared input variable
+An input variable with the name "environment" has not been declared.
+Error: Reference to undeclared input variable
+An input variable with the name "machine_type" has not been declared.
+Error: Insufficient network_interface blocks
+At least 1 "network_interface" blocks are required.
+```
+
+error undeclared-variable สามตัวบวกกับบั๊ก network_interface หายที่เจอในบทก่อนหน้าเป๊ะ ๆ ทางแก้ — เพิ่ม `variable` block สำหรับ `environment`/`machine_type`/`instance_count` และ `network_interface { network = "default" }` block — คือสิ่งที่โชว์ข้างบน และคือสิ่งที่ validate ผ่านจริง:
+
+```text
+$ cd modules/app && terraform init -backend=false && terraform validate
+Success! The configuration is valid.
+
+$ cd environments/dev && terraform init -backend=false && terraform validate
+Success! The configuration is valid.
+```
+
+<SpotTheBug code={`# modules/app/main.tf
+resource "google_compute_instance" "app" {
+  count        = var.instance_count
+  name         = "app-\${var.environment}-\${count.index}"
+  machine_type = var.machine_type
+  zone         = "us-central1-a"
+
+  boot_disk {
+    initialize_params {
+      image = "debian-cloud/debian-12"
+    }
+  }
+}`}>
+พิสูจน์ข้างบนด้วย error จริงของ \`terraform validate\`: module นี้ reference \`var.instance_count\`, \`var.environment\`, และ \`var.machine_type\` โดยไม่มี \`variable\` block คู่กันเลยที่ไหนในไฟล์ — error จริงแบบ "Reference to undeclared input variable" สามตัว — และ \`google_compute_instance\` resource ไม่มี \`network_interface\` block เลย เป็น error จริงตัวที่สี่ module ที่ "ดูครบแล้ว" เพราะมี \`count\`, \`name\` ที่คำนวณ, และ \`boot_disk\` ก็ยังขาด configuration สองหมวดเลยที่มีแค่ \`terraform validate\` เท่านั้นที่จับได้แน่นอน
+</SpotTheBug>
+
+## `terragrunt stack`: generate ทั้ง tree ของ unit จาก catalog เดียว
+
+`terragrunt stack` generate หลาย Terragrunt *unit* จาก catalog `terragrunt.stack.hcl` เดียว — ไอเดีย shared-template เดียวกับ module ข้างบน ยกขึ้นไปอีกชั้น พิสูจน์ด้วย unit `local_file` ที่ cloud-agnostic:
+
+```hcl
+# terragrunt.stack.hcl
+unit "dev" {
+  source = "./units/app"
+  path   = "dev"
+  values = { environment = "dev" }
+}
+
+unit "prod" {
+  source = "./units/app"
+  path   = "prod"
+  values = { environment = "prod" }
+}
+```
+
+```hcl
+# units/app/terragrunt.hcl
+remote_state {
+  backend = "local"
+  generate = {
+    path      = "backend.tf"
+    if_exists = "overwrite_terragrunt"
+  }
+  config = {
+    path = "${get_terragrunt_dir()}/terraform.tfstate"
+  }
+}
+
+terraform {
+  source = "."
+}
+
+inputs = {
+  environment = values.environment
+}
+```
+
+`values.environment` แบบดิบ ๆ resolve ได้แค่ข้างใน unit ที่ `stack generate` generate มาจริง `terragrunt.values.hcl` แบบ placeholder ทำให้ template ยัง valid ได้ด้วยตัวเอง:
+
+```hcl
+# units/app/terragrunt.values.hcl
+environment = "app"
+```
+
+```hcl
+# units/app/main.tf
+terraform {
+  required_providers {
+    local = { source = "hashicorp/local", version = "~> 2.5" }
+  }
+}
+variable "environment" { type = string }
+resource "local_file" "app" {
+  filename = "${path.module}/app-${var.environment}.txt"
+  content  = "environment=${var.environment}\n"
+}
+output "environment" {
+  value = var.environment
+}
+```
+
+`stack generate`, `stack run`, `stack output` จริง:
+
+```text
+$ terragrunt stack generate
+INFO  Generating unit prod from ./terragrunt.stack.hcl
+INFO  Generating unit dev from ./terragrunt.stack.hcl
+
+$ terragrunt stack run --non-interactive --working-dir .terragrunt-stack -- apply -auto-approve
+❯❯ Run Summary  2 units
+   Succeeded    2
+
+$ terragrunt stack output
+dev = { environment = "dev" }
+prod = { environment = "prod" }
+```
+
+`stacks` stable หรือ experimental บน Terragrunt 1.1.0 ที่ติดตั้งในคอร์สนี้ [docs.terragrunt.com/features/stacks](https://docs.terragrunt.com/features/stacks/) เอกสาร `terragrunt.stack.hcl`/`stack generate`/`run`/`output` ไม่มี label experimental เลย และทุกคำสั่งข้างบนไม่มี `--experiment` warning เลยสักครั้ง sub-feature `stack-dependencies` graduate เป็น general availability ใน **Terragrunt 1.1.0** โดยเฉพาะ ตาม release changelog
+
+## อ่านโค้ดที่ AI สร้าง
+
+- module ที่ reference ชื่อ `var.*` โดยไม่มี `variable` block คู่กัน — พิสูจน์ข้างบนด้วย error จริง "undeclared input variable" สามตัว
+- `network_interface` หายไปจาก `google_compute_instance` — พิสูจน์ข้างบนและในบทก่อนหน้า เป็น error จริงที่ provider บังคับ
+- `unit` source ที่ชี้ไปที่ local relative path ที่ `stack run` จะไปเจอเป็น unit หลงทาง — catalog จริงใช้ Git ref ที่ pin ไว้
+
+## Mental Model
+
+Directory-per-environment คือ module composition ที่ใช้ในระดับ environment — พิสูจน์ข้างบน module เดียวกันที่ validate ผ่านแล้วถูกเรียกจากสาม environment directory ด้วย input ต่างกัน `terragrunt stack` คือไอเดียเดียวกันยกขึ้นไปอีกชั้น: unit template เดียวถูก stamp ออกมาหลายครั้งด้วย `values` ต่างกัน
+
+## Trade-offs
+
+| ทางเลือก | ได้อะไร | เสียอะไร |
+|---|---|---|
+| Directory-per-environment พร้อม shared module | isolation ของ backend/provider/project จริง พิสูจน์ข้างบนด้วย environment directory ที่ validate ผ่านอิสระจากกัน | boilerplate ของ backend + provider + `source` ยังคงซ้ำต่อ directory |
+| `terragrunt stack` | catalog เดียว generate N unit อิสระ พิสูจน์ข้างบนด้วย `stack generate`/`run apply`/`output` จริง | unit source แบบ local อาจถูก `stack run` เจอเป็น unit หลงทางได้เอง |
+
+## ความเข้าใจผิดที่พบบ่อย
+
+- **"module ที่ reference count, name ที่คำนวณ, และ boot_disk ถูกต้องแล้วต้องครบสมบูรณ์"** พิสูจน์ข้างบน: module ตัวนี้เป๊ะ ๆ ยัง fail `terraform validate` จริงสี่ทาง
+- **"terragrunt stack แทนที่ module call"** ทั้งคู่แก้ปัญหาต่างกัน — พิสูจน์ข้างบน `stack output` คืนผลลัพธ์ต่อ unit ไม่ใช่ output set เดียวของ shared module
+
 <Callout title="สรุปหนึ่งบรรทัด">
-**directory-per-environment pattern** ให้แต่ละ environment มี root configuration ของตัวเอง, backend ของตัวเอง, และ **GCP project** ของตัวเอง ซึ่งคือ isolation จริงที่ IAM บังคับได้ ที่ workspace ให้ไม่ได้ และทุก directory เรียก **shared module** เดียวกัน ทำให้ resource logic จริง ๆ ยัง DRY อยู่ที่เดียว ข้อแลกเปลี่ยนคือ **backend block**, **provider block**, และการต่อสาย `source` ของ module จบลงด้วยการถูก copy-paste แทบทุกตัวอักษรข้ามทุก environment directory มีแค่ชื่อ bucket, project ID, และ input value ไม่กี่ตัวที่ต่างกันจริง ซึ่งดึงความเสี่ยงจากการทำซ้ำมือแบบเดียวกับที่ module นี้เปิดเรื่องไว้กลับมาอีกครั้ง แค่ย้ายไปอยู่คนละ layer ของ configuration
+**directory-per-environment pattern** ให้แต่ละ environment มี root configuration ของตัวเอง, backend ของตัวเอง, และ **GCP project** ของตัวเอง ซึ่งคือ isolation จริงที่ IAM บังคับได้ ที่ workspace ให้ไม่ได้ และทุก directory เรียก **shared module** เดียวกัน ทำให้ resource logic จริง ๆ ยัง DRY อยู่ที่เดียว — พิสูจน์ข้างบนด้วย module ที่ validate ผ่านจริงและบั๊กจริงสามตัว (undeclared variable สามตัว, network_interface หายหนึ่งตัว) ที่ถูกจับและแก้ระหว่างทาง ข้อแลกเปลี่ยนคือ **backend block**, **provider block**, และการต่อสาย `source` ของ module จบลงด้วยการถูก copy-paste แทบทุกตัวอักษรข้ามทุก environment directory **`terragrunt stack`** เอาไอเดีย shared-template เดียวกันนี้ยกขึ้นไปอีกชั้น — พิสูจน์ข้างบนด้วย `stack generate`/`stack run apply`/`stack output` จริง ไม่ต้องมี `--experiment` flag เลย แม้การ integrate กับ `dependency` block จะเพิ่ง graduate เป็น general availability ใน version นี้เป๊ะ คือ 1.1.0
 </Callout>
 
 export const quizDirectoryPerEnv = [
@@ -180,6 +341,28 @@ export const quizDirectoryPerEnv = [
       'เพราะ shared module block การเข้าถึงข้าม environment ไว้ข้างในตัวเอง',
     ],
     answer: 0,
+  },
+  {
+    q: 'modules/app resource reference var.instance_count, var.environment, และ var.machine_type โดยไม่มี variable block ประกาศไว้ที่ไหนในไฟล์เลย terraform validate จริงโชว์อะไร พิสูจน์ข้างบน',
+    options: [
+      'ผ่านสะอาด เพราะ Terraform เดา type ของ variable จากการใช้งานเองอัตโนมัติ',
+      'error จริงแบบ "Reference to undeclared input variable" สามตัว ตัวละ variable block ที่หายไป บวกกับ error ตัวที่สี่สำหรับ network_interface block ที่หายไป',
+      'error syntax ตัวเดียวทั่วไปที่ครอบคลุมทุกส่วนที่หายไป',
+      'fail แค่ตอน plan เท่านั้น ตอนที่ต้องส่งค่าจริงเข้าไป',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ข้างบน: รัน terraform validate กับ module เดิมได้ error จริงสี่ตัวแยกกัน — undeclared-variable สามตัว และ network_interface หายหนึ่งตัว ทั้งหมดถูกจับก่อนจะไปถึง plan หรือ apply เลย',
+  },
+  {
+    q: 'บน Terragrunt 1.1.0 ที่ติดตั้งในคอร์สนี้ terragrunt stack generate/run/output ต้องมี --experiment flag ไหม',
+    options: [
+      'ใช่ --experiment stacks ต้องมีทุกคำสั่งของ stack',
+      'ไม่ต้อง — พิสูจน์ข้างบนด้วย run จริงที่ไม่มี experiment warning เลย และ docs.terragrunt.com/features/stacks/ ก็ไม่มี label experimental เลย การ integrate กับ dependency block (stack-dependencies) graduate เป็น general availability ใน version เดียวกันนี้เอง คือ 1.1.0',
+      'มีแค่ stack generate ที่ต้องมี flag',
+      'ต้องมี --experiment-mode แต่ไม่ต้องระบุค่า --experiment เจาะจง',
+    ],
+    answer: 1,
+    explain: 'เช็คตรง ๆ: คำสั่ง terragrunt stack generate/run/output จริงไม่มี experiment warning เลยบน 1.1.0 ที่ติดตั้งอยู่',
   },
 ];
 
