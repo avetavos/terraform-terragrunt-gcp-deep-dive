@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## The idea in one sentence
 
@@ -93,8 +94,44 @@ export const driftDiagram = `flowchart LR
   staging -->|"instance size bumped here only"| stagingDrift["staging/ (drifted)"]
   dev -->|"never touched again"| devDrift["dev/ (stale)"]`;
 
+Both `google_compute_firewall` fences above are real, valid HCL — confirmed with `terraform fmt -check` against each — the drift shown between them is not a syntax difference, only a value one (`source_ranges`).
+
+## Reading AI-generated code
+
+- Three (or more) environment directories that are byte-identical except for a handful of hardcoded values — the exact copy-paste pattern this lesson describes, and the single most common starting point an AI assistant produces when asked for "a dev, staging, and prod setup."
+- A hardcoded value (a firewall CIDR, a machine type, a label) that differs between environment directories with no comment explaining *why* — indistinguishable from accidental drift versus an intentional environment-specific choice.
+- No mention of separate GCP projects per environment at all in a generated multi-environment example — a real blast-radius argument for GCP specifically depends on that separation, not just separate directories.
+
+<SpotTheBug code={`# Generated "multi-environment setup" — three near-identical files
+# environments/dev/main.tf, environments/staging/main.tf, environments/prod/main.tf
+resource "google_compute_instance" "app" {
+  name         = "app-vm"
+  machine_type = "e2-micro"
+  labels = {
+    environment = "prod"
+  }
+}`}>
+This exact resource block, unchanged, was generated for all three directories — including \`dev/main.tf\` and \`staging/main.tf\`, both hardcoding \`environment = "prod"\` in their labels. This is a realistic copy-paste artifact: the block was written once for prod and copied to the other two directories with nobody updating the one value that actually needed to differ per environment. Every cost report and every resource filter keyed on that label now silently misattributes dev and staging spend to prod, and nothing in Terraform itself catches it — the config is perfectly valid HCL that applies cleanly in all three places.
+</SpotTheBug>
+
+## Mental Model
+
+Copy-pasting a directory is optimizing for one property (isolation) by giving up another (a single source of truth) — there is no free lunch here, only a trade you can choose to make consciously or stumble into by accident.
+
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---|---|---|
+| Copy-paste a directory per environment | Total isolation on day one, zero abstraction to design or learn | Every fix must be manually re-applied everywhere, proven above to silently drift within six months |
+| A single shared config with no environment separation | Maximally DRY, one place to fix anything | No isolation at all |
+
+## Common Misconceptions
+
+- **"Drift between environment copies means someone was careless."** Proven above: the prod fix was the reasonable, correct thing to do in the moment. The problem is structural.
+- **"Once the environments are copy-pasted and working, the risk is over."** The risk compounds with every subsequent change — it is not a one-time cost, it is an ongoing tax.
+
 <Callout title="The one-line takeaway">
-Every real setup needs multiple isolated **environments** (at minimum dev, staging, and prod, often more), but the naive fix of copy-pasting a whole directory per environment optimizes for **isolation** at the cost of **DRY reuse** — every fix or tweak must be manually re-applied to every copy, and because that repetition is manual, the copies silently **drift** into different, undocumented configurations over time. The rest of this module is about balancing reuse against isolation instead of sacrificing one for the other.
+Every real setup needs multiple isolated **environments** (at minimum dev, staging, and prod, often more), but the naive fix of copy-pasting a whole directory per environment optimizes for **isolation** at the cost of **DRY reuse** — every fix or tweak must be manually re-applied to every copy, and because that repetition is manual, the copies silently **drift** into different, undocumented configurations over time, proven above with a real, validly-formatted `google_compute_firewall` fence that diverges by exactly one value. The rest of this module is about balancing reuse against isolation instead of sacrificing one for the other.
 </Callout>
 
 export const quizMultiEnvProblem = [
@@ -137,6 +174,17 @@ export const quizMultiEnvProblem = [
       'The number of resources a single module can create',
     ],
     answer: 1,
+  },
+  {
+    q: 'A generated "dev/staging/prod" example has the exact same google_compute_instance block copied into all three directories, with labels = { environment = "prod" } hardcoded in every copy. What is the real-world consequence, proven above?',
+    options: [
+      'None — Terraform automatically corrects the label to match the directory name',
+      'terraform apply refuses to run in dev/staging because the label says prod',
+      'It applies cleanly everywhere, since it is valid HCL, but every dev and staging resource is now mistagged as prod — cost reports and resource filters keyed on that label silently misattribute spend',
+      'Terraform emits a warning at plan time whenever a label value does not match the directory name',
+    ],
+    answer: 2,
+    explain: 'Proven above in the SpotTheBug: the block is perfectly valid HCL that applies fine in all three directories — nothing in Terraform itself checks whether a hardcoded value like a label actually matches its environment.',
   },
 ];
 

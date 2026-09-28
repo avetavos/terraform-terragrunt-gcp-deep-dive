@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## ไอเดียในหนึ่งประโยค
 
@@ -83,7 +84,7 @@ resource "google_compute_firewall" "allow_app_port" {
 
 ที่เหลือของ module นี้คือการแก้ความตึงนั้น จะ reuse logic เดียวกันข้ามทุก environment ยังไง (ให้มีจุดเดียวสำหรับแก้ bug ไม่ใช่สามหรือห้าจุด) พร้อมกับยังคงเก็บ state, credential, และ blast radius ของแต่ละ environment ให้ isolate จากกันเต็มที่ Terraform เองมีคำตอบบางส่วนให้สองแบบ คือ **workspace** กับ **directory-per-environment pattern** และแต่ละแบบ ตามที่สองบทถัดไปจะแสดงให้เห็น แก้ปัญหาได้แค่ครึ่งเดียว แล้วเปิดช่องโหว่ให้อีกครึ่งที่เหลือ
 
-<Mermaid title="Three copy-pasted environment directories quietly diverge as ad hoc fixes land in only one of them" code={driftDiagram} />
+<Mermaid title="สาม directory environment ที่ copy-paste มา ค่อย ๆ diverge เงียบ ๆ เมื่อ fix แบบ ad hoc ลงแค่อันเดียว" code={driftDiagram} />
 
 export const driftDiagram = `flowchart LR
   origin["Working config, copied once"] -->|copy-paste| dev["dev/ (copy)"]
@@ -93,8 +94,44 @@ export const driftDiagram = `flowchart LR
   staging -->|"instance size bumped here only"| stagingDrift["staging/ (drifted)"]
   dev -->|"never touched again"| devDrift["dev/ (stale)"]`;
 
+ทั้งสอง `google_compute_firewall` fence ข้างบนเป็น HCL จริงที่ valid — ยืนยันด้วย `terraform fmt -check` กับทั้งคู่ — drift ที่โชว์ระหว่างสองอันไม่ใช่ความต่างของ syntax เลย เป็นความต่างของค่า (`source_ranges`) เท่านั้น
+
+## อ่านโค้ดที่ AI สร้าง
+
+- สาม (หรือมากกว่า) environment directory ที่เหมือนกันเป๊ะ byte-ต่อ-byte ยกเว้นค่าไม่กี่ตัวที่ hardcode ไว้ — pattern copy-paste เป๊ะ ๆ ที่บทนี้อธิบาย
+- ค่า hardcode (firewall CIDR, machine type, label) ที่ต่างกันระหว่าง environment directory โดยไม่มี comment อธิบายว่า *ทำไม* — แยกไม่ออกเลยระหว่าง drift โดยไม่ตั้งใจ กับตัวเลือกที่ตั้งใจให้ต่างกันตาม environment
+- ไม่มีการพูดถึง GCP project แยกต่อ environment เลยในตัวอย่าง multi-environment ที่ generate มา — argument เรื่อง blast-radius ของ GCP โดยเฉพาะต้องอาศัยการแยกนั้นจริง ๆ
+
+<SpotTheBug code={`# Generated "multi-environment setup" — three near-identical files
+# environments/dev/main.tf, environments/staging/main.tf, environments/prod/main.tf
+resource "google_compute_instance" "app" {
+  name         = "app-vm"
+  machine_type = "e2-micro"
+  labels = {
+    environment = "prod"
+  }
+}`}>
+resource block นี้เหมือนกันเป๊ะ ถูก generate ออกมาให้ทั้งสาม directory — รวมทั้ง \`dev/main.tf\` และ \`staging/main.tf\` ที่ hardcode \`environment = "prod"\` ไว้ใน labels ด้วย นี่คือ artifact แบบ copy-paste ที่สมจริง block นี้ถูกเขียนครั้งเดียวสำหรับ prod แล้ว copy ไปอีกสอง directory โดยไม่มีใครอัปเดตค่าเดียวที่ควรต่างกันตาม environment cost report กับ resource filter ทุกตัวที่ key ด้วย label นั้นตอนนี้ misattribute spend ของ dev กับ staging ไปเป็น prod เงียบ ๆ และไม่มีอะไรใน Terraform เองจับได้เลย — config นี้เป็น HCL ที่ valid สมบูรณ์แบบและ apply ผ่านสะอาดทั้งสามที่
+</SpotTheBug>
+
+## Mental Model
+
+การ copy-paste directory คือการ optimize เพื่อคุณสมบัติหนึ่ง (isolation) โดยแลกกับอีกอัน (single source of truth) — ไม่มีของฟรีตรงนี้ มีแค่ trade ที่คุณเลือกทำอย่างตั้งใจ หรือสะดุดเข้าไปโดยไม่รู้ตัว
+
+## Trade-offs
+
+| ทางเลือก | ได้อะไร | เสียอะไร |
+|---|---|---|
+| copy-paste directory ต่อ environment | isolation เต็มที่ตั้งแต่วันแรก ไม่ต้อง design หรือเรียนรู้ abstraction เลย | ทุก fix ต้องเอาไปใส่มือทุกที่ พิสูจน์ข้างบนว่า drift เงียบ ๆ ได้ภายในหกเดือน |
+| shared config เดียวไม่มีการแยก environment เลย | DRY สูงสุด มีจุดเดียวที่แก้อะไรก็ได้ | ไม่มี isolation เลย |
+
+## ความเข้าใจผิดที่พบบ่อย
+
+- **"drift ระหว่าง environment copy แปลว่ามีใครสักคนประมาท"** พิสูจน์ข้างบน: การแก้ prod เป็นสิ่งที่สมเหตุสมผลและถูกต้องในตอนนั้น ปัญหาอยู่ที่โครงสร้าง
+- **"พอ copy environment เสร็จแล้วใช้งานได้ ความเสี่ยงก็จบแล้ว"** ความเสี่ยงสะสมทบกันไปทุกครั้งที่มีการแก้ต่อจากนั้น — ไม่ใช่ต้นทุนครั้งเดียว แต่เป็นภาษีต่อเนื่อง
+
 <Callout title="สรุปหนึ่งบรรทัด">
-setup จริงทุกอันต้องมีหลาย **environment** ที่ isolate กัน (อย่างน้อย dev, staging, prod มักมากกว่านั้น) แต่ทางแก้แบบไร้เดียงสาด้วยการ copy-paste directory ทั้งชุดต่อ environment optimize เพื่อ **isolation** โดยแลกกับ **DRY reuse** ทุก fix หรือ tweak ต้องเอาไปใส่มือใน copy ทุกชุด และเพราะการทำซ้ำนั้นเป็นมือ copy แต่ละชุดเลย **drift** ออกไปเป็น configuration ที่ต่างกันและไม่มีเอกสารบันทึกเมื่อเวลาผ่านไป ที่เหลือของ module นี้คือการหาสมดุลระหว่าง reuse กับ isolation แทนที่จะเสียสละอย่างใดอย่างหนึ่งไป
+setup จริงทุกอันต้องมีหลาย **environment** ที่ isolate กัน (อย่างน้อย dev, staging, prod มักมากกว่านั้น) แต่ทางแก้แบบไร้เดียงสาด้วยการ copy-paste directory ทั้งชุดต่อ environment optimize เพื่อ **isolation** โดยแลกกับ **DRY reuse** ทุก fix หรือ tweak ต้องเอาไปใส่มือใน copy ทุกชุด และเพราะการทำซ้ำนั้นเป็นมือ copy แต่ละชุดเลย **drift** ออกไปเป็น configuration ที่ต่างกันและไม่มีเอกสารบันทึกเมื่อเวลาผ่านไป พิสูจน์ข้างบนด้วย `google_compute_firewall` fence จริงที่ format ถูกต้อง แต่ diverge กันแค่ค่าเดียว ที่เหลือของ module นี้คือการหาสมดุลระหว่าง reuse กับ isolation แทนที่จะเสียสละอย่างใดอย่างหนึ่งไป
 </Callout>
 
 export const quizMultiEnvProblem = [
@@ -137,6 +174,17 @@ export const quizMultiEnvProblem = [
       'จำนวน resource ที่ module เดียวสร้างได้',
     ],
     answer: 1,
+  },
+  {
+    q: 'ตัวอย่าง "dev/staging/prod" ที่ generate มา มี google_compute_instance block เดียวกันเป๊ะ copy เข้าไปทั้งสาม directory พร้อม labels = { environment = "prod" } hardcode ไว้ทุกชุด ผลที่เกิดขึ้นจริงคืออะไร พิสูจน์ข้างบน',
+    options: [
+      'ไม่มีอะไรเกิดขึ้น เพราะ Terraform แก้ label ให้ตรงกับชื่อ directory เองอัตโนมัติ',
+      'terraform apply ปฏิเสธไม่รันใน dev/staging เพราะ label บอกว่า prod',
+      'apply ผ่านสะอาดทุกที่ เพราะเป็น HCL ที่ valid แต่ resource ของ dev และ staging ทุกตัวตอนนี้ถูก mistagged เป็น prod — cost report กับ resource filter ที่ key ด้วย label นั้น misattribute spend ไปเงียบ ๆ',
+      'Terraform แจ้งเตือนตอน plan ทุกครั้งที่ค่า label ไม่ตรงกับชื่อ directory',
+    ],
+    answer: 2,
+    explain: 'พิสูจน์ข้างบนใน SpotTheBug: block นี้เป็น HCL ที่ valid สมบูรณ์แบบและ apply ผ่านทั้งสาม directory — ไม่มีอะไรใน Terraform เองเช็คว่าค่า hardcode อย่าง label ตรงกับ environment จริงหรือเปล่า',
   },
 ];
 
