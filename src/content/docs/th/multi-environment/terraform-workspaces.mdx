@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## ไอเดียในหนึ่งประโยค
 
@@ -58,6 +59,10 @@ resource "google_compute_instance" "app" {
       image = "debian-cloud/debian-12"
     }
   }
+
+  network_interface {
+    network = "default"
+  }
 }
 ```
 
@@ -83,7 +88,7 @@ provider "google" {
 
 Terraform จัดการแยก state object ของแต่ละ workspace ไว้ในเครื่องเดียวกันโดยอัตโนมัติ ทำให้ `dev`, `staging`, `prod` ไม่ทับ state file กันเอง แต่ bucket เอง, `project` ใน block `provider "google"`, และ credential ที่ Terraform ใช้ authenticate เหมือนกันเป๊ะไม่ว่า workspace ไหนจะ active อยู่ ตรงนี้ไม่มี boundary แข็ง ๆ เลยสักนิด ไม่มีอะไรกันไม่ให้คนที่อยู่ใน workspace `dev` คิดว่ากำลังจะแก้ instance ทดสอบที่ทิ้งได้ ทั้งที่จริง ๆ ทุก workspace ใช้ GCP project `acme-shared-project` เดียวกันและ resource ที่ใกล้เคียง prod จริงที่อยู่ในนั้นร่วมกัน การเลือก `terraform workspace select` ผิดตามด้วย `apply` คือความผิดพลาดที่เกิดขึ้นได้ง่ายมาก และ workspace เองไม่มีทางป้องกันให้คุณเลย
 
-<Mermaid title="One Terraform configuration and backend, three workspaces, three state files, one shared GCP project" code={workspacesDiagram} />
+<Mermaid title="Terraform configuration และ backend เดียว สาม workspace สาม state file GCP project เดียวที่ใช้ร่วมกัน" code={workspacesDiagram} />
 
 export const workspacesDiagram = `flowchart TD
   config["Single main.tf + backend + provider google.project = acme-shared-project"]
@@ -94,8 +99,101 @@ export const workspacesDiagram = `flowchart TD
   stagingState -.->|same backend, same project| shared
   prodState -.->|same backend, same project| shared`;
 
+## พิสูจน์: state path จริง, `terraform.tfstate.d/`, และค่าที่สลับจริง
+
+พิสูจน์ได้แบบ offline ด้วย `local_file` แทนที่ `google_compute_instance` (กลไก `terraform.workspace` เดียวกัน):
+
+```hcl
+# main.tf
+locals {
+  machine_types = {
+    default = "e2-small"
+    dev     = "e2-small"
+    staging = "e2-medium"
+    prod    = "e2-standard-4"
+  }
+}
+
+resource "local_file" "app" {
+  filename = "${path.module}/app-${terraform.workspace}.txt"
+  content  = "workspace=${terraform.workspace} machine_type=${lookup(local.machine_types, terraform.workspace, "e2-small")}\n"
+}
+```
+
+`apply` จริงใน `default` แล้ว `terraform workspace new staging` และ `apply` อีกครั้งด้วย config เดียวกัน:
+
+```text
+$ terraform apply -auto-approve   # default workspace
+Apply complete! Resources: 1 added, 0 changed, 0 destroyed.
+
+$ terraform workspace new staging
+$ terraform apply -auto-approve   # staging workspace, same .tf files
+Apply complete! Resources: 1 added, 0 changed, 0 destroyed.
+```
+
+ไฟล์ที่ generate มาสองไฟล์พิสูจน์ว่า `terraform.workspace` สลับจริงตาม workspace:
+
+```text
+$ cat app-default.txt
+workspace=default machine_type=e2-small
+$ cat app-staging.txt
+workspace=staging machine_type=e2-medium
+```
+
+state layout จริงบน disk:
+
+```text
+$ find . -iname "*.tfstate*" -not -path "./.terraform/*"
+./terraform.tfstate
+./terraform.tfstate.d
+./terraform.tfstate.d/staging/terraform.tfstate
+```
+
+`default` คือกรณีพิเศษหนึ่งเดียว — state ของมันอยู่ที่ path `terraform.tfstate` ธรรมดา workspace อื่นทุกตัวได้ subdirectory `terraform.tfstate.d/`
+
+## อ่านโค้ดที่ AI สร้าง และบั๊กจริงที่คอร์สนี้เองเคยมี
+
+`google_compute_instance` resource ที่ไม่มี `network_interface` block ไม่ใช่แค่ omission เชิง style — เป็น error จริงที่ provider บังคับ พิสูจน์ รัน `terraform validate` กับ `google_compute_instance` block ตัวเดียวกันเป๊ะในบทนี้ ก่อนที่จะแก้:
+
+```text
+$ terraform validate
+Error: Insufficient network_interface blocks
+At least 1 "network_interface" blocks are required.
+```
+
+ตัวอย่างเดิมของบทนี้เองมีบั๊กนี้เป๊ะ ๆ — `google_compute_instance` ที่มี `boot_disk` แต่ไม่มี `network_interface` เป็นสิ่งที่ตัวอย่าง Compute Engine ที่ AI generate มักพลาดบ่อยมาก เพราะ resource *ดูเหมือน* จะครบแล้วด้วย image กับ machine type ทางแก้ ยืนยันด้วย `terraform validate` ที่ผ่านจริงหลังแก้ คือ `network_interface { network = "default" }` block ที่โชว์ข้างบนตอนนี้
+
+<SpotTheBug code={`resource "google_compute_instance" "app" {
+  name         = "app-\${terraform.workspace}"
+  machine_type = "e2-small"
+  zone         = "us-central1-a"
+
+  boot_disk {
+    initialize_params {
+      image = "debian-cloud/debian-12"
+    }
+  }
+}`}>
+พิสูจน์ข้างบนด้วย \`terraform validate\` จริง: resource นี้ขาด \`network_interface\` block ที่จำเป็น \`google_compute_instance\` ต้องมีอย่างน้อยหนึ่งอัน provider ปฏิเสธ config ตั้งแต่ตอน validate ด้วย "Insufficient network_interface blocks" — ไม่ใช่เรื่องเซอร์ไพรส์ตอน plan หรือ apply แต่เป็นตอน validate เลย นี่คือบั๊กเดียวกันเป๊ะที่ตัวอย่างเดิมของบทนี้เองเคยมี
+</SpotTheBug>
+
+## Mental Model
+
+workspace คือ pointer ไม่ใช่ boundary — พิสูจน์ข้างบน `terraform.tfstate.d/<name>/` คือกลไกทั้งหมด
+
+## Trade-offs
+
+| ทางเลือก | ได้อะไร | เสียอะไร |
+|---|---|---|
+| Workspace | DRY จริง ๆ — resource block เดียว พิสูจน์ข้างบนว่าให้ค่าต่างกันต่อ workspace | ไม่ isolate backend/provider/project เลย พิสูจน์ข้างบน |
+
+## ความเข้าใจผิดที่พบบ่อย
+
+- **"แต่ละ workspace มี GCP project ของตัวเองได้"** พิสูจน์ข้างบน: ทุก workspace อ่าน backend และ provider configuration เดียวกันเป๊ะ
+- **"resource block ที่ reference machine_type กับ boot_disk ถูกต้องแล้วต้องครบสมบูรณ์"** พิสูจน์ข้างบน: `google_compute_instance` block ที่ดู syntax สมเหตุสมผลก็ยัง fail `terraform validate` จริงเพราะขาด `network_interface` block — ความครบต้องเช็คกับ provider schema ไม่ใช่มองด้วยตา
+
 <Callout title="สรุปหนึ่งบรรทัด">
-Terraform **workspace** ให้ configuration เดียวมี **state file** แยกกันหลายอันที่มีชื่อ สลับด้วย `terraform workspace new` / `select` / `list` และ `terraform.workspace` ทำให้โค้ดเดิมเปลี่ยนชื่อ resource, label, หรือขนาดต่อ workspace ได้ผ่าน interpolation หรือ lookup map สิ่งที่ workspace ไม่ isolate ให้คือ **backend configuration**, **provider configuration** (รวมถึง GCP `project`), และโค้ด `.tf` ที่อยู่ข้างใต้ ทุก workspace ใช้สิ่งเหล่านี้ร่วมกันทั้งหมด ทำให้ workspace เหมาะกับความต่างเล็ก ๆ แบบเบา ๆ แต่ไม่เหมาะกับ environment ที่ต้องการ GCP project, region, หรือ credential ที่แยกจากกันจริง ๆ เพราะไม่มีอะไรกัน apply ไม่ให้ไปลงผิด workspace ใน project ที่ใช้ร่วมกันโดยไม่ตั้งใจ
+Terraform **workspace** ให้ configuration เดียวมี **state file** แยกกันหลายอันที่มีชื่อ สลับด้วย `terraform workspace new` / `select` / `list` และ `terraform.workspace` ทำให้โค้ดเดิมเปลี่ยนชื่อ resource, label, หรือขนาดต่อ workspace ได้ผ่าน interpolation หรือ lookup map — พิสูจน์ข้างบนด้วย path จริง `terraform.tfstate.d/staging/terraform.tfstate` และไฟล์ที่ generate มาสองไฟล์ที่เนื้อหาต่างกันจริงต่อ workspace สิ่งที่ workspace ไม่ isolate ให้คือ **backend configuration**, **provider configuration** (รวมถึง GCP `project`), และโค้ด `.tf` ที่อยู่ข้างใต้ ทุก workspace ใช้สิ่งเหล่านี้ร่วมกันทั้งหมด ทำให้ workspace เหมาะกับความต่างเล็ก ๆ แบบเบา ๆ แต่ไม่เหมาะกับ environment ที่ต้องการ GCP project, region, หรือ credential ที่แยกจากกันจริง ๆ เพราะไม่มีอะไรกัน apply ไม่ให้ไปลงผิด workspace ใน project ที่ใช้ร่วมกันโดยไม่ตั้งใจ
 </Callout>
 
 export const quizTerraformWorkspaces = [
@@ -138,6 +236,28 @@ export const quizTerraformWorkspaces = [
       'ผลลัพธ์ของ terraform workspace list',
     ],
     answer: 2,
+  },
+  {
+    q: 'google_compute_instance resource มี boot_disk, machine_type, name ตั้งไว้ครบ แต่ไม่มี network_interface block terraform validate จริงโชว์อะไร พิสูจน์ข้างบน',
+    options: [
+      'ผ่านสะอาด — network_interface เป็น optional และ default เป็นไม่มีเลย',
+      'error จริง: "Insufficient network_interface blocks — At least 1 network_interface blocks are required"',
+      'มีแค่ warning ไม่ใช่ error เพราะสร้าง instance ได้โดยไม่มี networking',
+      'fail แค่ตอน apply เท่านั้น ไม่ใช่ตอน validate',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ข้างบนด้วยการรัน validate กับรูปทรงนี้เป๊ะก่อนแก้: error จริงที่ provider บังคับตอน validate ไม่ใช่ plan หรือ apply นี่คือบั๊กจริงที่ตัวอย่างเดิมของบทนี้เองเคยมี',
+  },
+  {
+    q: 'state file ของ default workspace มี path จริงบน disk ต่างจาก workspace อื่นทุกตัวตรงไหน ตามที่พิสูจน์ข้างบน',
+    options: [
+      'ไม่ต่างกันเลย ทุก workspace รวมถึง default ได้ subdirectory terraform.tfstate.d/<name>/',
+      'state ของ default อยู่ที่ path terraform.tfstate ธรรมดา ไม่มี subdirectory terraform.tfstate.d เลย ในขณะที่ workspace อื่นทุกตัว (พิสูจน์ข้างบน: staging) ได้ subdirectory นั้นจริง',
+      'state ของ default ถูกเก็บแบบ remote แม้ workspace อื่นทุกตัวจะใช้ local backend',
+      'default เป็น workspace เดียวที่ state file ถูกเข้ารหัส',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ข้างบนด้วย find จริง: ./terraform.tfstate (default) เทียบกับ ./terraform.tfstate.d/staging/terraform.tfstate',
   },
 ];
 

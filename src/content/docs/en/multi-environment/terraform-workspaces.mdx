@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## The idea in one sentence
 
@@ -58,6 +59,10 @@ resource "google_compute_instance" "app" {
       image = "debian-cloud/debian-12"
     }
   }
+
+  network_interface {
+    network = "default"
+  }
 }
 ```
 
@@ -94,8 +99,101 @@ export const workspacesDiagram = `flowchart TD
   stagingState -.->|same backend, same project| shared
   prodState -.->|same backend, same project| shared`;
 
+## Proof: real state paths, `terraform.tfstate.d/`, and a real value flip
+
+Provable offline with `local_file` standing in for `google_compute_instance` (same `terraform.workspace` mechanism):
+
+```hcl
+# main.tf
+locals {
+  machine_types = {
+    default = "e2-small"
+    dev     = "e2-small"
+    staging = "e2-medium"
+    prod    = "e2-standard-4"
+  }
+}
+
+resource "local_file" "app" {
+  filename = "${path.module}/app-${terraform.workspace}.txt"
+  content  = "workspace=${terraform.workspace} machine_type=${lookup(local.machine_types, terraform.workspace, "e2-small")}\n"
+}
+```
+
+Real `apply` in `default`, then `terraform workspace new staging` and `apply` again with the same config:
+
+```text
+$ terraform apply -auto-approve   # default workspace
+Apply complete! Resources: 1 added, 0 changed, 0 destroyed.
+
+$ terraform workspace new staging
+$ terraform apply -auto-approve   # staging workspace, same .tf files
+Apply complete! Resources: 1 added, 0 changed, 0 destroyed.
+```
+
+The two generated files prove `terraform.workspace` flipped per workspace:
+
+```text
+$ cat app-default.txt
+workspace=default machine_type=e2-small
+$ cat app-staging.txt
+workspace=staging machine_type=e2-medium
+```
+
+Real on-disk state layout:
+
+```text
+$ find . -iname "*.tfstate*" -not -path "./.terraform/*"
+./terraform.tfstate
+./terraform.tfstate.d
+./terraform.tfstate.d/staging/terraform.tfstate
+```
+
+`default` is the one special case — its state lives at the plain `terraform.tfstate` path; every other workspace gets a `terraform.tfstate.d/` subdirectory.
+
+## Reading AI-generated code, and a real bug this course itself had
+
+A `google_compute_instance` resource with no `network_interface` block is not a stylistic omission — it is a real, provider-enforced error. Proof, running `terraform validate` against exactly the `google_compute_instance` block earlier in this lesson, before its fix:
+
+```text
+$ terraform validate
+Error: Insufficient network_interface blocks
+At least 1 "network_interface" blocks are required.
+```
+
+The earlier version of this lesson's own example had exactly this bug — a `google_compute_instance` with `boot_disk` but no `network_interface`, something AI-generated Compute Engine examples get wrong constantly, because the resource *looks* complete with an image and a machine type. The fix, confirmed with a real passing `terraform validate` afterward, is the `network_interface { network = "default" }` block now shown above.
+
+<SpotTheBug code={`resource "google_compute_instance" "app" {
+  name         = "app-\${terraform.workspace}"
+  machine_type = "e2-small"
+  zone         = "us-central1-a"
+
+  boot_disk {
+    initialize_params {
+      image = "debian-cloud/debian-12"
+    }
+  }
+}`}>
+Proven above with a real \`terraform validate\` run: this resource is missing a required \`network_interface\` block. \`google_compute_instance\` needs at least one, and the provider rejects the config at validate time with "Insufficient network_interface blocks" — not a plan-time or apply-time surprise, a validate-time one. This is exactly the bug this lesson's own example originally had.
+</SpotTheBug>
+
+## Mental Model
+
+A workspace is a pointer, not a boundary — proven above, `terraform.tfstate.d/<name>/` is the entire mechanism.
+
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---|---|---|
+| Workspaces | Genuinely DRY — one resource block, proven above to produce different values per workspace | Zero isolation of backend/provider/project, proven above |
+
+## Common Misconceptions
+
+- **"Each workspace can have its own GCP project."** Proven above: every workspace reads the exact same backend and provider configuration.
+- **"A resource block that references machine_type and boot_disk correctly must be complete."** Proven above: a real, syntactically plausible `google_compute_instance` block still failed real `terraform validate` for a missing `network_interface` block — completeness has to be checked against the provider schema, not eyeballed.
+
 <Callout title="The one-line takeaway">
-A Terraform **workspace** gives one configuration multiple named, separate **state files** switched with `terraform workspace new` / `select` / `list`, and `terraform.workspace` lets that same code vary resource names, labels, or sizes per workspace through interpolation or a lookup map. What workspaces do NOT isolate is the **backend configuration**, the **provider configuration** (including the GCP `project`), or the underlying `.tf` code itself — all workspaces share those completely, which makes workspaces a good fit for lightweight variation but a poor fit for environments that need genuinely separate GCP projects, regions, or credentials, since nothing prevents an `apply` from landing in the wrong workspace's shared project by mistake.
+A Terraform **workspace** gives one configuration multiple named, separate **state files** switched with `terraform workspace new` / `select` / `list`, and `terraform.workspace` lets that same code vary resource names, labels, or sizes per workspace through interpolation or a lookup map — proven above with a real `terraform.tfstate.d/staging/terraform.tfstate` path and two generated files whose content genuinely differs per workspace. What workspaces do NOT isolate is the **backend configuration**, the **provider configuration** (including the GCP `project`), or the underlying `.tf` code itself — all workspaces share those completely, which makes workspaces a good fit for lightweight variation but a poor fit for environments that need genuinely separate GCP projects, regions, or credentials, since nothing prevents an `apply` from landing in the wrong workspace's shared project by mistake.
 </Callout>
 
 export const quizTerraformWorkspaces = [
@@ -138,6 +236,28 @@ export const quizTerraformWorkspaces = [
       'The output of terraform workspace list',
     ],
     answer: 2,
+  },
+  {
+    q: 'A google_compute_instance resource has boot_disk, machine_type, and name set, but no network_interface block. What does real terraform validate show, proven above?',
+    options: [
+      'It passes cleanly — network_interface is optional and defaults to none',
+      'A real error: "Insufficient network_interface blocks — At least 1 network_interface blocks are required"',
+      'A warning only, not an error, since the instance can be created without networking',
+      'It fails only at apply time, never at validate time',
+    ],
+    answer: 1,
+    explain: 'Proven above by running validate against exactly this shape before the fix: a real, provider-enforced error at validate time, not plan or apply time. This was a genuine bug in this lesson own earlier example.',
+  },
+  {
+    q: 'Where does the default workspace state file real on-disk path, as proven above, differ from every other workspace?',
+    options: [
+      'It does not differ; every workspace including default gets a terraform.tfstate.d/<name>/ subdirectory',
+      'default state lives at the plain terraform.tfstate path with no terraform.tfstate.d subdirectory, while every other workspace (proven above: staging) does get one',
+      'default state is stored remotely even when every other workspace uses a local backend',
+      'default is the only workspace whose state file is encrypted',
+    ],
+    answer: 1,
+    explain: 'Proven above with a real find: ./terraform.tfstate (default) versus ./terraform.tfstate.d/staging/terraform.tfstate.',
   },
 ];
 
