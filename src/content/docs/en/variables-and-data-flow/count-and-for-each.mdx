@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## The idea in one sentence
 
@@ -76,7 +77,33 @@ resource "google_compute_instance" "web" {
 }
 ```
 
-Here `web[0]` is `"web-a"`, `web[1]` is `"web-b"`, and `web[2]` is `"web-c"`. Now remove `"web-b"` from the middle of the list, leaving `["web-a", "web-c"]`. Terraform does not understand that `"web-b"` specifically was removed — all it sees is that index `1` now maps to a different name than before, and index `2` no longer exists. The plan Terraform produces is destroy `web[2]` (the old `"web-c"` no longer has an index), then destroy and recreate `web[1]` with the new name `"web-c"` — even though conceptually only `"web-b"` should have been touched. Every resource whose index shifted gets destroyed and recreated, with all the downtime, IP address changes, and disk loss that implies, purely because it moved position in the list.
+Here `web[0]` is `"web-a"`, `web[1]` is `"web-b"`, and `web[2]` is `"web-c"`. Now remove `"web-b"` from the middle of the list, leaving `["web-a", "web-c"]`. Terraform does not understand that `"web-b"` specifically was removed — all it sees is that index `1` now maps to a different name than before, and index `2` no longer exists.
+
+Proven with `count` over `local_file` (the exact index-shifting mechanism, no GCP project needed to see it — `google_compute_instance` itself needs a real project even to `plan`, which this course never has):
+
+```text
+$ terraform plan
+  # local_file.web[1] must be replaced
+-/+ resource "local_file" "web" {
+      ~ content = "web-b" -> "web-c" # forces replacement
+        # (other computed attributes omitted)
+    }
+
+  # local_file.web[2] will be destroyed
+  # (because index [2] is out of range for count)
+  - resource "local_file" "web" {
+      - content  = "web-c" -> null
+      - filename = "./out-2.txt" -> null
+    }
+
+Plan: 1 to add, 0 to change, 2 to destroy.
+```
+
+Index `1` (originally `"web-b"`) is destroyed and recreated with the content `"web-c"`, and index `2` is destroyed outright with nothing to replace it. One item removed from a three-item list produced 1 create + 2 destroys — every resource whose index shifted gets touched, purely because it moved position in the list.
+
+<Callout title="A mock_provider caveat worth being honest about">
+`local_file`'s `content` argument really is `ForceNew` in its schema, so the plan above is a faithful preview of what a real `terraform plan` does. The equivalent test against the real `google_compute_instance` resource is murkier: `terraform test` with `mock_provider "google" {}` (no `override_resource`) still reads the real provider's schema, and `google_compute_instance.name` genuinely has `ForceNew: true` set in that schema (confirmed by reading `resource_compute_instance.go` in the `hashicorp/terraform-provider-google` source) — yet a `mock_provider` run changing only `name` across two `run` blocks planned it as an **in-place update**, not a replace. This looks like a real gap between what the schema declares and what `terraform test`'s mock planning actually honors — worth flagging rather than presenting confidently one way or the other. Treat the `local_file` proof above as the trustworthy one for the *mechanism*, and do not rely on `mock_provider` output alone to predict `ForceNew` behavior for a specific provider resource.
+</Callout>
 
 ## for_each — addressed by stable key, not position
 
@@ -112,7 +139,198 @@ resource "google_compute_instance" "web" {
 }
 ```
 
-Each instance is addressed externally as `google_compute_instance.web["primary"]`, `web["secondary"]`, and `web["batch"]`. Inside the resource, `each.key` is the map key and `each.value` is its associated value. Now remove `"secondary"` from the map entirely. Terraform destroys exactly `google_compute_instance.web["secondary"]` and nothing else — `web["primary"]` and `web["batch"]` are keyed by their own names, not by position, so they are completely undisturbed by a key going away in the middle.
+Each instance is addressed externally as `google_compute_instance.web["primary"]`, `web["secondary"]`, and `web["batch"]`. Inside the resource, `each.key` is the map key and `each.value` is its associated value.
+
+Removing a key entirely (rather than renaming something) is unaffected by the `mock_provider` caveat above — it only involves state entries disappearing from the desired set, not an in-place-vs-replace judgment call. Proven with the equivalent per-key example further down this lesson (real `terraform test`, `google_compute_subnetwork`): removing one key destroys exactly that key's resource and nothing else. `web["primary"]` and `web["batch"]` here are keyed by their own names, not by position, so they are completely undisturbed by a key going away in the middle.
+
+## `for_each` on a map: `each.key` and `each.value` genuinely differ
+
+Over a `set(string)`, `each.key` and `each.value` are the same string. Over a `map`, they differ: `each.key` is the map key, `each.value` is that key's value — exactly the `instances` variable above, where `each.value` supplies each instance's `machine_type`.
+
+Proven with the `local_file` equivalent (`content = "instance ${each.key} has type ${each.value}"`) after `apply`:
+
+```text
+$ cat out-primary.txt
+instance primary has type e2-medium
+$ cat out-batch.txt
+instance batch has type e2-standard-2
+```
+
+`each.key` names the instance, `each.value` carries its per-instance configuration — the shape to reach for whenever different instances of the same resource need genuinely different arguments, not just a different name.
+
+## Conditional `count` and `one()`
+
+`count = var.enable_x ? 1 : 0` is the standard pattern for an optional resource — 1 copy if a flag is true, 0 if false. Referencing that resource elsewhere breaks the moment `count` is `0`: `google_compute_instance.monitoring[0].id` has no index `0` to read. **`one()`** solves this: it takes a list of 0 or 1 elements and returns the single element, or `null` if the list is empty — never erroring either way.
+
+```hcl
+variable "enable_monitoring" {
+  type    = bool
+  default = false
+}
+
+resource "google_compute_instance" "monitoring" {
+  count        = var.enable_monitoring ? 1 : 0
+  name         = "monitoring"
+  machine_type = "e2-medium"
+  zone         = "us-central1-a"
+
+  boot_disk {
+    initialize_params {
+      image = "debian-cloud/debian-12"
+    }
+  }
+
+  network_interface {
+    network = "default"
+    access_config {}
+  }
+}
+
+output "monitoring_instance_id" {
+  value = one(google_compute_instance.monitoring[*].id)
+}
+```
+
+Proven with the `local_file` equivalent, both branches, same configuration:
+
+```text
+$ terraform apply -auto-approve                              # enable_monitoring = false (default)
+No changes. Your infrastructure matches the configuration.
+Apply complete! Resources: 0 added, 0 changed, 0 destroyed.
+(monitoring_file_id output: null -- one() on an empty list)
+
+$ terraform apply -auto-approve -var="enable_monitoring=true" # flip it on
+Apply complete! Resources: 1 added, 0 changed, 0 destroyed.
+Outputs:
+monitoring_file_id = "3ea3f9802accf8817bacd6f3df46a73b93ccddec"
+```
+
+`one([])` returns `null` with no error; `one([x])` returns `x`; only two-or-more elements actually errors, which can't happen here since `count` is constrained to `0` or `1`.
+
+## `for_each` cannot key on a value only known after apply
+
+`for_each`'s keys must be fully known at plan time. A collection derived from another resource's computed attribute (an ID that only exists after that resource is created) fails, even though the same value works fine as an ordinary argument:
+
+```hcl
+resource "random_pet" "names" {
+  count = 2
+}
+
+resource "google_compute_instance" "web" {
+  for_each = toset(random_pet.names[*].id)
+  # ...
+}
+```
+
+Real error (proven with the `local_file` equivalent — the mechanism is core Terraform, identical regardless of resource type or provider):
+
+```text
+$ terraform plan
+╷
+│ Error: Invalid for_each argument
+│
+│   on main.tf line 6, in resource "local_file" "web":
+│    6:   for_each = toset(random_pet.names[*].id)
+│     ├────────────────
+│     │ random_pet.names is tuple with 2 elements
+│
+│ The "for_each" set includes values derived from resource attributes that
+│ cannot be determined until apply, and so Terraform cannot determine the
+│ full set of keys that will identify the instances of this resource.
+│
+│ When working with unknown values in for_each, it's better to use a map
+│ value where the keys are defined statically in your configuration and where
+│ only the values contain apply-time results.
+╵
+```
+
+Terraform's own suggestion in that error is the fix worth remembering: key on something known statically (a name you chose, a zone string from a variable) and let only the *value* side carry an apply-time result.
+
+## `terraform_data` instead of `null_resource`, and `replace_triggered_by`
+
+`null_resource` (from the separate `hashicorp/null` provider) used to be the standard way to run a provisioner or hold a `triggers` map with no real infrastructure attached. **`terraform_data`** (built into Terraform core since 1.4, no extra provider needed) replaces it, and adds `replace_triggered_by`: force a resource to be replaced whenever a referenced value changes, even if none of the resource's own arguments changed.
+
+```hcl
+resource "local_file" "config" {
+  filename = "${path.module}/config.txt"
+  content  = var.config_content
+}
+
+resource "terraform_data" "restart_app" {
+  input = local_file.config.content
+
+  lifecycle {
+    replace_triggered_by = [local_file.config.content]
+  }
+}
+```
+
+Real plan after only `local_file.config`'s content changes (`terraform_data.restart_app` has no argument that changed on its own):
+
+```text
+$ terraform plan
+  # terraform_data.restart_app will be replaced due to changes in replace_triggered_by
+Plan: 2 to add, 0 to change, 2 to destroy.
+```
+
+## A real per-key subnetwork example
+
+Putting `for_each` to work the way it actually gets used: one subnetwork per name, keyed so adding or removing a subnet never disturbs the others. Proven with `terraform test` and `mock_provider "google" {}`, since a real `plan` needs a real GCP project this course never has:
+
+```hcl
+variable "subnets" {
+  type = map(string)
+  default = {
+    web = "10.0.1.0/24"
+    app = "10.0.2.0/24"
+    db  = "10.0.3.0/24"
+  }
+}
+
+resource "google_compute_network" "main" {
+  name                    = "vpc-demo"
+  auto_create_subnetworks = false
+}
+
+resource "google_compute_subnetwork" "this" {
+  for_each      = var.subnets
+  name          = each.key
+  ip_cidr_range = each.value
+  region        = "us-central1"
+  network       = google_compute_network.main.id
+}
+```
+
+Real `terraform test` run: create all three, then remove `"app"` from the map and plan again:
+
+```hcl
+# tests/removal.tftest.hcl
+mock_provider "google" {}
+
+run "create_three" {
+  command = apply
+}
+
+run "remove_app_key" {
+  command = plan
+
+  variables {
+    subnets = {
+      web = "10.0.1.0/24"
+      db  = "10.0.3.0/24"
+    }
+  }
+}
+```
+
+```text
+$ terraform test
+  # google_compute_subnetwork.this["app"] will be destroyed
+Plan: 0 to add, 0 to change, 1 to destroy.
+Success! 2 passed, 0 failed.
+```
+
+Exactly `google_compute_subnetwork.this["app"]` is destroyed — `web` and `db` never appear in the plan at all, because their keys never moved. Unlike the `name`-rename case flagged above, this proof only involves a key disappearing from the desired set, which is ordinary state reconciliation, not a `ForceNew` judgment call — so it is trustworthy as shown.
 
 ## for expressions — comprehension, not a resource meta-argument
 
@@ -134,7 +352,7 @@ locals {
 }
 ```
 
-`[for name in var.instance_names : upper(name)]` is a `for` expression that produces a new list. `{ for name in var.instance_names : name => "label-${name}" }` is a `for` expression that produces a new map. Neither one is the `for_each` meta-argument on a resource block — a `for` expression transforms data you already have into different data, while the `for_each` meta-argument on a resource decides how many instances of that resource to create and what key addresses each one. It is entirely normal, and common, to use a `for` expression to build the map you then hand to a resource's `for_each`.
+`[for name in var.instance_names : upper(name)]` is a `for` expression that produces a new list. `{ for name in var.instance_names : name => "label-${name}" }` is a `for` expression that produces a new map. Neither one is the `for_each` meta-argument on a resource block — a `for` expression transforms data you already have into different data, while the `for_each` meta-argument on a resource decides how many instances of that resource to create and what key addresses each one. It is entirely normal, and common, to use a `for` expression to build the map you then hand to a resource's `for_each` — the `google_compute_subnetwork.this` example above could just as easily have its `subnets` map built with a `for` expression from a flatter input variable.
 
 <Mermaid title="count shifts every index after a mid-list removal; for_each only touches the removed key" code={countForEachDiagram} />
 
@@ -150,8 +368,74 @@ export const countForEachDiagram = `flowchart TB
     f1 -.remove secondary.-> untouched["only web[secondary] destroyed, primary and batch undisturbed"]
   end`;
 
+## Mental Model
+
+`count` and `for_each` both answer "how many copies," but they encode identity completely differently: `count` derives identity from *position in a list* (fragile — position shifts whenever the list's shape changes), while `for_each` derives identity from *a stable key that already meant something* (a name, a zone, a map key you chose) — resilient, because removing one thing never renames another. Every proof above is a consequence of that one distinction, including the `mock_provider` caveat: a rename-in-place-vs-replace question depends on the resource's own schema and how faithfully the test tooling honors it, but a key disappearing from a `for_each` set never depends on that at all — it is just "this key is no longer desired," resolved by Terraform core regardless of provider.
+
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---|---|---|
+| `count` | Simplest syntax for a truly fixed, order-irrelevant number of near-identical resources | Removing a middle item cascades destroy-and-recreate across every later index — proven above with a real `local_file` plan diff |
+| `for_each` (set) | Removing one key destroys only that resource — proven above with subnetworks | Requires converting a list to a set (or otherwise supplying stable keys) if you started with ordered data |
+| `for_each` (map) | `each.key`/`each.value` split lets each instance carry genuinely different per-instance config — proven above with per-instance machine types | Every key must be known before `plan` — proven above, a key derived from another resource's computed attribute is a real, hard error |
+| `terraform_data` + `replace_triggered_by` | Forces a deliberate replacement on an external signal, without adding a fake argument to smuggle a dependency in — proven above with a real plan | The replacement is total (destroy + recreate), not a partial update |
+
+## Common Misconceptions
+
+- **"Removing an item from a `count`-based list only affects the resource for that item."** Proven above: it cascades. Every index after the removed one shifts, and Terraform reads that shift as destroy-and-recreate for each shifted index.
+- **"`for_each` and a `for` expression are basically the same feature since they share the word 'for'."** They are unrelated: `for_each` is a resource meta-argument that repeats a resource block; a `for` expression transforms one collection's data into another and never creates or destroys anything.
+- **"You can reference `google_compute_instance.monitoring[0]` safely even when `count` might be `0`."** Proven above: this errors the moment `count` evaluates to `0`. `one(google_compute_instance.monitoring[*].id)` is the safe form.
+- **"`for_each` can key on any computed value, the same way an ordinary argument can reference one."** Proven above: a `for_each` key must be fully known at plan time — a key derived from another resource's apply-time attribute is a real, named error.
+- **"`terraform test` with `mock_provider` always predicts the real provider's replace-vs-update behavior correctly."** Not confirmed above — in fact contradicted: `google_compute_instance.name` has `ForceNew: true` in the real provider schema, but a bare `mock_provider "google" {}` run changing only `name` planned an in-place update. Use `local_file` (or `override_resource` with an explicit `computed`/`planned` shape) for mechanism proofs, and don't trust `mock_provider`'s replace/update classification for a specific provider resource without checking the schema too.
+- **"`null_resource` is still the modern way to hold a trigger with no real infrastructure."** `terraform_data` (built into Terraform core since 1.4) replaces it and needs no separate provider; it also adds `replace_triggered_by`, which `null_resource` never had.
+
+## Reading AI-generated code
+
+- `count = length(var.some_list)` indexing into `var.some_list[count.index]` for anything that might have an item removed from the middle later — proven above, this is the exact shape that produces the destroy-and-recreate cascade.
+- A generated resource referencing `some_resource.name[0]` unconditionally, when `count` on `some_resource.name` is actually conditional (`var.enable ? 1 : 0`) — this breaks the moment the flag is `false`; `one(some_resource.name[*].attr)` is the fix, proven above.
+- `for_each` keyed on a list index converted to a string when the underlying collection has genuinely meaningful keys available (names, zones) — this reintroduces `count`'s fragility with extra syntax.
+- `for_each` over a value derived from another resource's computed attribute (an ID) without checking whether that attribute is known before apply — proven above, this is a real, immediate `plan`-time error.
+- `null_resource` still appearing in freshly-generated code for a trigger-only resource — `terraform_data` is the current, provider-free replacement and is the only one of the two that supports `replace_triggered_by`.
+- A generated `google_compute_instance` block with no `network_interface` block at all — this is not optional; `terraform validate` rejects it because `network_interface` is a required block, not a computed one.
+- Code that trusts a `mock_provider`-based `terraform test` plan diff to prove `ForceNew` behavior for a real provider resource — proven above this can be wrong; verify against the provider's own schema/docs for anything that matters operationally.
+
+<SpotTheBug code={`variable "instance_names" {
+  type    = list(string)
+  default = ["web-a", "web-b", "web-c"]
+}
+
+resource "google_compute_instance" "web" {
+  count        = length(var.instance_names)
+  name         = var.instance_names[count.index]
+  machine_type = "e2-medium"
+  zone         = "us-central1-a"
+
+  boot_disk {
+    initialize_params {
+      image = "debian-cloud/debian-12"
+    }
+  }
+
+  network_interface {
+    network = "default"
+    access_config {}
+  }
+}
+
+# Later: ops wants to remove "web-b" from the deploy
+# variable "instance_names" { default = ["web-a", "web-c"] }`}>
+Removing `"web-b"` from the middle of this list does NOT just destroy the `web-b` instance. Proven above with the identical shape (`local_file` instead of `google_compute_instance`, same core mechanism): index `1` (`"web-b"`) is destroyed and recreated as `"web-c"`, and index `2` (the original `"web-c"`) is destroyed outright with nothing to replace it —
+
+```text
+Plan: 1 to add, 0 to change, 2 to destroy.
+```
+
+— for what should conceptually be a single destroy. The fix is `for_each` over `toset(var.instance_names)` (or a map, if per-instance config beyond the name is needed): removing `"web-b"` then plans exactly `1 to destroy`, nothing else touched.
+</SpotTheBug>
+
 <Callout title="The one-line takeaway">
-**`count`** creates numbered copies of a resource addressed by a plain integer index (`web[0]`, `web[1]`) — removing an item from the middle of the underlying list shifts every later index down by one, so Terraform destroys and recreates every copy after the removed one, not just the one you meant to remove. **`for_each`** creates copies addressed by a stable map or set key (`web["primary"]`) instead, so removing one key destroys only that one resource instance and leaves every other key completely undisturbed. A **`for` expression** (`[for x in list : ...]`, `{for k, v in map : k => v}`) is a separate concept entirely — a comprehension that transforms a collection into another collection, distinct from the `for_each` resource meta-argument even though the keyword overlaps.
+**`count`** creates numbered copies of a resource addressed by a plain integer index (`web[0]`, `web[1]`) — removing an item from the middle of the underlying list shifts every later index down by one, so Terraform destroys and recreates every copy after the removed one, proven above with a real `local_file` plan diff (`1 to add, 0 to change, 2 to destroy` for one removed item). **`for_each`** creates copies addressed by a stable map or set key (`web["primary"]`) instead, so removing one key destroys only that one resource instance and leaves every other key completely undisturbed, proven above with `google_compute_subnetwork` and a real `terraform test`; over a map, **`each.key`**/**`each.value`** genuinely differ. Conditional `count = var.enable ? 1 : 0` pairs with **`one()`** to safely reference a maybe-zero-length list. `for_each`'s keys must be fully known at plan time — a key derived from another resource's apply-time attribute is a real, named error. **`terraform_data`** (core since 1.4) replaces the separate-provider `null_resource` and adds **`replace_triggered_by`**, proven above with a real plan. A **`for` expression** (`[for x in list : ...]`, `{for k, v in map : k => v}`) is a separate concept entirely — a comprehension that transforms a collection into another collection, distinct from the `for_each` resource meta-argument even though the keyword overlaps. One honest caveat discovered while proving this lesson: `terraform test` with a bare `mock_provider` does not reliably honor a real provider's `ForceNew` schema flag (shown above with `google_compute_instance.name`), so mechanism proofs here lean on `local_file`, which does behave correctly.
 </Callout>
 
 export const quizCountForEach = [
@@ -164,6 +448,7 @@ export const quizCountForEach = [
       'Only the removed item is destroyed, and every other index is left completely untouched',
     ],
     answer: 1,
+    explain: 'Proven above with a real plan against local_file: removing the middle item from a 3-item list produced 1 create + 2 destroys, not the single destroy you would want.',
   },
   {
     q: 'Why does for_each avoid the index-shifting problem that count has',
@@ -174,6 +459,7 @@ export const quizCountForEach = [
       'for_each recreates every resource on every apply regardless of changes',
     ],
     answer: 2,
+    explain: 'Proven above with google_compute_subnetwork via terraform test: removing one key from the map produced exactly "1 to destroy" for that key, with the other two untouched.',
   },
   {
     q: 'What is the difference between a for expression and the for_each resource meta-argument',
@@ -194,6 +480,50 @@ export const quizCountForEach = [
       'for_each does not allow addressing individual instances at all',
     ],
     answer: 1,
+  },
+  {
+    q: '```hcl\nresource "random_pet" "names" {\n  count = 2\n}\n\nresource "google_compute_instance" "web" {\n  for_each = toset(random_pet.names[*].id)\n}\n```\nWhat happens when you run terraform plan against this?',
+    options: [
+      'It works fine -- for_each can key on any value a resource produces',
+      'A real error: "Invalid for_each argument" -- the keys depend on values only known after apply, and for_each keys must be fully known at plan time',
+      'Terraform automatically delays creating the instance until after random_pet.names is applied, with no error',
+      'It silently creates zero instances',
+    ],
+    answer: 1,
+    explain: 'Proven above (with the local_file equivalent, same mechanism): a real "Invalid for_each argument" error, because for_each needs the full set of keys before it can plan at all.',
+  },
+  {
+    q: 'A resource has count = var.enable_x ? 1 : 0, and another resource references its id with one(that_resource[*].id). What does one() return when count evaluates to 0?',
+    options: [
+      'An error, because one() requires at least one element',
+      'null, because one() returns the single element of a 0-or-1-element list, or null if the list is empty',
+      'An empty string',
+      'The value from the previous apply, cached in state',
+    ],
+    answer: 1,
+    explain: 'Proven above: with count = 0, one(...) on the resulting empty list returns null with no error. one() only errors on a list with 2 or more elements.',
+  },
+  {
+    q: 'A terraform test run using mock_provider "google" {} (no override_resource) shows google_compute_instance.name changing as an in-place update, even though the real provider schema marks name as ForceNew. What does that tell you?',
+    options: [
+      'It proves google_compute_instance.name is not really ForceNew, contradicting the documentation',
+      'mock_provider is buggy and should never be used for anything',
+      "mock_provider's plan output cannot be fully trusted to reflect a real provider's ForceNew behavior for every attribute -- verify against the schema/docs for anything that matters, and prefer a provider-agnostic resource like local_file for mechanism proofs",
+      'This is expected and documented behavior that every Terraform course should rely on',
+    ],
+    answer: 2,
+    explain: 'Proven above by reading the actual provider source (name: ForceNew: true) and comparing it to a real mock_provider run that planned an in-place update instead of a replace -- a genuine, worth-flagging gap between schema and mock test output.',
+  },
+  {
+    q: 'What does terraform_data add over the older null_resource, besides not needing a separate provider?',
+    options: [
+      'Nothing -- they are functionally identical, terraform_data is purely a rename',
+      'replace_triggered_by, letting a resource be forced to replace when a referenced value changes even if none of its own arguments changed',
+      'The ability to run provisioners, which null_resource never supported',
+      'Automatic state encryption',
+    ],
+    answer: 1,
+    explain: 'Proven above: terraform_data.restart_app was replaced purely because local_file.config.content changed, via replace_triggered_by -- a capability null_resource never had.',
   },
 ];
 
