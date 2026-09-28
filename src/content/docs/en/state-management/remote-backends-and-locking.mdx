@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## The idea in one sentence
 
@@ -39,9 +40,159 @@ terraform {
 
 The bucket must already exist before you point a backend at it — Terraform will not create it for you. `bucket` names the Cloud Storage bucket, and `prefix` is the path within that bucket under which this configuration's state object is stored, so different configurations (or different Terragrunt units) typically use different prefixes in the same bucket.
 
-Notice there is no locking argument to set. The GCS backend has **state locking built in** — it is an inherent part of how the backend works, not an opt-in feature. Cloud Storage's own object generation and versioning mechanism is what Terraform uses under the hood to make sure only one write to a given state object succeeds at a time, so two concurrent runs cannot corrupt it. There is no separate lock table to create, no extra argument to flip on, and no additional GCP resource to pay for and keep in sync with the state bucket. This is genuinely simpler than the locking story on some other clouds, where a separate locking resource has historically had to be provisioned alongside the state bucket.
+Notice there is no locking argument to set. Per the GCS backend's own documentation, "this backend supports state locking" — full stop; unlike the S3 backend page (which names `use_lockfile` and a `<key>.tflock` object) or the azurerm page (which names the blob-lease mechanism), the GCS backend page does not spell out the underlying mechanism. Worth stating plainly rather than guessing at an implementation detail no fetched HashiCorp page confirms. What is confirmed either way: there is no separate lock table to create, no extra argument to flip on, and no additional GCP resource to pay for and keep in sync with the state bucket — locking is a property of the backend against the same bucket, with nothing extra to provision. This is genuinely simpler than the locking story on some other clouds, where a separate locking resource has historically had to be provisioned alongside the state bucket.
 
-It is still worth turning on Object Versioning on the state bucket itself. Versioning is not what provides locking — locking is automatic and always on — but it gives you a recovery path if a bad `apply` overwrites state with something you did not want.
+It is still worth turning on Object Versioning on the state bucket itself. Versioning is not what provides locking — locking works regardless — but it gives you a recovery path if a bad `apply` overwrites state with something you did not want.
+
+## Migrating a backend: `init -migrate-state` vs `init -reconfigure`
+
+Changing the `backend` block — moving to a different bucket, changing `prefix`, or moving from local to `gcs` for the first time — requires re-running `terraform init`, and Terraform gives you two different flags depending on whether you want the old state carried over. No cloud credentials exist in this course, so the proof below changes a **local** backend's `path` rather than migrating to GCS — the exact same prompt and mechanics apply to a local→GCS move, only the backend type differs.
+
+`terraform init -migrate-state` asks whether to copy existing state into the new backend location. Real output, changing `path = "state/old.tfstate"` to `path = "state/new.tfstate"` in a `backend "local"` block:
+
+```text
+$ terraform init -migrate-state
+Initializing the backend...
+Backend configuration changed!
+
+Terraform has detected that the configuration specified for the backend
+has changed. Terraform will now check for existing state in the backends.
+Do you want to copy existing state to the new backend?
+  Pre-existing state was found while migrating the previous "local" backend to the
+  newly configured "local" backend. No existing state was found in the newly
+  configured "local" backend. Do you want to copy this state to the new "local"
+  backend? Enter "yes" to copy and "no" to start with an empty state.
+
+  Enter a value: yes
+
+Successfully configured the backend "local"! Terraform will automatically
+use this backend unless the backend configuration changes.
+```
+
+Answering `yes` really copies the resource into the new location — `state/new.tfstate` contains the same `local_file` resource the old path had. `terraform init -reconfigure` skips that prompt entirely and does **not** carry state over — proof, changing the `path` again and running `-reconfigure` instead:
+
+```text
+$ terraform init -reconfigure
+Initializing the backend...
+
+Successfully configured the backend "local"! Terraform will automatically
+use this backend unless the backend configuration changes.
+```
+
+No migration question at all. The next `plan` proves the difference — Terraform now believes the resource does not exist, because the new backend location was never populated:
+
+```text
+$ terraform plan
+  # local_file.config will be created
+  + resource "local_file" "config" {
+      + content  = "listen=8080\n"
+      + filename = "./generated/app.conf"
+    }
+
+Plan: 1 to add, 0 to change, 0 to destroy.
+```
+
+`-reconfigure` is for "start clean at this new location, I do not want the old state" (or the old backend is gone/unreachable); `-migrate-state` is for "this is the same infrastructure, just move where its state record lives." Picking the wrong one against a real GCS bucket either leaves the old state behind unmigrated, or (worse) makes Terraform think a running VPC network needs to be recreated from scratch.
+
+## Partial backend configuration with `-backend-config`
+
+A `backend` block does not have to hardcode every argument — leaving it empty and supplying values at `init` time (from a file or individual `-backend-config="key=value"` flags) keeps per-environment values out of committed `.tf` files:
+
+```hcl
+terraform {
+  backend "gcs" {}
+}
+```
+
+```text
+# backend.hcl (not committed, or generated by CI per environment)
+bucket = "my-company-terraform-state"
+prefix = "networking/state"
+```
+
+```bash
+terraform init -backend-config=backend.hcl
+```
+
+Real output against a local backend proving the flag is accepted and merged (`path` supplied the same way as `bucket`/`prefix` would be for GCS):
+
+```text
+$ terraform init -backend-config=backend.hcl
+Initializing the backend...
+
+Successfully configured the backend "local"! Terraform will automatically
+use this backend unless the backend configuration changes.
+```
+
+This is exactly the mechanism CI pipelines use to point the same configuration at a different GCS bucket or prefix per environment (`dev.hcl`, `prod.hcl`) without duplicating the `.tf` files.
+
+## `terraform force-unlock`: the manual escape hatch
+
+If an `apply` is killed mid-run (a laptop sleeps, a CI job is cancelled), the lock it acquired can be left behind with nothing left running to release it. `terraform force-unlock <LOCK_ID>` removes that lock manually. Real `-help` output from Terraform 1.16.4:
+
+```text
+$ terraform force-unlock -help
+Usage: terraform [global options] force-unlock LOCK_ID
+
+  Manually unlock the state for the defined configuration.
+
+  This will not modify your infrastructure. This command removes the lock on the
+  state for the current workspace. The behavior of this lock is dependent
+  on the backend being used. Local state files cannot be unlocked by another
+  process.
+
+Options:
+
+  -force                 Don't ask for input for unlock confirmation.
+```
+
+The `LOCK_ID` is not something you invent — when a lock is already held, the *next* run that fails to acquire it prints the lock's ID (and who holds it, and when it was acquired) in its own error message, and that ID is what you paste into `force-unlock`. **A stale lock genuinely cannot be produced offline in this course** — the local backend the harness uses has no lock to leave behind the way a GCS-backed lock can (the `-help` text above says exactly that: "Local state files cannot be unlocked by another process"). Treat `force-unlock` as a last resort for a lock you have independently confirmed is stale (the process that held it is actually gone — check first, e.g. that the CI run really did get cancelled), never a reflex for "my apply is being slow."
+
+## Terragrunt: `remote_state` generates the `backend.tf` you never hand-write — and proves `project`/`location` are not part of it
+
+Terragrunt's `remote_state` block in `root.hcl` generates the exact `backend` block above for every unit that includes it, resolving `prefix` per-unit with `path_relative_to_include()`. The GCS backend is the one where it matters most to prove exactly which config keys land in the generated file, because `remote_state` also accepts `project` and `location` to **auto-create the bucket** if it does not exist yet:
+
+```hcl
+# root.hcl
+remote_state {
+  backend = "gcs"
+  generate = {
+    path      = "backend.tf"
+    if_exists = "overwrite"
+  }
+  config = {
+    project  = "my-gcp-project-id"
+    location = "us-central1"
+    bucket   = "my-company-terraform-state"
+    prefix   = "${path_relative_to_include()}"
+  }
+}
+```
+
+```hcl
+# network/terragrunt.hcl
+include "root" {
+  path = find_in_parent_folders("root.hcl")
+}
+
+terraform {
+  source = "."
+}
+```
+
+Running `terragrunt run -- init -backend=false` in the `network` unit generates the real `backend.tf` — and it proves the point directly: `project` and `location` do **not** appear in it at all, only `bucket` and the resolved `prefix`:
+
+```text
+# Generated by Terragrunt. Sig: nIlQXj57tbuaRZEa
+terraform {
+  backend "gcs" {
+    bucket = "my-company-terraform-state"
+    prefix = "network"
+  }
+}
+```
+
+`project` and `location` were consumed by Terragrunt itself, at the step where it checks whether the bucket exists and creates it if not (`disable_init = false`, the default) — they have no equivalent field in a `gcs` backend block's own schema, so generating them into `backend.tf` would produce an invalid backend configuration. This is the opposite of the AWS/azurerm case (`state-management/remote-backends-and-locking.mdx`'s AWS version), where every `config` key is a real backend argument and lands in the file verbatim — GCP's `remote_state` block is doing two jobs (bucket bootstrap plus backend generation) with two different key sets, and only one of those sets is backend syntax.
 
 ## What locking actually prevents
 
@@ -63,8 +214,44 @@ export const lockingDiagram = `flowchart LR
   eng2["CI run: terraform apply"] -->|blocked, waits or fails| gcs
   gcs -->|lock released after apply| eng2`;
 
+## Mental Model
+
+Every mechanism in this lesson exists to answer one question honestly: "whose write wins, and does the loser find out?" A shared backend answers "where is the one true copy" so nobody's laptop is that copy. Locking answers "what happens when two writes race" by turning the race into a queue instead of a coin flip — proven above, GCS's own backend page confirms locking is supported without over-claiming a mechanism no page actually documents. `-migrate-state` vs `-reconfigure` answers "does the old record follow me" when the backend's location changes. `force-unlock` exists only because the queue mechanism itself can jam (a lock holder that will never release) — it is a manual override of the queue, not a replacement for it. And GCP's `remote_state` block does two genuinely different jobs at once (bootstrap the bucket, generate the backend config) — conflating their two key sets is exactly the kind of mistake real `terragrunt render` output catches immediately.
+
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---|---|---|
+| GCS backend's built-in locking | No separate lock table or extra argument to provision (proven above via the backend's own docs) | The exact mechanism is not documented on the page itself — worth stating as a real gap rather than inventing one |
+| `-migrate-state` over `-reconfigure` when the backend location changes | Old state is carried forward — proven above, the resource is still tracked afterward | Requires answering an interactive prompt (or `-input=false` plus care) — easy to fat-finger "no" and lose the link to existing infrastructure |
+| `remote_state`'s `project`/`location` auto-creating the bucket | One block bootstraps infrastructure and generates the backend config together | Those two keys are silently absent from the generated `backend.tf` (proven above) — easy to assume, wrongly, that they are real backend arguments |
+| Partial backend config (`-backend-config`) | Keeps environment-specific values out of committed `.tf` files | The backend block alone, read in isolation, no longer tells you which bucket/prefix state actually lives in — you must also find the `-backend-config` file or CI step |
+
+## Common Misconceptions
+
+- **"`terraform init -reconfigure` is just a safer alias for `-migrate-state`."** Proven above: `-reconfigure` never prompts and never copies state — the very next `plan` shows the tracked resource as "to create" again, because the new backend location was never populated.
+- **"A stale lock is common and `force-unlock` is a routine command."** Proven above via the real `-help` text: it is a manual escape hatch for a lock whose holder is confirmed gone, not a default response to a slow or in-progress `apply`.
+- **"GCS locking works through object generation numbers and versioning, the same way object versioning works."** No fetched HashiCorp documentation page actually states this mechanism — the honest answer, proven above, is that the docs confirm locking is supported without detailing how; asserting the mechanism as fact is exactly the kind of unverifiable claim this course avoids.
+- **"`remote_state`'s `project` and `location` end up in the generated `backend.tf`, since they're in the same `config` map as `bucket`/`prefix`."** Proven above with real generated output: only `bucket` and `prefix` appear. `project`/`location` are consumed entirely by Terragrunt's own bucket-bootstrap step and have no equivalent field in the `gcs` backend block's schema.
+
+## Reading AI-generated code
+
+When reviewing generated backend configuration or migration scripts, check for:
+
+- A confident, specific claim about how GCS implements backend locking internally (object generation numbers, a specific precondition mechanism) presented as fact — proven above, no fetched HashiCorp page documents the mechanism; state that gap rather than inventing a plausible internal.
+- `terraform init -reconfigure` used in a runbook step that is supposed to preserve existing state — proven above, `-reconfigure` does not migrate state at all; the correct flag for that intent is `-migrate-state`.
+- A CI script that pipes `yes` into every `terraform init` unconditionally to avoid interactive prompts, including the `-migrate-state` "copy existing state?" prompt — that answer needs to be a deliberate `yes` (this environment really is a location change) or the script risks silently copying state into the wrong place.
+- `force-unlock` called with a made-up or copy-pasted-from-a-tutorial lock ID rather than the one printed in the actual "state is locked" error for the run in question.
+- A Terragrunt `remote_state` block whose generated `backend.tf` is assumed to contain `project`/`location` (because they're in the same `config` map) — proven above, they are silently dropped; any downstream tooling that tries to read them out of the generated file will find nothing there.
+
+<SpotTheBug code={`# CI "cleanup" step run before every apply, to avoid ever seeing a locked-state error
+terraform force-unlock -force $(cat last-known-lock-id.txt)
+terraform apply -auto-approve`}>
+This runs `force-unlock` unconditionally before every `apply`, using a lock ID cached from some previous run rather than the ID of any lock that actually exists right now. Proven above: `force-unlock` "will not modify your infrastructure" by itself, but blindly releasing a lock that is currently, legitimately held — by a teammate's in-progress `apply`, or a concurrent CI run — removes the one protection state locking provides. The next line's `apply` can now race directly against whatever was holding that lock, which is precisely the corrupted-write scenario locking exists to prevent. The correct use of `force-unlock` is reactive and manual: read the actual "state is locked" error for the ID it names, confirm independently that the holder is gone, and only then unlock that specific ID — never a pre-emptive step in a script that runs regardless of whether anything is actually locked.
+</SpotTheBug>
+
 <Callout title="The one-line takeaway">
-A **remote backend** like GCS gives every teammate and every CI run the same canonical copy of state, instead of each machine holding its own diverging local file. **Locking** on the GCS backend is **built in** — Cloud Storage's own object generation and versioning mechanism prevents two concurrent `apply` runs from writing to the same state object at once, and there is no separate lock table or extra argument required to enable it. This prevents state corruption and silently dropped changes without any additional infrastructure to manage.
+A **remote backend** like GCS gives every teammate and every CI run the same canonical copy of state, instead of each machine holding its own diverging local file. **Locking** on the GCS backend needs no separate lock table or extra argument — proven above, the docs confirm support without detailing the mechanism, and this lesson states that gap honestly rather than inventing one. `terraform init -migrate-state` carries old state to a new backend location (proven above, a real interactive copy); `-reconfigure` does not (proven above, the next `plan` recreates everything). `force-unlock` is a manual escape hatch for a confirmed-stale lock, never a routine step. Terragrunt's `remote_state` block generates a correct `backend.tf` automatically — but proven above with real output, its `project`/`location` keys bootstrap the bucket and never appear in the generated file; only `bucket` and `prefix` do.
 </Callout>
 
 export const quizBackends = [
@@ -77,26 +264,62 @@ export const quizBackends = [
       'Local state files cannot store more than one resource',
     ],
     answer: 1,
+    explain: 'A local backend has no shared location — each machine only sees what it itself applied. A second laptop with a stale or empty local state either tries to recreate existing resources or produces a plan that makes no sense next to reality.',
   },
   {
     q: 'What extra resource or argument does the GCS backend need configured to enable state locking',
     options: [
       'A separate lock table resource, similar to a DynamoDB table',
-      'Nothing extra. Locking is built into the GCS backend using Cloud Storage object generation and versioning, with no separate lock resource or argument required',
+      'Nothing extra. Locking is supported by the backend itself with no separate lock resource or argument required — its own docs confirm support without detailing the internal mechanism',
       'The use_lockfile argument set to true',
       'A Cloud KMS key dedicated to lock coordination',
     ],
     answer: 1,
+    explain: 'Fetched directly from developer.hashicorp.com/terraform/language/backend/gcs: the only locking statement on the page is "this backend supports state locking" — no mechanism is named, unlike the S3 or azurerm pages. Nothing extra needs to be configured either way.',
   },
   {
-    q: 'What does state locking actually prevent',
+    q: '```text\n$ terraform init -reconfigure\nInitializing the backend...\n\nSuccessfully configured the backend "local"! Terraform will automatically\nuse this backend unless the backend configuration changes.\n```\nNo migration prompt appeared at all. What does the very next `terraform plan` show, proven above?',
     options: [
-      'It prevents anyone from ever running terraform plan',
-      'It prevents two concurrent apply runs from writing to the same state file at the same time, which could corrupt it or silently drop changes',
-      'It prevents Terraform from reading the state file at all',
-      'It prevents resources from being destroyed accidentally',
+      'No changes — state was silently migrated in the background',
+      'The tracked resource shown as "will be created" — -reconfigure does not copy old state into the new backend location',
+      'An error saying the backend is not yet initialized',
+      'A prompt asking to confirm the migration retroactively',
     ],
     answer: 1,
+    explain: 'Proven above: after -reconfigure pointed at a fresh, empty backend location, `terraform plan` showed `# local_file.config will be created` — the resource Terraform previously tracked is now invisible to it, unlike -migrate-state which explicitly copies it over.',
+  },
+  {
+    q: 'A Terragrunt root.hcl has a remote_state block with backend = "gcs" and config = { project = "...", location = "...", bucket = "...", prefix = "..." }. According to the real generated backend.tf proven in this lesson, which keys land in the generated file?',
+    options: [
+      'All four keys, since generate copies the entire config map verbatim',
+      'Only bucket and prefix — project and location are consumed by Terragrunt to auto-create the bucket, not emitted into the backend block',
+      'Only project and location, since those identify where the bucket lives',
+      'None — GCS remote_state cannot generate a backend.tf',
+    ],
+    answer: 1,
+    explain: 'Proven with real terragrunt run -- init -backend=false output: the generated backend.tf for a gcs remote_state contains only bucket and prefix. project/location are used for the bucket auto-create step, not part of the backend block\'s own schema — generating them would produce an invalid gcs backend block.',
+  },
+  {
+    q: 'What is the correct time to run terraform force-unlock, based on the real -help text proven above?',
+    options: [
+      'Any time an apply seems to be taking too long',
+      'Only after independently confirming the process holding the lock is genuinely gone, using the specific lock ID printed in the actual "state is locked" error',
+      'As a routine first step before every apply, to guarantee no lock blocks it',
+      'Only on local backends, since the help text mentions them specifically',
+    ],
+    answer: 1,
+    explain: 'force-unlock takes a specific LOCK_ID, not a blanket unlock — that ID is meant to come from a real "state is locked" error naming an actually-held lock. Using it pre-emptively or on a guessed ID risks releasing a lock a legitimate concurrent run still needs.',
+  },
+  {
+    q: 'Why is it worth stating "the GCS backend docs do not detail the locking mechanism" instead of describing a specific mechanism confidently?',
+    options: [
+      'Because GCS does not actually support locking at all',
+      'Because the fetched HashiCorp page for the gcs backend only says "this backend supports state locking" with no further detail, unlike the S3 (use_lockfile) or azurerm (blob lease) pages — asserting a specific mechanism would be an unverifiable claim',
+      'Because Google, not HashiCorp, documents this and the page was not checked',
+      'Because locking behavior changes on every Terraform release',
+    ],
+    answer: 1,
+    explain: 'Proven above by directly fetching the page: the S3 and azurerm backend docs each name their locking mechanism explicitly, but the gcs backend page does not. This course states real gaps in documentation rather than inventing plausible-sounding internals to fill them.',
   },
 ];
 
