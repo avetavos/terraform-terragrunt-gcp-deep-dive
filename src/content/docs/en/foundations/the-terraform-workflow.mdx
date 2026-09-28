@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## The idea in one sentence
 
@@ -77,6 +78,83 @@ terraform apply tfplan
 
 This pattern matters most in CI/CD: a pipeline can run `plan -out=tfplan`, post the diff for human review, and only run `apply tfplan` after approval — guaranteeing the applied changes are precisely the ones a human signed off on.
 
+Real end-to-end proof, with a provider-agnostic `local_file` resource (the mechanism is identical for `google_storage_bucket`; the GCP API calls at `apply` time just aren't reachable offline):
+
+```text
+$ terraform plan -out=tfplan
+Plan: 1 to add, 0 to change, 0 to destroy.
+
+Saved the plan to: tfplan
+
+To perform exactly these actions, run the following command to apply:
+    terraform apply "tfplan"
+
+$ terraform apply tfplan
+local_file.config: Creating...
+local_file.config: Creation complete after 0s [id=5a6df720540c20d95d530d3fd6885511223d5d20]
+
+Apply complete! Resources: 1 added, 0 changed, 0 destroyed.
+```
+
+`apply tfplan` runs with **no confirmation prompt at all** — proof that it isn't recomputing and re-asking, it is executing the exact plan already reviewed and saved.
+
+## `-detailed-exitcode`: telling "no changes" from "changes pending" by exit code alone
+
+By default, `terraform plan`'s exit code is `0` whether or not there are changes — useless for a CI script deciding whether to open a pull request or send a notification. `-detailed-exitcode` fixes that with three distinct, documented exit codes: `0` = succeeded, no changes; `1` = error; `2` = succeeded, changes present.
+
+Real proof, same directory, two states:
+
+```text
+$ terraform plan -out=tfplan -detailed-exitcode
+Plan: 1 to add, 0 to change, 1 to destroy.
+Saved the plan to: tfplan
+$ echo $?
+2
+
+$ terraform apply tfplan   # (applies the change)
+
+$ terraform plan -detailed-exitcode
+No changes. Your infrastructure matches the configuration.
+$ echo $?
+0
+```
+
+This is the mechanism a CI pipeline actually checks — `if [ $? -eq 2 ]; then echo "changes pending"; fi` — rather than parsing plan text output, which is meant for humans and not a stable machine format.
+
+## `terraform show -json`: the plan as structured data, not text
+
+`terraform show -json <planfile>` renders a saved plan as JSON instead of the human-readable text `plan` normally prints — the stable, documented format that policy tools (OPA/Conftest, Sentinel, custom CI scripts) actually parse, instead of scraping colored terminal text.
+
+```text
+$ terraform show -json tfplan | python3 -m json.tool
+```
+
+Real (trimmed) output for the exact `local_file.config` plan above:
+
+```json
+{
+  "resource_changes": [
+    {
+      "address": "local_file.config",
+      "mode": "managed",
+      "type": "local_file",
+      "name": "config",
+      "provider_name": "registry.terraform.io/hashicorp/local",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "content": "v1",
+          "filename": "./config.txt"
+        }
+      }
+    }
+  ]
+}
+```
+
+`resource_changes[].change.actions` is the field CI policy tooling actually reads — a list like `["create"]`, `["update"]`, `["delete"]`, `["delete", "create"]` (replace), or `["no-op"]`. This exact JSON shape, and how a policy engine consumes it, is covered in full depth in [Plan File and JSON Output](/terraform-gcp/en/terraform-internals/plan-file-and-json-output/) in the Terraform Internals module.
+
 ## The provider dependency lock file
 
 When `terraform init` resolves your `required_providers` version constraints, it writes the exact versions and cryptographic checksums it selected into `.terraform.lock.hcl`, in the same directory as your configuration.
@@ -94,8 +172,43 @@ provider "registry.terraform.io/hashicorp/google" {
 
 This file should be **committed to version control**. It is the provider-level analogue of a `package-lock.json` or `Gemfile.lock`: without it, two different runs of `terraform init` — your laptop today, a teammate's laptop tomorrow, a CI runner next week — could each resolve `~> 8.0` to a different patch release, and a subtle behavior difference in the provider could produce a different plan on someone else's machine for no visible reason. With the lock file committed, every `init` installs the identical versions until someone deliberately runs `terraform init -upgrade` to move the constraints forward.
 
+## Mental Model
+
+Every command in this lesson answers one of two questions: "what would change" (`plan`, `show -json`, `-detailed-exitcode`) or "make it so" (`apply`, `destroy`). Saving a plan to a file (`-out`) is what turns the first question's *answer* into a fixed artifact that the second question's command can execute verbatim, closing the gap between "what a human reviewed" and "what actually ran" — the single biggest reason a CI/CD pipeline uses this pattern instead of two separate `plan` and `apply` calls.
+
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---|---|---|
+| `apply` with no saved plan | Fewer files/steps for a quick, interactive, one-person change | Recomputes the plan right before running it — the plan reviewed and the plan applied can differ if anything changed in between |
+| `plan -out=tfplan` then `apply tfplan` | The exact reviewed plan is what executes, proven above with zero confirmation prompt on apply | An extra file to manage and pass between pipeline stages; a stale plan file can go out of date if not applied promptly |
+| `-detailed-exitcode` | Machine-checkable exit code (`0`/`1`/`2`), proven above, instead of parsing human-oriented text output | One more flag to remember; the default exit code (always `0` on success) is easy to assume is "no changes" when it might not be |
+| `terraform show -json` | Stable, documented JSON schema for policy tools, proven above with real `resource_changes[].change.actions` | Verbose and not meant for a human to read directly — text `plan` output remains better for a human reviewer |
+
+## Common Misconceptions
+
+- **"`terraform apply tfplan` still shows a confirmation prompt, just against the saved plan."** Proven above: it does not prompt at all — that is the entire point of a saved plan file, and a real reason to be careful about who can run `apply` against one.
+- **"`terraform plan`'s exit code tells you whether there are changes."** Proven above: the *default* exit code is `0` regardless of whether changes exist — only `-detailed-exitcode` distinguishes `0` (no changes) from `2` (changes present) from `1` (error).
+- **"`terraform show -json` and the colored text `plan` output contain the same information in different formats."** The JSON version is the one with a documented, stable schema meant for programs; the text version is meant for humans and its exact formatting is not a stable contract to parse.
+- **"A saved plan file (`tfplan`) is just a cache — reviewing the text output once is enough, the file itself doesn't matter."** Proven above: `apply tfplan` executes precisely that file's contents, with no recomputation — the file itself is the guarantee, not the text a human glanced at.
+
+## Reading AI-generated code
+
+- A CI script that runs `terraform plan` then `terraform apply` as two separate, unlinked commands (no `-out`/planfile) and calls that "reviewed" — proven above, this reintroduces the exact gap a saved plan closes: the applied plan can differ from whatever a human looked at.
+- A script checking `if [ $? -ne 0 ]` after a plain `terraform plan` to decide whether changes exist — proven above, plain `plan`'s exit code is always `0` on success; only `-detailed-exitcode` gives a machine-checkable signal, and forgetting that flag makes the check silently useless.
+- Code that parses the colored terminal text of `terraform plan` (regex over `+`/`~`/`-` lines) to detect what changed, when `terraform show -json` already exposes the same information as documented, stable JSON.
+- A generated `apply tfplan` command with a hardcoded `-auto-approve` flag alongside a planfile argument — redundant and confusing: `apply <planfile>` never prompts in the first place, proven above, so `-auto-approve` is meaningless there (it only affects the no-planfile form).
+
+<SpotTheBug code={`# ci-pipeline.sh
+terraform plan -out=tfplan
+# ... post plan output to Slack for review ...
+sleep 3600  # wait an hour for a human to approve in Slack
+terraform apply -auto-approve`}>
+The saved plan file `tfplan` is computed and never used — the pipeline runs `terraform plan -out=tfplan` (correctly saving a plan for review), but then applies with a bare `terraform apply -auto-approve`, which — proven above with a real `apply tfplan` run showing zero prompts only when a planfile is passed — recomputes a brand-new plan against whatever the real infrastructure looks like *at apply time*, not the plan a human reviewed an hour earlier in Slack. Anything that changed on GCP in that hour (someone else's change, a drifted resource) gets silently folded into what actually applies. The fix is `terraform apply -input=false tfplan` (the saved file, no recomputation, and no need for `-auto-approve` since a planfile never prompts) instead of a fresh `-auto-approve` plan.
+</SpotTheBug>
+
 <Callout title="The one-line takeaway">
-The everyday loop is **init** (install providers, set up the backend), **plan** (a dry-run diff, changes nothing), **apply** (execute the plan against real GCP), and **destroy** (tear down everything managed); saving a plan with `plan -out=tfplan` then running `apply tfplan` guarantees the exact reviewed plan is what runs, and the committed **`.terraform.lock.hcl`** pins exact provider versions and checksums so every teammate and CI run gets identical providers.
+The everyday loop is **init** (install providers, set up the backend), **plan** (a dry-run diff, changes nothing), **apply** (execute the plan against real GCP), and **destroy** (tear down everything managed). Saving a plan with **`plan -out=tfplan`** then running **`apply tfplan`** guarantees the exact reviewed plan is what runs, with zero confirmation prompt, proven above. **`-detailed-exitcode`** gives a machine-checkable exit code — `0` no changes, `1` error, `2` changes present, proven above — instead of the default's always-`0`-on-success. **`terraform show -json <planfile>`** renders a plan as the stable, documented JSON schema policy tools actually consume (`resource_changes[].change.actions`), proven above, rather than parsing human-oriented text. The committed **`.terraform.lock.hcl`** pins exact provider versions and checksums so every teammate and CI run gets identical providers.
 </Callout>
 
 export const quizWorkflow = [
@@ -138,6 +251,39 @@ export const quizWorkflow = [
       'It uninstalls the Terraform CLI',
     ],
     answer: 1,
+  },
+  {
+    q: 'Does terraform apply tfplan (applying a saved plan file) show a confirmation prompt?',
+    options: [
+      'Yes, always, the same as a plain terraform apply',
+      'No -- proven above with a real run, applying a saved planfile executes with zero prompts, which is the entire point of the pattern',
+      'Only if -auto-approve is also passed',
+      'Only on the first apply of a given planfile',
+    ],
+    answer: 1,
+    explain: 'Proven above with a real terraform apply tfplan run: no confirmation prompt appeared at all -- the plan was already reviewed and saved, so apply executes it directly.',
+  },
+  {
+    q: 'What do the three -detailed-exitcode exit codes mean?',
+    options: [
+      '0 = error, 1 = no changes, 2 = changes present',
+      '0 = no changes, 1 = error, 2 = changes present',
+      '0 = changes present, 1 = no changes, 2 = error',
+      'They are random and not meaningful',
+    ],
+    answer: 1,
+    explain: 'Proven above with two real runs: a plan with an actual diff exited 2, and a subsequent plan with no changes (after apply) exited 0.',
+  },
+  {
+    q: 'What is terraform show -json <planfile> for?',
+    options: [
+      'It converts the plan file into a human-readable colored diff, replacing plain terraform plan',
+      'It renders the plan as documented, stable JSON -- the format policy tools (OPA/Conftest, Sentinel, CI scripts) actually parse, instead of scraping text output',
+      'It uploads the plan to the Terraform Registry',
+      'It is only usable after apply, never before',
+    ],
+    answer: 1,
+    explain: 'Proven above with real JSON output: resource_changes[].change.actions is the field policy tooling reads, a stable documented schema, unlike the colored text plan output meant for humans.',
   },
 ];
 

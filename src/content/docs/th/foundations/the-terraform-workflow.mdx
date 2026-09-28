@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## ไอเดียในหนึ่งประโยค
 
@@ -54,7 +55,7 @@ terraform apply
 terraform destroy
 ```
 
-<Mermaid title="The core Terraform workflow, with destroy as a separate path" code={workflowDiagram} />
+<Mermaid title="Terraform workflow หลัก โดย destroy เป็นเส้นทางแยกต่างหาก" code={workflowDiagram} />
 
 export const workflowDiagram = `flowchart LR
   init["terraform init"] --> plan["terraform plan"]
@@ -77,6 +78,83 @@ terraform apply tfplan
 
 รูปแบบนี้สำคัญที่สุดใน CI/CD pipeline สามารถรัน `plan -out=tfplan`, โพสต์ diff ให้คน review และรัน `apply tfplan` หลังได้รับ approve เท่านั้น ทำให้มั่นใจได้ว่าสิ่งที่ apply ไปคือสิ่งที่คนอนุมัติเป๊ะ ๆ
 
+พิสูจน์แบบ end-to-end จริง ด้วย resource `local_file` ที่ไม่ผูกกับ provider ไหน (กลไกเหมือนกันเป๊ะกับ `google_storage_bucket` แค่ GCP API call ตอน `apply` เข้าถึงแบบ offline ไม่ได้):
+
+```text
+$ terraform plan -out=tfplan
+Plan: 1 to add, 0 to change, 0 to destroy.
+
+Saved the plan to: tfplan
+
+To perform exactly these actions, run the following command to apply:
+    terraform apply "tfplan"
+
+$ terraform apply tfplan
+local_file.config: Creating...
+local_file.config: Creation complete after 0s [id=5a6df720540c20d95d530d3fd6885511223d5d20]
+
+Apply complete! Resources: 1 added, 0 changed, 0 destroyed.
+```
+
+`apply tfplan` รันโดย**ไม่มี prompt ยืนยันเลย** — พิสูจน์ว่ามันไม่ได้คำนวณใหม่แล้วถามอีกรอบ แต่รัน plan ที่ review และ save ไว้แล้วตรง ๆ
+
+## `-detailed-exitcode`: แยก "ไม่มีอะไรเปลี่ยน" กับ "มีการเปลี่ยนแปลงรออยู่" ด้วย exit code ล้วน ๆ
+
+โดย default exit code ของ `terraform plan` เป็น `0` ไม่ว่าจะมีการเปลี่ยนแปลงหรือไม่ — ใช้ไม่ได้เลยสำหรับ CI script ที่ต้องตัดสินใจว่าจะเปิด pull request หรือส่ง notification ไหม `-detailed-exitcode` แก้ปัญหานี้ด้วย exit code ที่แยกชัดเจนสามแบบตามเอกสาร: `0` = สำเร็จ ไม่มีการเปลี่ยนแปลง; `1` = error; `2` = สำเร็จ มีการเปลี่ยนแปลงรออยู่
+
+พิสูจน์จริง ไดเรกทอรีเดียวกัน สองสถานะ:
+
+```text
+$ terraform plan -out=tfplan -detailed-exitcode
+Plan: 1 to add, 0 to change, 1 to destroy.
+Saved the plan to: tfplan
+$ echo $?
+2
+
+$ terraform apply tfplan   # (applies the change)
+
+$ terraform plan -detailed-exitcode
+No changes. Your infrastructure matches the configuration.
+$ echo $?
+0
+```
+
+นี่คือกลไกที่ CI pipeline เช็คจริง ๆ — `if [ $? -eq 2 ]; then echo "changes pending"; fi` — แทนที่จะ parse ข้อความ plan output ซึ่งมีไว้ให้มนุษย์อ่าน ไม่ใช่ format ที่คงที่สำหรับโปรแกรม
+
+## `terraform show -json`: plan ในรูปแบบ structured data ไม่ใช่ text
+
+`terraform show -json <planfile>` render plan ที่ save ไว้เป็น JSON แทนที่ text ที่อ่านง่ายที่ `plan` ปกติพิมพ์ — format ที่มีเอกสารรองรับและคงที่ ที่เครื่องมือ policy (OPA/Conftest, Sentinel, CI script เอง) parse จริง ๆ แทนที่จะขูด terminal text ที่มีสี
+
+```text
+$ terraform show -json tfplan | python3 -m json.tool
+```
+
+Output จริง (ตัดให้สั้น) สำหรับ plan ของ `local_file.config` เดียวกันเป๊ะข้างบน:
+
+```json
+{
+  "resource_changes": [
+    {
+      "address": "local_file.config",
+      "mode": "managed",
+      "type": "local_file",
+      "name": "config",
+      "provider_name": "registry.terraform.io/hashicorp/local",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "content": "v1",
+          "filename": "./config.txt"
+        }
+      }
+    }
+  ]
+}
+```
+
+`resource_changes[].change.actions` คือ field ที่ policy tooling ของ CI อ่านจริง ๆ — list อย่าง `["create"]`, `["update"]`, `["delete"]`, `["delete", "create"]` (replace) หรือ `["no-op"]` JSON shape เป๊ะ ๆ นี้ และวิธีที่ policy engine ใช้มัน อธิบายลึกเต็ม ๆ ใน [Plan File and JSON Output](/terraform-gcp/en/terraform-internals/plan-file-and-json-output/) ในโมดูล Terraform Internals
+
 ## Provider dependency lock file
 
 ตอนที่ `terraform init` resolve version constraint ใน `required_providers` Terraform จะเขียนเวอร์ชันที่เลือกและ cryptographic checksum ลงใน `.terraform.lock.hcl` ในไดเรกทอรีเดียวกับ configuration ของคุณ
@@ -94,8 +172,43 @@ provider "registry.terraform.io/hashicorp/google" {
 
 ไฟล์นี้ควร**ถูก commit เข้า version control** เพราะเป็น provider-level analogue ของ `package-lock.json` หรือ `Gemfile.lock` ถ้าไม่มีไฟล์นี้ การรัน `terraform init` แต่ละครั้ง — โน้ตบุ๊กคุณวันนี้ โน้ตบุ๊กเพื่อนร่วมทีมพรุ่งนี้ CI runner สัปดาห์หน้า — อาจ resolve `~> 8.0` ไปคนละ patch release กัน และความต่างเล็ก ๆ ของ behavior ใน provider ก็อาจทำให้เครื่องคนอื่นได้ plan ที่ต่างออกไปโดยไม่มีเหตุผลที่มองเห็น เมื่อ commit lock file ไว้ ทุกครั้งที่ `init` จะติดตั้งเวอร์ชันเดิมเป๊ะ ๆ จนกว่าจะมีคนตั้งใจรัน `terraform init -upgrade` เพื่อขยับ constraint ไปข้างหน้า
 
+## Mental Model
+
+ทุกคำสั่งในบทนี้ตอบคำถามหนึ่งในสองข้อ: "จะเปลี่ยนอะไร" (`plan`, `show -json`, `-detailed-exitcode`) หรือ "ลงมือทำจริง" (`apply`, `destroy`) การ save plan ลงไฟล์ (`-out`) คือสิ่งที่เปลี่ยน*คำตอบ*ของคำถามแรกให้กลายเป็น artifact ตายตัวที่คำสั่งของคำถามที่สองรันตามได้เป๊ะ ปิดช่องว่างระหว่าง "สิ่งที่มนุษย์ review" กับ "สิ่งที่รันจริง" — เหตุผลหลักที่ CI/CD pipeline ใช้รูปแบบนี้แทนที่จะเรียก `plan` กับ `apply` แยกกันสองครั้ง
+
+## Trade-offs
+
+| ตัวเลือก | ข้อดี | ต้นทุน |
+|---|---|---|
+| `apply` โดยไม่ save plan | ขั้นตอน/ไฟล์น้อยกว่าสำหรับการเปลี่ยนแปลงเร็ว ๆ แบบ interactive คนเดียว | คำนวณ plan ใหม่ก่อนรันจริง — plan ที่ review กับ plan ที่ apply อาจต่างกันได้ถ้ามีอะไรเปลี่ยนระหว่างนั้น |
+| `plan -out=tfplan` แล้ว `apply tfplan` | plan ที่ review ไว้คือสิ่งที่รันจริงเป๊ะ พิสูจน์ข้างบนด้วย zero prompt ตอน apply | มีไฟล์เพิ่มต้องจัดการและส่งต่อระหว่าง pipeline stage; plan file ที่เก่าอาจล้าสมัยถ้าไม่รีบ apply |
+| `-detailed-exitcode` | exit code ที่เครื่องเช็คได้ (`0`/`1`/`2`) พิสูจน์ข้างบน แทนการ parse text output ที่มีไว้ให้มนุษย์อ่าน | ต้องจำ flag เพิ่มอีกตัว; exit code default (`0` เสมอตอนสำเร็จ) มักถูกเข้าใจผิดว่าคือ "ไม่มีการเปลี่ยนแปลง" ทั้งที่ไม่ใช่ |
+| `terraform show -json` | JSON schema ที่มีเอกสารรองรับและคงที่สำหรับ policy tool พิสูจน์ข้างบนด้วย `resource_changes[].change.actions` จริง | ยาวและไม่เหมาะให้มนุษย์อ่านตรง ๆ — text `plan` output ยังดีกว่าสำหรับคน review |
+
+## ความเข้าใจผิดที่พบบ่อย
+
+- **"`terraform apply tfplan` ยังแสดง prompt ยืนยัน แค่ยืนยันกับ plan ที่ save ไว้"** พิสูจน์ข้างบนแล้วว่าไม่ prompt เลย — นั่นคือประเด็นสำคัญทั้งหมดของ saved plan file และเป็นเหตุผลจริงที่ควรระวังว่าใครรัน `apply` กับไฟล์นั้นได้บ้าง
+- **"exit code ของ `terraform plan` บอกได้ว่ามีการเปลี่ยนแปลงหรือไม่"** พิสูจน์ข้างบนแล้วว่า exit code *default* เป็น `0` เสมอไม่ว่าจะมีการเปลี่ยนแปลงหรือไม่ — มีแค่ `-detailed-exitcode` เท่านั้นที่แยก `0` (ไม่มีเปลี่ยนแปลง) จาก `2` (มีเปลี่ยนแปลง) จาก `1` (error)
+- **"`terraform show -json` กับ text `plan` output สีสัน มีข้อมูลเดียวกันแค่คนละรูปแบบ"** เวอร์ชัน JSON คือตัวที่มี schema เอกสารรองรับและคงที่สำหรับโปรแกรม ส่วนเวอร์ชัน text มีไว้ให้มนุษย์อ่าน และ format ที่แน่นอนของมันไม่ใช่ contract ที่คงที่สำหรับ parse
+- **"saved plan file (`tfplan`) เป็นแค่ cache — review text output ครั้งเดียวก็พอแล้ว ตัวไฟล์ไม่สำคัญ"** พิสูจน์ข้างบนแล้วว่า `apply tfplan` รันเนื้อหาของไฟล์นั้นเป๊ะ ๆ โดยไม่คำนวณใหม่ — ตัวไฟล์เองคือสิ่งที่การันตี ไม่ใช่ text ที่มนุษย์เหลือบดู
+
+## อ่านโค้ดที่ AI สร้างให้
+
+- CI script ที่รัน `terraform plan` แล้ว `terraform apply` เป็นสองคำสั่งแยกกันไม่เชื่อมโยงกัน (ไม่มี `-out`/planfile) แล้วเรียกว่า "reviewed แล้ว" — พิสูจน์ข้างบนแล้วว่านี่เปิดช่องว่างเดียวกับที่ saved plan ปิดไว้: plan ที่ apply อาจต่างจากที่มนุษย์ดูไป
+- script ที่เช็ค `if [ $? -ne 0 ]` หลังรัน `terraform plan` เฉย ๆ เพื่อตัดสินว่ามีการเปลี่ยนแปลงไหม — พิสูจน์ข้างบนแล้วว่า exit code ของ `plan` เฉย ๆ เป็น `0` เสมอตอนสำเร็จ มีแค่ `-detailed-exitcode` เท่านั้นที่ให้สัญญาณที่เช็คได้จริง ลืม flag นี้ทำให้ check ใช้ไม่ได้แบบเงียบ ๆ
+- โค้ดที่ parse terminal text ของ `terraform plan` ที่มีสี (regex จับบรรทัด `+`/`~`/`-`) เพื่อหาว่าอะไรเปลี่ยน ทั้งที่ `terraform show -json` มีข้อมูลเดียวกันอยู่แล้วเป็น JSON ที่มีเอกสารรองรับและคงที่
+- คำสั่ง `apply tfplan` ที่ generate มาพร้อม `-auto-approve` flag แถมไปด้วยกับ planfile argument — ซ้ำซ้อนและสับสน: `apply <planfile>` ไม่ prompt อยู่แล้วตั้งแต่แรก พิสูจน์ข้างบนแล้ว ดังนั้น `-auto-approve` ไม่มีความหมายตรงนั้นเลย (มันมีผลแค่กับรูปแบบที่ไม่มี planfile)
+
+<SpotTheBug code={`# ci-pipeline.sh
+terraform plan -out=tfplan
+# ... post plan output to Slack for review ...
+sleep 3600  # wait an hour for a human to approve in Slack
+terraform apply -auto-approve`}>
+saved plan file `tfplan` ถูกคำนวณแล้วไม่เคยถูกใช้เลย — pipeline รัน `terraform plan -out=tfplan` (save plan ไว้ให้ review ถูกต้องแล้ว) แต่ apply ด้วย `terraform apply -auto-approve` เปล่า ๆ ซึ่ง — พิสูจน์ข้างบนแล้วด้วยการรัน `apply tfplan` จริงที่ไม่มี prompt เลยเฉพาะตอนส่ง planfile เข้าไปเท่านั้น — คำนวณ plan ใหม่ทั้งหมดกับ infrastructure จริง ณ *เวลาที่ apply* ไม่ใช่ plan ที่มนุษย์ review ไปเมื่อชั่วโมงก่อนใน Slack อะไรก็ตามที่เปลี่ยนบน GCP ในชั่วโมงนั้น (การเปลี่ยนแปลงของคนอื่น, resource ที่ drift) จะถูกพับรวมเข้าไปใน apply แบบเงียบ ๆ ทางแก้คือ `terraform apply -input=false tfplan` (ไฟล์ที่ save ไว้ ไม่คำนวณใหม่ และไม่ต้องมี `-auto-approve` เพราะ planfile ไม่ prompt อยู่แล้ว) แทนที่จะเป็น plan สด ๆ ที่ใช้ `-auto-approve`
+</SpotTheBug>
+
 <Callout title="สรุปหนึ่งบรรทัด">
-loop ที่ใช้ทุกวันคือ **init** (ติดตั้ง provider, เตรียม backend), **plan** (dry-run diff ไม่เปลี่ยนอะไรจริง), **apply** (รัน plan จริงกับ GCP) และ **destroy** (รื้อทุกอย่างที่จัดการอยู่ทิ้ง) การ save plan ด้วย `plan -out=tfplan` แล้วรัน `apply tfplan` การันตีว่า plan ที่ review ไว้คือสิ่งที่รันจริง และ **`.terraform.lock.hcl`** ที่ commit ไว้ pin เวอร์ชันและ checksum ของ provider ให้ทุกคนในทีมและทุก CI run ได้ provider เดียวกันเป๊ะ ๆ
+loop ที่ใช้ทุกวันคือ **init** (ติดตั้ง provider, เตรียม backend), **plan** (dry-run diff ไม่เปลี่ยนอะไรจริง), **apply** (รัน plan จริงกับ GCP) และ **destroy** (รื้อทุกอย่างที่จัดการอยู่ทิ้ง) การ save plan ด้วย **`plan -out=tfplan`** แล้วรัน **`apply tfplan`** การันตีว่า plan ที่ review ไว้คือสิ่งที่รันจริง โดยไม่มี prompt ยืนยันเลย พิสูจน์ข้างบน **`-detailed-exitcode`** ให้ exit code ที่เครื่องเช็คได้ — `0` ไม่มีเปลี่ยนแปลง, `1` error, `2` มีเปลี่ยนแปลง พิสูจน์ข้างบน — แทนที่ default ที่เป็น `0` เสมอตอนสำเร็จ **`terraform show -json <planfile>`** render plan เป็น JSON schema ที่มีเอกสารรองรับและคงที่ที่ policy tool ใช้จริง (`resource_changes[].change.actions`) พิสูจน์ข้างบน แทนที่จะ parse text ที่มีไว้ให้มนุษย์อ่าน **`.terraform.lock.hcl`** ที่ commit ไว้ pin เวอร์ชันและ checksum ของ provider ให้ทุกคนในทีมและทุก CI run ได้ provider เดียวกันเป๊ะ ๆ
 </Callout>
 
 export const quizWorkflow = [
@@ -138,6 +251,39 @@ export const quizWorkflow = [
       'ถอนการติดตั้ง Terraform CLI',
     ],
     answer: 1,
+  },
+  {
+    q: 'terraform apply tfplan (apply saved plan file) แสดง prompt ยืนยันไหม',
+    options: [
+      'แสดง เสมอ เหมือนกับ terraform apply เฉย ๆ',
+      'ไม่แสดง -- พิสูจน์ข้างบนด้วยการรันจริง การ apply saved planfile รันโดยไม่มี prompt เลย ซึ่งคือประเด็นสำคัญทั้งหมดของรูปแบบนี้',
+      'แสดงเฉพาะเมื่อใส่ -auto-approve ด้วย',
+      'แสดงเฉพาะการ apply ครั้งแรกของ planfile นั้น',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ข้างบนด้วยการรัน terraform apply tfplan จริง: ไม่มี prompt ยืนยันโผล่มาเลย -- plan ถูก review และ save ไว้แล้ว apply เลยรันตรง ๆ',
+  },
+  {
+    q: 'exit code สามแบบของ -detailed-exitcode หมายถึงอะไร',
+    options: [
+      '0 = error, 1 = ไม่มีเปลี่ยนแปลง, 2 = มีเปลี่ยนแปลง',
+      '0 = ไม่มีเปลี่ยนแปลง, 1 = error, 2 = มีเปลี่ยนแปลง',
+      '0 = มีเปลี่ยนแปลง, 1 = ไม่มีเปลี่ยนแปลง, 2 = error',
+      'เป็นค่าสุ่มไม่มีความหมาย',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ข้างบนด้วยการรันจริงสองครั้ง: plan ที่มี diff จริงจบด้วย exit 2 และ plan ถัดไปที่ไม่มีเปลี่ยนแปลง (หลัง apply) จบด้วย exit 0',
+  },
+  {
+    q: 'terraform show -json <planfile> มีไว้ทำอะไร',
+    options: [
+      'แปลง plan file เป็น colored diff ที่อ่านง่าย แทนที่ terraform plan ธรรมดา',
+      'render plan เป็น JSON ที่มีเอกสารรองรับและคงที่ -- format ที่ policy tool (OPA/Conftest, Sentinel, CI script) parse จริง แทนที่จะขูด text output',
+      'อัปโหลด plan ไปยัง Terraform Registry',
+      'ใช้ได้เฉพาะหลัง apply เท่านั้น ใช้ก่อนไม่ได้',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ข้างบนด้วย JSON output จริง: resource_changes[].change.actions คือ field ที่ policy tooling อ่าน เป็น schema ที่มีเอกสารรองรับและคงที่ ต่างจาก text plan output ที่มีไว้ให้มนุษย์อ่าน',
   },
 ];
 
