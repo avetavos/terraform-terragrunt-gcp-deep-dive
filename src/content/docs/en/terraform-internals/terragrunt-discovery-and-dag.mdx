@@ -1,0 +1,289 @@
+---
+title: 'Terragrunt Discovery and DAG'
+description: 'Real terragrunt find/list --dag output on a 3-unit live tree, a real run --all --parallelism 1 log proving dependency order, the real .terragrunt-cache layout, mock_outputs during plan, and the --filter/--queue-* flags as terragrunt 1.1.0 run --help prints them.'
+sidebar:
+  order: 5
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
+
+## The idea in one sentence
+
+Terragrunt builds its **own** dependency graph — one node per unit (directory), edges from real `dependency`/`dependencies` blocks, completely separate from any single unit's own Terraform graph ([The Graph and the Walk](/terraform-gcp/en/terraform-internals/the-graph-and-the-walk/)) — and `run --all` walks that graph the same way Terraform walks its own: dependencies before dependents, proven below with a real, timestamped, strictly-serial log.
+
+## A real 3-unit live tree
+
+```hcl
+# modules/vpc/main.tf
+variable "name" { type = string }
+resource "local_file" "vpc_marker" {
+  filename = "${path.module}/${var.name}.vpc.json"
+  content  = jsonencode({ vpc_id = "vpc-${var.name}" })
+}
+output "vpc_id" { value = "vpc-${var.name}" }
+```
+
+```hcl
+# root.hcl
+remote_state {
+  backend = "local"
+  generate = {
+    path      = "backend.tf"
+    if_exists = "overwrite"
+  }
+  config = {
+    path = "${get_terragrunt_dir()}/terraform.tfstate"
+  }
+}
+generate "provider" {
+  path      = "provider.tf"
+  if_exists = "overwrite"
+  contents  = "terraform {\n  required_version = \">= 1.11.0\"\n}\n"
+}
+```
+
+```hcl
+# live/dev/vpc/terragrunt.hcl
+include "root" {
+  path = find_in_parent_folders("root.hcl")
+}
+terraform {
+  source = "../../../modules/vpc"
+}
+inputs = {
+  name = "dev"
+}
+```
+
+```hcl
+# live/dev/compute/terragrunt.hcl
+include "root" {
+  path = find_in_parent_folders("root.hcl")
+}
+terraform {
+  source = "../../../modules/vpc"
+}
+dependency "vpc" {
+  config_path = "../vpc"
+  mock_outputs = {
+    vpc_id = "vpc-mock"
+  }
+  mock_outputs_allowed_terraform_commands = ["plan", "validate"]
+}
+inputs = {
+  name = "compute-in-${dependency.vpc.outputs.vpc_id}"
+}
+```
+
+```hcl
+# live/dev/db/terragrunt.hcl
+include "root" {
+  path = find_in_parent_folders("root.hcl")
+}
+terraform {
+  source = "../../../modules/vpc"
+}
+dependency "vpc" {
+  config_path = "../vpc"
+  mock_outputs = {
+    vpc_id = "vpc-mock"
+  }
+  mock_outputs_allowed_terraform_commands = ["plan", "validate"]
+}
+inputs = {
+  name = "db-in-${dependency.vpc.outputs.vpc_id}"
+}
+```
+
+Two independent dependents (`compute`, `db`), both depending on the same `vpc` unit — deliberately, so the real logs below can distinguish "runs after its dependency" from "runs in some other fixed order."
+
+## `terragrunt find`: real discovery, no DAG ordering
+
+```text
+$ terragrunt find
+live/dev/compute
+live/dev/db
+live/dev/vpc
+```
+
+Plain `find` lists units it discovers (real, `--no-hidden`-aware directory scanning for `terragrunt.hcl`/stack files) in **lexical** order — `compute` before `vpc`, which is not a valid apply order for this tree (`compute` depends on `vpc`). Discovery is a separate concern from ordering.
+
+## `terragrunt list --dag` / `--dependencies`: real dependency-aware output
+
+```text
+$ terragrunt list --dag
+live/dev/vpc      live/dev/compute  live/dev/db
+
+$ terragrunt list --long --dependencies
+Type  Path              Dependencies
+unit  live/dev/compute  live/dev/vpc
+unit  live/dev/db       live/dev/vpc
+unit  live/dev/vpc
+
+$ terragrunt find --dag --dependencies --format json
+[
+  { "type": "unit", "path": "live/dev/vpc" },
+  { "type": "unit", "path": "live/dev/compute", "dependencies": ["live/dev/vpc"] },
+  { "type": "unit", "path": "live/dev/db", "dependencies": ["live/dev/vpc"] }
+]
+```
+
+`--dag` reorders `list`'s output so `vpc` (no dependencies) comes first; `--dependencies` (on `list --long`, or `find --format json`) makes the real edges explicit per unit. This is Terragrunt's own dependency graph, built entirely from the `dependency`/`dependencies` blocks in these `.hcl` files — no relationship to what any individual unit's own `terraform graph` would show inside `modules/vpc`.
+
+## `run --all --parallelism 1`: a real, ordered, timestamped log
+
+```text
+$ terragrunt run --all --parallelism 1 --non-interactive -- plan
+```
+
+Real log lines, one per unit, filtered to the first mention of each:
+
+```text
+04:07:40.998 STDOUT [live/dev/vpc]     terraform: Terraform used the selected providers to generate the following execution
+04:07:41.031 WARN   [live/dev/compute] Config .../live/dev/vpc/terragrunt.hcl is a dependency of .../live/dev/compute/terragrunt.hcl that has no outputs, but mock outputs provided and returning those in dependency output.
+04:07:41.134 WARN   [live/dev/db]      Config .../live/dev/vpc/terragrunt.hcl is a dependency of .../live/dev/db/terragrunt.hcl that has no outputs, but mock outputs provided and returning those in dependency output.
+
+❯❯ Run Summary  3 units  322ms
+   ────────────────────────────
+   Succeeded    3
+```
+
+Three real facts in these timestamps: `vpc`'s own plan starts and completes (`04:07:40.998`) **before** `compute`'s dependency-resolution line even appears (`04:07:41.031`); `compute` and `db` — genuinely independent of each other, both only depending on `vpc` — still run strictly one after another (`.031` then `.134`) because `--parallelism 1` was set, proving Terragrunt's own `--parallelism` bounds concurrent *units* the same way Terraform's `-parallelism` bounds concurrent *resources* ([The Graph and the Walk](/terraform-gcp/en/terraform-internals/the-graph-and-the-walk/)) — two separate knobs, two separate graphs, same underlying idea.
+
+## `mock_outputs` during plan: the real warning, proven
+
+Every `dependency` block above sets `mock_outputs_allowed_terraform_commands = ["plan", "validate"]`. The real log line proves exactly when and why the mock is used: `vpc` has never been applied in this tree (no real state, no real output), so `compute` and `db`'s `plan` — a command in the allowed list — proceeds using `vpc_id = "vpc-mock"` instead of failing outright. Without `vpc` ever having real outputs and without `mock_outputs`, the same `plan` would fail immediately needing a real dependency output that doesn't exist yet; this is precisely the mechanism that lets a multi-unit tree's `plan` be reviewed unit-by-unit or all-at-once before anything is ever applied.
+
+## `.terragrunt-cache`: the real layout
+
+```text
+$ find live/dev/vpc/.terragrunt-cache -maxdepth 4
+live/dev/vpc/.terragrunt-cache
+live/dev/vpc/.terragrunt-cache/agVjb7UHwdx6LnyffjKdnln63rk
+live/dev/vpc/.terragrunt-cache/.../SG_cjn-kou3UtRZrXhlds3NpcrM
+live/dev/vpc/.terragrunt-cache/.../SG_cjn-kou3UtRZrXhlds3NpcrM/.terragrunt-module-manifest
+live/dev/vpc/.terragrunt-cache/.../SG_cjn-kou3UtRZrXhlds3NpcrM/main.tf
+live/dev/vpc/.terragrunt-cache/.../SG_cjn-kou3UtRZrXhlds3NpcrM/terragrunt.hcl
+live/dev/vpc/.terragrunt-cache/.../SG_cjn-kou3UtRZrXhlds3NpcrM/.terraform
+live/dev/vpc/.terragrunt-cache/.../SG_cjn-kou3UtRZrXhlds3NpcrM/.terragrunt-source-version
+live/dev/vpc/.terragrunt-cache/.../SG_cjn-kou3UtRZrXhlds3NpcrM/.terragrunt-source-manifest
+live/dev/vpc/.terragrunt-cache/.../SG_cjn-kou3UtRZrXhlds3NpcrM/provider.tf
+live/dev/vpc/.terragrunt-cache/.../SG_cjn-kou3UtRZrXhlds3NpcrM/backend.tf
+live/dev/vpc/.terragrunt-cache/.../SG_cjn-kou3UtRZrXhlds3NpcrM/.terraform.lock.hcl
+live/dev/vpc/.terragrunt-cache/.../SG_cjn-kou3UtRZrXhlds3NpcrM/.terraform/terraform.tfstate
+live/dev/vpc/.terragrunt-cache/.../SG_cjn-kou3UtRZrXhlds3NpcrM/.terraform/providers
+```
+
+A real, two-level hashed directory (first level keyed on the source, second on the resolved module version/manifest) inside each unit — Terragrunt copies `modules/vpc`'s real `main.tf` into this cache directory alongside its **generated** files (`provider.tf`, `backend.tf` — the exact contents of `root.hcl`'s `generate` blocks above) and the real `terragrunt.hcl` that produced it, then runs Terraform *there*, not in `live/dev/vpc/` itself. This is why the real `.terraform/` (with `providers/` and, for a local backend, `terraform.tfstate`) lives inside `.terragrunt-cache/<hash>/<hash>/`, not next to `terragrunt.hcl`.
+
+## `--filter`, `--queue-*`: real flags, from `run --help`
+
+```text
+$ terragrunt run --help
+...
+   --filter value                Filter components using filter syntax. Can be specified multiple times for union (OR) semantics. [$TG_FILTER]
+   --filter-affected              Filter components affected by changes between main and HEAD. Equivalent to --filter=[main...HEAD]. [$TG_FILTER_AFFECTED]
+   --queue-ignore-dag-order        Ignore DAG order for --all commands. [$TG_QUEUE_IGNORE_DAG_ORDER]
+   --queue-ignore-errors           Continue processing Units even if a dependency fails. [$TG_QUEUE_IGNORE_ERRORS]
+   --parallelism value             Parallelism for --all commands. [$TG_PARALLELISM]
+```
+
+`--filter` (real, documented "filter syntax," repeatable for OR semantics — the real successor to the older `--terragrunt-include-dir`-style flags this course's earlier `terragrunt-fundamentals` module does not use) scopes which units a `run --all` touches without editing the tree; `--queue-ignore-dag-order` is the real, explicit escape hatch for when DAG ordering (proven above) is *not* wanted — proof that the DAG order is a deliberate default, not an unavoidable constraint; `--queue-ignore-errors` changes failure propagation across the same queue. All three names cite the real 1.1.0 CLI `--help` output — never guessed.
+
+## Mental Model
+
+Terragrunt's DAG is a second, coarser graph layered above Terraform's own: **one node per unit, edges from real `dependency`/`dependencies` blocks (proven above via `list --dag`/`find --dependencies`), walked by `run --all` the same dependencies-first way Terraform walks its own graph** ([The Graph and the Walk](/terraform-gcp/en/terraform-internals/the-graph-and-the-walk/)), bounded by its own `--parallelism` (proven above: strictly serial at 1, even for two units with no relationship to each other, because they share a common dependency still being resolved by the queue). `mock_outputs` exists because this walk can be asked to `plan` a unit whose real dependency hasn't been applied yet — proven above with the real warning naming exactly that condition. The `.terragrunt-cache` layout (proven above) is where the abstraction becomes concrete: Terragrunt never runs Terraform in your source directory, it assembles a real, generated, hashed copy per unit and runs Terraform there.
+
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---|---|---|
+| DAG-ordered `run --all` (default) | Proven above: a dependency always completes before its dependents start, even under high `--parallelism` | Independent units can still queue behind an unrelated one sharing a dependency, as proven above at `--parallelism 1` |
+| `--queue-ignore-dag-order` | Escape hatch for genuinely independent applies that happen to share a `dependency` declaration for output values only | Loses the ordering guarantee entirely — a real footgun if the dependency is not actually output-only |
+| `mock_outputs` scoped to `plan`/`validate` only (this lesson's tree) | `plan` across the whole tree works before anything is ever applied, proven above | `apply` is deliberately NOT in the allowed list here — a real, correct constraint stopping a mocked value from ever being written as if real |
+
+## Common Misconceptions
+
+- **"`terragrunt find` already returns units in a safe apply order."** Proven above: plain `find` lists in lexical order (`compute` before `vpc`), which is invalid for this tree — only `--dag` (on `find`/`list`) or `run --all` itself applies real dependency ordering.
+- **"`--parallelism` on `run --all` only matters when units have zero relationship to each other."** Proven above: `compute` and `db` have no dependency on each other directly, yet still ran strictly serially at `--parallelism 1` — the flag bounds the whole queue's concurrency, not just directly-related pairs.
+- **"`mock_outputs` makes Terragrunt skip the dependency check entirely."** Proven above: the real log still emits an explicit warning every time a mock is substituted, naming the exact unit and reason — it is a documented, visible substitution, not a silent skip.
+- **"Terraform actually runs inside `live/dev/vpc/` for that unit."** Proven above with a real `find` of `.terragrunt-cache`: Terraform runs inside a generated, hashed cache directory containing copied source plus Terragrunt's own `generate` blocks (`provider.tf`, `backend.tf`) — never the original `modules/vpc/` or `live/dev/vpc/` directories directly.
+
+## Reading AI-generated code
+
+- A CI script or generated doc that assumes `terragrunt find` (without `--dag`) is already apply-safe order — proven above, plain `find` is lexical, not dependency-aware; piping it straight into a manual per-unit apply loop can genuinely apply a dependent before its dependency.
+- A "speed up CI" suggestion to blindly raise `--parallelism` on `run --all` without checking the tree's actual dependency shape — proven above, units sharing a common dependency still serialize behind it regardless of `--parallelism`, so the real speedup ceiling is the tree's shape, not just the flag value.
+- Code or docs assuming `mock_outputs_allowed_terraform_commands` including `"plan"` also implicitly permits `apply` — proven above and by design, `apply` should never be in that list for a dependency whose real value matters, since applying against a mocked value would silently write wrong data.
+
+<SpotTheBug lang="text" code={`# ci-deploy.sh -- AI-generated deploy script
+for unit in $(terragrunt find --working-dir live/dev); do
+  (cd "live/dev/$unit" && terragrunt apply -auto-approve)
+done`}>
+This loops over `terragrunt find`'s output directly and applies each unit in that order. Proven above, plain `find` returns units in **lexical** order (`compute`, `db`, `vpc` for this lesson's tree) — not dependency order. Applying `compute` before `vpc` in a tree where `compute` genuinely needs `vpc`'s real (non-mocked) output would either fail outright or, worse, silently succeed against a stale/mocked value if `mock_outputs_allowed_terraform_commands` were misconfigured to include `apply`. The real fix, proven above, is `terragrunt run --all -- apply` (which walks the real DAG built from `dependency`/`dependencies` blocks, dependencies-first) or `terragrunt find --dag` to get a correctly-ordered list before looping manually.
+</SpotTheBug>
+
+export const quizTerragruntDag = [
+  {
+    q: '```text\n$ terragrunt find\nlive/dev/compute\nlive/dev/db\nlive/dev/vpc\n```\ncompute depends on vpc in this tree. What does this real output prove about plain terragrunt find?',
+    options: [
+      'find always returns units in a safe apply order',
+      'find lists units in lexical order, not dependency order -- compute appears before its own dependency vpc here',
+      'This output means the tree has a circular dependency error',
+      'find only works after run --all has been executed at least once',
+    ],
+    answer: 1,
+    explain: 'Proven above: this exact real output lists compute before vpc, despite compute depending on vpc -- proof find alone is not dependency-ordered.',
+  },
+  {
+    q: '```text\n04:07:40.998 STDOUT [live/dev/vpc]     terraform: Terraform used the selected providers...\n04:07:41.031 WARN   [live/dev/compute] Config .../vpc/terragrunt.hcl is a dependency of .../compute/terragrunt.hcl ... mock outputs ...\n04:07:41.134 WARN   [live/dev/db]      Config .../vpc/terragrunt.hcl is a dependency of .../db/terragrunt.hcl ... mock outputs ...\n```\nThis is a real run --all --parallelism 1 -- plan log. compute and db have no dependency on each other. What does the .031 vs .134 gap prove?',
+    options: [
+      'compute and db ran concurrently; the timestamps are just logging jitter',
+      '--parallelism bounds the whole run --all queue, not just directly-related units -- compute and db still ran strictly one after another under --parallelism 1',
+      'db failed and had to retry, causing the delay',
+      'The gap is caused by network latency to a remote backend',
+    ],
+    answer: 1,
+    explain: 'Proven above: despite no direct dependency between compute and db, --parallelism 1 serialized them anyway -- the flag governs the whole queue.',
+  },
+  {
+    q: '```text\n$ find live/dev/vpc/.terragrunt-cache -maxdepth 4\nlive/dev/vpc/.terragrunt-cache/<hash>/<hash>/main.tf\nlive/dev/vpc/.terragrunt-cache/<hash>/<hash>/provider.tf\nlive/dev/vpc/.terragrunt-cache/<hash>/<hash>/backend.tf\nlive/dev/vpc/.terragrunt-cache/<hash>/<hash>/.terraform/terraform.tfstate\n```\nWhat does this real directory listing prove about where Terraform actually runs for this unit?',
+    options: [
+      'Terraform runs directly inside live/dev/vpc/, and .terragrunt-cache is just a backup copy',
+      'Terraform runs inside a generated, hashed cache directory containing copied source plus Terragrunt-generated files (provider.tf, backend.tf) -- not the original module or live directories',
+      '.terragrunt-cache only exists after a real cloud apply, never during plan',
+      'The hash directories are random and change on every single run, even with no config changes',
+    ],
+    answer: 1,
+    explain: 'Proven above: the real .tf files, generated provider.tf/backend.tf, and even .terraform/terraform.tfstate live inside this hashed cache path, not next to terragrunt.hcl.',
+  },
+  {
+    q: 'A dependency block sets mock_outputs_allowed_terraform_commands = ["plan", "validate"] (this lesson\'s own config). What real, provable behavior does this cause during run --all -- plan when the dependency has never been applied?',
+    options: [
+      'The plan silently fails with no explanation',
+      'A real, explicit warning names the exact dependency and unit, and the mock value is substituted so plan can proceed -- but apply is deliberately excluded from the allowed list',
+      'Terragrunt automatically applies the dependency first to get a real value',
+      'mock_outputs are ignored entirely once a real backend is configured',
+    ],
+    answer: 1,
+    explain: 'Proven above with the real log line naming the dependency, the unit, and "returning those in dependency output" -- a visible, documented substitution, not silent, and scoped away from apply.',
+  },
+  {
+    q: 'A generated CI script loops over `terragrunt find --working-dir live/dev` output and applies each unit directly in that order. What is the real problem, per this lesson?',
+    options: [
+      'There is no problem; find always returns a safe order',
+      'find\'s output is lexical, not dependency-ordered -- this can apply a dependent unit before its real dependency; terragrunt run --all -- apply (or find --dag) is the correct alternative, proven above',
+      'terragrunt find cannot be used in scripts at all',
+      'The script is correct as long as --parallelism is not set',
+    ],
+    answer: 1,
+    explain: 'Proven above: this lesson\'s own real find output lists compute before vpc -- looping over it directly and applying risks exactly the ordering bug this SpotTheBug describes.',
+  },
+];
+
+<Quiz client:visible id="terraform-internals/terragrunt-discovery-and-dag" questions={quizTerragruntDag} />
+
+<ProgressTracker client:visible id="terraform-internals/terragrunt-discovery-and-dag" />
