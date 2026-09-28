@@ -1,0 +1,225 @@
+---
+title: 'State File Anatomy'
+description: 'The state file at the schema level -- version, serial, lineage, per-resource schema_version -- proven with a real terraform state pull, a real terraform state push refusal on stale serial and mismatched lineage, state replace-provider, and show -json vs raw state.'
+sidebar:
+  order: 2
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
+
+## The idea in one sentence
+
+`terraform.tfstate` is not just "JSON that maps resources to IDs" — it is a **versioned document** with a `serial` that increments on every write and a `lineage` UUID that identifies which state history it belongs to, and a real `terraform state push` **refuses**, with a specific real error, to overwrite state with anything older or unrelated.
+
+<Callout title="Builds on The State File">
+[The State File](/terraform-gcp/en/state-management/the-state-file/) already covers *why* state exists and *why* it must never be committed to git. This lesson goes past that framing into the schema itself, the enforcement that protects it from concurrent corruption, and the tooling (`state pull`/`push`/`replace-provider`, `show -json`) that operates on it directly.
+</Callout>
+
+## The top-level schema, real
+
+Reusing this module's own [graph demo](/terraform-gcp/en/terraform-internals/the-graph-and-the-walk/) config (`random_pet.name`, `local_file.greeting`, `terraform_data.after_file`) after a real `terraform apply`, a real `terraform state pull`:
+
+```text
+$ terraform state pull
+{
+  "version": 4,
+  "terraform_version": "1.16.4",
+  "serial": 4,
+  "lineage": "4dd73a2e-c225-ef0e-a8b4-7105ae82d1ca",
+  "outputs": {},
+  "resources": [
+    {
+      "mode": "managed",
+      "type": "local_file",
+      "name": "greeting",
+      "provider": "provider[\"registry.terraform.io/hashicorp/local\"]",
+      "instances": [
+        {
+          "schema_version": 0,
+          "attributes": { "content": "hello firm-krill", "filename": "./greeting.txt", "id": "731418e9e5cf7c65895eca44c56cec7b2335219c", ... },
+          "sensitive_attributes": [...]
+        }
+      ]
+    },
+    ...
+  ]
+}
+```
+
+Five fields matter more than the rest:
+
+| Field | What it actually is |
+|---|---|
+| `version` | The **state file format** version (currently `4`, stable since Terraform 0.12) — not the Terraform CLI version |
+| `terraform_version` | The CLI version that last wrote this file, recorded for diagnostics |
+| `serial` | An integer that increments on **every** write to this state, in this lineage |
+| `lineage` | A UUID generated once, the first time this state is created, and never changed thereafter |
+| `resources[].instances[].schema_version` | Per-**resource-type** schema version (proven below: `0` for `local_file`, `random_pet`, and `terraform_data` at the versions this course pins) |
+
+## `serial`/`lineage`: proven with a real refusal, not a claim
+
+`serial` and `lineage` exist to answer one question safely: "is the state I'm about to write actually a continuation of the state that's there now, or did something go wrong?" A real `terraform state push` enforces both, and refuses outright rather than silently merging or overwriting.
+
+First, a real push with the **lineage tampered** to an unrelated UUID:
+
+```text
+$ python3 -c "import json; d=json.load(open('state.orig.json')); d['lineage']='00000000-0000-0000-0000-000000000000'; json.dump(d, open('state.badlineage.json','w'))"
+$ terraform state push state.badlineage.json
+Failed to write state: cannot import state with lineage "00000000-0000-0000-0000-000000000000" over unrelated state with lineage "4dd73a2e-c225-ef0e-a8b4-7105ae82d1ca"
+```
+
+Second, a real push with the **same lineage** but a `serial` rolled back to `1`, while the backend is actually at `4`:
+
+```text
+$ python3 -c "import json; d=json.load(open('state.orig.json')); d['serial']=1; json.dump(d, open('state.staleserial.json','w'))"
+$ terraform state push state.staleserial.json
+Failed to write state: cannot import state with serial 1 over newer state with serial 4
+```
+
+Both refusals name the exact values in conflict. This is the real mechanism that protects a shared remote backend from two people (or a stale local copy) clobbering each other's work — not a convention, not a lock alone (locking, covered in [Remote Backends and Locking](/terraform-gcp/en/state-management/remote-backends-and-locking/), stops *concurrent* writes; `serial`/`lineage` stops a *sequential* write from an outdated or foreign copy, which a lock cannot detect on its own).
+
+## `terraform state replace-provider`: a real run
+
+Changing which provider FQN owns a set of resources in state — the documented use case is migrating to a provider registry mirror or a renamed provider source, without touching the resources themselves. Real `-help` and a real run against this lesson's state:
+
+```text
+$ terraform state replace-provider -help
+Usage: terraform [global options] state replace-provider [options] FROM_PROVIDER_FQN TO_PROVIDER_FQN
+
+  Replace provider for resources in the Terraform state.
+
+Options:
+  -auto-approve           Skip interactive approval.
+  -lock=false             Don't hold a state lock during the operation.
+  ...
+
+$ terraform state replace-provider -auto-approve hashicorp/local registry.example.com/hashicorp/local
+Terraform will perform the following actions:
+  ~ Updating provider:
+    - registry.terraform.io/hashicorp/local
+    + registry.example.com/hashicorp/local
+
+Changing 1 resources:
+  local_file.greeting
+
+Successfully replaced provider for 1 resources.
+```
+
+Confirmed directly in the pulled state afterward — only `local_file.greeting`'s provider FQN changed, nothing else:
+
+```text
+$ terraform state pull | python3 -c "import json,sys; print(set(r['provider'] for r in json.load(sys.stdin)['resources']))"
+{'provider["registry.terraform.io/hashicorp/random"]', 'provider["registry.example.com/hashicorp/local"]', 'provider["terraform.io/builtin/terraform"]'}
+```
+
+This rewrites **state metadata only** — it never touches the real infrastructure and never re-runs any provider RPC; it is purely an edit to which `provider[...]` string each resource's state entry records.
+
+## `terraform show -json` vs raw state: two different documents
+
+`terraform state pull` (or reading `terraform.tfstate` directly for a local backend) gives you the raw state document above. `terraform show -json` (with no plan file argument) gives you a **different**, purpose-built read-only document derived from the current state:
+
+```text
+$ terraform show -json | python3 -c "import json,sys; d=json.load(sys.stdin); print(list(d.keys())); print(d['format_version'])"
+['format_version', 'terraform_version', 'values']
+1.0
+```
+
+Raw state is what Terraform reads and writes as its working record (`version`, `serial`, `lineage`, per-instance `schema_version`, `sensitive_attributes`, provider FQNs). `show -json`'s `values.root_module.resources[]` is a flattened, tooling-friendly view of the *current* values only — no `serial`, no `lineage`, no schema versions — meant for external consumption ([Plan File and JSON Output](/terraform-gcp/en/terraform-internals/plan-file-and-json-output/) covers the sibling `show -json` output for a *plan* file, which is structurally different again, adding `resource_changes`).
+
+## Mental Model
+
+Treat `terraform.tfstate` as a **single-writer document with a version counter**, not a cache: `lineage` says "which document's history is this," `serial` says "which point in that history is this," and every real write path (a normal `apply`, or a manual `state push`) enforces both before accepting a new copy — proven above with the exact refusal text for each. `schema_version` is the same idea one level down, per resource *type*: it lets a provider migrate its own stored shape across versions without a full `lineage` reset. `state pull`/`push` are the raw document; `show -json` (no plan argument) is a separate, derived, tooling-oriented projection of just the current values.
+
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---|---|---|
+| Enforcing `serial`/`lineage` on every `state push` | Proven above: a stale or foreign state is rejected outright, not silently merged | A legitimate but out-of-band edit (e.g. restoring from an old backup on purpose) requires deliberately working around the check, not just re-pushing |
+| `state replace-provider` for a metadata-only rename | No resource touched, no provider RPC re-run, fast even on large state | Only changes the FQN string — if the actual provider behavior differs (a true fork, not a mirror), this alone does not migrate resource shape |
+| `show -json` as the external read interface | Stable, documented, does not expose `serial`/`lineage` internals to tooling that shouldn't touch them | Consumers needing schema-version-level detail must go back to raw `state pull`, not `show -json` |
+
+## Common Misconceptions
+
+- **"You can fix a stuck or 'corrupted' state by hand-editing `serial` back down and re-pushing."** Proven above: a real `state push` with a lower `serial` than the backend currently holds is refused outright with the exact serial numbers named — this is not a convention Terraform merely recommends, it is enforced.
+- **"`terraform show -json` and `terraform state pull` return the same data, one is just prettier."** Proven above: `show -json`'s top-level keys are `format_version`/`terraform_version`/`values` with no `serial`/`lineage`/`schema_version` at all — a genuinely different, derived document, not a reformat of raw state.
+- **"`state replace-provider` re-imports or re-applies the resources."** Proven above: the real run's own output says "Changing 1 resources" but only the `provider[...]` string in state changes — no plan, no apply, no provider RPC beyond the state rewrite itself.
+- **"`lineage` changes over the life of a state file as it evolves."** Proven above (and by definition): `lineage` is generated once and never changes; only `serial` increments. A `lineage` change only ever happens by starting a genuinely new state history (e.g. `terraform state push` of an unrelated file, which — proven above — is exactly the case that gets refused when pushed over an *existing* state of a different lineage).
+
+## Reading AI-generated code
+
+- A "disaster recovery" runbook or script that has an AI-generated step to hand-edit `terraform.tfstate`'s `serial` field to "unstick" a push — proven above, this is exactly the case Terraform refuses; the real fix is `terraform force-unlock` (for a stuck *lock*, a separate mechanism) or a deliberate, documented state restore, never a `serial` edit.
+- Code or docs claiming `terraform show -json` (no arguments) exposes `serial`/`lineage`, and building drift-detection logic against fields that don't exist there — proven above, only raw `state pull` has them; `show -json` must be paired with `state pull` if both a values snapshot and version metadata are needed.
+- A migration script that calls `state replace-provider` and then assumes the resources are now fully compatible with a genuinely different (not mirrored) provider fork — proven above, this only rewrites the FQN string in state; it does not validate or migrate anything about the resource's actual schema or behavior.
+
+<SpotTheBug lang="text" code={`# "fix-stuck-state.sh" -- an AI-generated runbook step
+terraform state pull > state.json
+python3 -c "import json; d=json.load(open('state.json')); d['serial']-=1; json.dump(d, open('state.json','w'))"
+terraform state push state.json`}>
+This decrements `serial` by one and pushes, presumably to "retry" a write the author believed failed. Proven above with this lesson's own real run: pushing a **lower** `serial` than the backend currently holds is refused outright — `"cannot import state with serial 1 over newer state with serial 4"` is the real shape of the error this script would trigger (with its own numbers). Terraform's `serial` only ever needs to go forward automatically on a normal write; there is no supported workflow that requires decrementing it by hand. A genuinely stuck state usually means a stale **lock**, not a `serial` problem — the real fix is `terraform force-unlock <lock-id>` (covered in [Remote Backends and Locking](/terraform-gcp/en/state-management/remote-backends-and-locking/)), not editing the pulled JSON at all.
+</SpotTheBug>
+
+export const quizStateAnatomy = [
+  {
+    q: '```text\n$ terraform state pull\n{\n  "version": 4,\n  "terraform_version": "1.16.4",\n  "serial": 4,\n  "lineage": "4dd73a2e-...",\n  ...\n}\n```\nWhat does the top-level "version": 4 field actually mean here?',
+    options: [
+      'The Terraform CLI major version (i.e. Terraform 4.x)',
+      'The state FILE FORMAT version, currently 4 and stable since Terraform 0.12 -- unrelated to the CLI version, which is separately recorded in terraform_version',
+      'The number of times this state has been applied',
+      'The schema_version of the resources it contains',
+    ],
+    answer: 1,
+    explain: 'Proven above: version (state format, 4) and terraform_version (CLI, "1.16.4") are two separate real fields in the same document -- do not confuse them.',
+  },
+  {
+    q: '```text\n$ terraform state push state.staleserial.json\nFailed to write state: cannot import state with serial 1 over newer state with serial 4\n```\nWhat real mechanism does this error prove?',
+    options: [
+      'Terraform silently ignores serial and pushes anyway',
+      'A real state push enforces that the incoming serial is not older than the backend\'s current serial, and refuses outright when it is',
+      'This only happens with remote backends, never local',
+      'serial is advisory only and this is just a warning, not a failure',
+    ],
+    answer: 1,
+    explain: 'Proven above with the exact real error text and both serial numbers (1 vs 4) named -- a genuine, enforced refusal.',
+  },
+  {
+    q: 'A real terraform state replace-provider hashicorp/local registry.example.com/hashicorp/local run reports "Changing 1 resources" and "Successfully replaced provider for 1 resources." What actually changed?',
+    options: [
+      'The resource was destroyed and recreated under the new provider',
+      'Only the provider[...] FQN string recorded in that resource\'s state entry -- no plan, apply, or provider RPC against real infrastructure',
+      'Terraform re-downloaded and re-validated the resource\'s schema from the new provider',
+      'Nothing changed; the command is a dry-run by default',
+    ],
+    answer: 1,
+    explain: 'Proven above: a state pull immediately after shows only the provider FQN string changed for that one resource -- a metadata-only rewrite.',
+  },
+  {
+    q: '```text\n$ terraform show -json | python3 -c "...print(list(d.keys()))"\n[\'format_version\', \'terraform_version\', \'values\']\n```\nWhy does this NOT include serial or lineage, unlike terraform state pull\'s output?',
+    options: [
+      'It is a bug in this version of Terraform',
+      'show -json (no plan argument) is a different, derived, tooling-oriented document of current values only -- not a reformat of raw state',
+      'serial and lineage were removed from Terraform entirely in 1.16',
+      'You must pass a special --full flag to see them in show -json',
+    ],
+    answer: 1,
+    explain: 'Proven above: show -json\'s real top-level keys are format_version/terraform_version/values -- a genuinely different document purpose-built for external tooling, not raw state.',
+  },
+  {
+    q: 'An AI-generated runbook step manually decrements serial by 1 and re-pushes state to "unstick" a failed write. What does this lesson prove about that approach?',
+    options: [
+      'It is the documented, correct way to retry a failed state write',
+      'It is exactly the pattern a real state push refuses -- proven above, pushing a lower serial than the backend holds is rejected outright, and a stuck write is usually a stale lock, fixed with force-unlock instead',
+      'It works but only on remote backends',
+      'serial only matters for the very first terraform apply, not afterward',
+    ],
+    answer: 1,
+    explain: 'Proven above (both directly and in the SpotTheBug): decrementing serial does not "unstick" anything -- Terraform will refuse the push. A stuck state is a locking problem, not a serial problem.',
+  },
+];
+
+<Quiz client:visible id="terraform-internals/state-file-anatomy" questions={quizStateAnatomy} />
+
+<ProgressTracker client:visible id="terraform-internals/state-file-anatomy" />

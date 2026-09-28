@@ -1,0 +1,225 @@
+---
+title: 'State File Anatomy'
+description: 'state file ในระดับ schema -- version, serial, lineage, schema_version ต่อ resource -- พิสูจน์ด้วย terraform state pull จริง, terraform state push ที่ถูกปฏิเสธจริงตอน serial เก่าและ lineage ไม่ตรงกัน, state replace-provider, และ show -json เทียบกับ state ดิบ'
+sidebar:
+  order: 2
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
+
+## ไอเดียในหนึ่งประโยค
+
+`terraform.tfstate` ไม่ใช่แค่ "JSON ที่แมป resource เข้ากับ ID" — มันคือ **เอกสารที่มีเวอร์ชัน** มี `serial` ที่เพิ่มขึ้นทุกครั้งที่เขียน และ `lineage` UUID ที่บอกว่ามันเป็นของ history ไหน และ `terraform state push` จริง **ปฏิเสธ** ด้วย error จริงเจาะจง ไม่ยอมเขียนทับด้วยอะไรที่เก่ากว่าหรือไม่เกี่ยวข้องกัน
+
+<Callout title="ต่อยอดจาก The State File">
+[The State File](/terraform-gcp/th/state-management/the-state-file/) อธิบายไปแล้วว่า *ทำไม* state ถึงต้องมี และ *ทำไม* ห้าม commit เข้า git บทนี้ไปไกลกว่านั้น เข้าสู่ schema เอง, การบังคับใช้ที่ปกป้องมันจากการเสียหายตอนเขียนพร้อมกัน, และ tooling (`state pull`/`push`/`replace-provider`, `show -json`) ที่ทำงานกับมันตรง ๆ
+</Callout>
+
+## schema ระดับบนสุด แบบจริง
+
+ใช้ config [graph demo](/terraform-gcp/th/terraform-internals/the-graph-and-the-walk/) ของโมดูลนี้เอง (`random_pet.name`, `local_file.greeting`, `terraform_data.after_file`) หลัง `terraform apply` จริง ผลจาก `terraform state pull` จริง:
+
+```text
+$ terraform state pull
+{
+  "version": 4,
+  "terraform_version": "1.16.4",
+  "serial": 4,
+  "lineage": "4dd73a2e-c225-ef0e-a8b4-7105ae82d1ca",
+  "outputs": {},
+  "resources": [
+    {
+      "mode": "managed",
+      "type": "local_file",
+      "name": "greeting",
+      "provider": "provider[\"registry.terraform.io/hashicorp/local\"]",
+      "instances": [
+        {
+          "schema_version": 0,
+          "attributes": { "content": "hello firm-krill", "filename": "./greeting.txt", "id": "731418e9e5cf7c65895eca44c56cec7b2335219c", ... },
+          "sensitive_attributes": [...]
+        }
+      ]
+    },
+    ...
+  ]
+}
+```
+
+5 field ที่สำคัญกว่าอันอื่น:
+
+| Field | จริง ๆ คืออะไร |
+|---|---|
+| `version` | เวอร์ชันของ **state file format** (ปัจจุบันคือ `4` เสถียรมาตั้งแต่ Terraform 0.12) — ไม่ใช่เวอร์ชัน CLI |
+| `terraform_version` | เวอร์ชัน CLI ที่เขียนไฟล์นี้ล่าสุด บันทึกไว้เพื่อ diagnostic |
+| `serial` | integer ที่เพิ่มขึ้นทุกครั้งที่เขียน state ตัวนี้ ใน lineage เดียวกัน |
+| `lineage` | UUID ที่สร้างครั้งเดียวตอน state นี้ถูกสร้างครั้งแรก และไม่เปลี่ยนอีกเลยหลังจากนั้น |
+| `resources[].instances[].schema_version` | schema version ต่อ **ชนิด resource** (พิสูจน์ด้านล่าง: `0` สำหรับ `local_file`, `random_pet`, และ `terraform_data` ที่เวอร์ชันซึ่งคอร์สนี้ pin ไว้) |
+
+## `serial`/`lineage`: พิสูจน์ด้วยการถูกปฏิเสธจริง ไม่ใช่คำกล่าวอ้าง
+
+`serial` กับ `lineage` มีไว้ตอบคำถามเดียวอย่างปลอดภัย: "state ที่กำลังจะเขียนนี้ เป็นความต่อเนื่องจริงของ state ที่อยู่ตอนนี้ไหม หรือมีอะไรผิดพลาดไปแล้ว" `terraform state push` จริงบังคับใช้ทั้งสองอย่าง และปฏิเสธตรง ๆ แทนที่จะ merge หรือเขียนทับเงียบ ๆ
+
+อย่างแรก push จริงที่ **lineage ถูกแก้** เป็น UUID ที่ไม่เกี่ยวข้องกัน:
+
+```text
+$ python3 -c "import json; d=json.load(open('state.orig.json')); d['lineage']='00000000-0000-0000-0000-000000000000'; json.dump(d, open('state.badlineage.json','w'))"
+$ terraform state push state.badlineage.json
+Failed to write state: cannot import state with lineage "00000000-0000-0000-0000-000000000000" over unrelated state with lineage "4dd73a2e-c225-ef0e-a8b4-7105ae82d1ca"
+```
+
+อย่างที่สอง push จริงที่ **lineage เดียวกัน** แต่ `serial` ถูกย้อนกลับไปเป็น `1` ในขณะที่ backend อยู่ที่ `4` จริง:
+
+```text
+$ python3 -c "import json; d=json.load(open('state.orig.json')); d['serial']=1; json.dump(d, open('state.staleserial.json','w'))"
+$ terraform state push state.staleserial.json
+Failed to write state: cannot import state with serial 1 over newer state with serial 4
+```
+
+การปฏิเสธทั้งสองครั้งระบุค่าที่ขัดแย้งกันตรง ๆ นี่คือกลไกจริงที่ปกป้อง remote backend ที่แชร์กันจากการที่สองคน (หรือ local copy ที่ stale) เขียนทับกันเงียบ ๆ — ไม่ใช่แค่ convention ไม่ใช่แค่ lock อย่างเดียว (locking ซึ่งอธิบายใน [Remote Backends and Locking](/terraform-gcp/th/state-management/remote-backends-and-locking/) หยุดการเขียน *พร้อมกัน*; `serial`/`lineage` หยุดการเขียน *ตามลำดับ* จาก copy ที่เก่าหรือมาจากที่อื่น ซึ่ง lock เองตรวจจับไม่ได้)
+
+## `terraform state replace-provider`: รันจริง
+
+เปลี่ยนว่า provider FQN ไหนเป็นเจ้าของ resource ชุดหนึ่งใน state — use case ที่ document ไว้คือย้ายไป provider registry mirror หรือ provider source ที่เปลี่ยนชื่อ โดยไม่แตะ resource เองเลย `-help` จริงและการรันจริงกับ state ของบทนี้:
+
+```text
+$ terraform state replace-provider -help
+Usage: terraform [global options] state replace-provider [options] FROM_PROVIDER_FQN TO_PROVIDER_FQN
+
+  Replace provider for resources in the Terraform state.
+
+Options:
+  -auto-approve           Skip interactive approval.
+  -lock=false             Don't hold a state lock during the operation.
+  ...
+
+$ terraform state replace-provider -auto-approve hashicorp/local registry.example.com/hashicorp/local
+Terraform will perform the following actions:
+  ~ Updating provider:
+    - registry.terraform.io/hashicorp/local
+    + registry.example.com/hashicorp/local
+
+Changing 1 resources:
+  local_file.greeting
+
+Successfully replaced provider for 1 resources.
+```
+
+ยืนยันตรง ๆ จาก state ที่ pull มาหลังจากนั้น — มีแค่ provider FQN ของ `local_file.greeting` ที่เปลี่ยน ไม่มีอะไรอื่นเลย:
+
+```text
+$ terraform state pull | python3 -c "import json,sys; print(set(r['provider'] for r in json.load(sys.stdin)['resources']))"
+{'provider["registry.terraform.io/hashicorp/random"]', 'provider["registry.example.com/hashicorp/local"]', 'provider["terraform.io/builtin/terraform"]'}
+```
+
+คำสั่งนี้แก้ **state metadata เท่านั้น** — ไม่แตะ infrastructure จริงเลย และไม่รัน provider RPC ใด ๆ อีก เป็นแค่การแก้ string `provider[...]` ที่ state entry ของแต่ละ resource บันทึกไว้
+
+## `terraform show -json` เทียบกับ state ดิบ: เอกสารคนละแบบ
+
+`terraform state pull` (หรืออ่าน `terraform.tfstate` ตรง ๆ สำหรับ local backend) ให้เอกสาร state ดิบข้างบน `terraform show -json` (ไม่มี argument เป็น plan file) ให้เอกสาร **คนละแบบ** ที่ออกแบบมาเฉพาะ เป็น read-only มาจาก state ปัจจุบัน:
+
+```text
+$ terraform show -json | python3 -c "import json,sys; d=json.load(sys.stdin); print(list(d.keys())); print(d['format_version'])"
+['format_version', 'terraform_version', 'values']
+1.0
+```
+
+state ดิบคือสิ่งที่ Terraform อ่านและเขียนเป็น working record ของตัวเอง (`version`, `serial`, `lineage`, `schema_version` ต่อ instance, `sensitive_attributes`, provider FQN) `values.root_module.resources[]` ของ `show -json` คือมุมมองแบบแบน เป็นมิตรกับ tooling ของค่า *ปัจจุบัน* เท่านั้น — ไม่มี `serial`, ไม่มี `lineage`, ไม่มี schema version — ออกแบบมาให้ใช้ภายนอก ([Plan File and JSON Output](/terraform-gcp/th/terraform-internals/plan-file-and-json-output/) ครอบคลุม `show -json` output ของ plan file ซึ่งมีโครงสร้างต่างกันอีกแบบ เพิ่ม `resource_changes` เข้ามา)
+
+## Mental Model
+
+มอง `terraform.tfstate` เป็น **เอกสารที่เขียนได้คนเดียวและมีตัวนับเวอร์ชัน** ไม่ใช่ cache: `lineage` บอกว่า "เป็นของ history เอกสารไหน" `serial` บอกว่า "อยู่จุดไหนของ history นั้น" และ path การเขียนจริงทุกอัน (`apply` ปกติ หรือ `state push` มือ) บังคับใช้ทั้งสองอย่างก่อนรับ copy ใหม่ — พิสูจน์ข้างบนด้วยข้อความปฏิเสธจริงของแต่ละกรณี `schema_version` คือแนวคิดเดียวกันแต่ลึกลงไปอีกชั้น ต่อ *ชนิด* resource: มันให้ provider migrate รูปแบบที่เก็บไว้ข้ามเวอร์ชันได้โดยไม่ต้อง reset `lineage` ทั้งหมด `state pull`/`push` คือเอกสารดิบ; `show -json` (ไม่มี plan argument) คือ projection แยกที่ derive มา เน้น tooling ของค่าปัจจุบันเท่านั้น
+
+## Trade-offs
+
+| ตัวเลือก | ข้อดี | ต้นทุน |
+|---|---|---|
+| บังคับใช้ `serial`/`lineage` ทุกครั้งที่ `state push` | พิสูจน์ข้างบน: state ที่ stale หรือมาจากที่อื่นถูกปฏิเสธตรง ๆ ไม่ merge เงียบ ๆ | การแก้แบบ out-of-band ที่ถูกต้องจริง (เช่น restore จาก backup เก่าโดยตั้งใจ) ต้องหาทางข้าม check นี้เอง ไม่ใช่แค่ push ซ้ำ |
+| `state replace-provider` สำหรับเปลี่ยนชื่อแบบ metadata-only | ไม่แตะ resource เลย ไม่รัน provider RPC ใหม่ เร็วแม้กับ state ขนาดใหญ่ | เปลี่ยนแค่ string FQN — ถ้าพฤติกรรม provider จริงต่างกัน (fork จริง ไม่ใช่ mirror) แค่นี้ไม่ migrate รูปร่าง resource ให้ |
+| `show -json` เป็น interface อ่านจากภายนอก | เสถียร document ไว้ ไม่ expose รายละเอียดภายในอย่าง `serial`/`lineage` ให้ tooling ที่ไม่ควรแตะ | consumer ที่ต้องการรายละเอียดระดับ schema-version ต้องกลับไปใช้ `state pull` ดิบ ไม่ใช่ `show -json` |
+
+## ความเข้าใจผิดที่พบบ่อย
+
+- **"แก้ state ที่ 'ค้าง' หรือ 'เสีย' ได้ด้วยการแก้ `serial` มือให้ลดลงแล้ว push ใหม่"** พิสูจน์ข้างบน: `state push` จริงที่มี `serial` ต่ำกว่าที่ backend ถืออยู่ตอนนี้ถูกปฏิเสธตรง ๆ พร้อมระบุตัวเลข serial ทั้งสอง — ไม่ใช่ convention ที่ Terraform แค่แนะนำ แต่บังคับใช้จริง
+- **"`terraform show -json` กับ `terraform state pull` คืนข้อมูลเดียวกัน แค่ตัวหนึ่งสวยกว่า"** พิสูจน์ข้างบน: key ระดับบนของ `show -json` คือ `format_version`/`terraform_version`/`values` ไม่มี `serial`/`lineage`/`schema_version` เลย — เป็นเอกสารที่ derive มาคนละแบบจริง ๆ ไม่ใช่ format state ดิบใหม่
+- **"`state replace-provider` re-import หรือ re-apply resource ใหม่"** พิสูจน์ข้างบน: output จริงของการรันบอกว่า "Changing 1 resources" แต่มีแค่ string `provider[...]` ใน state ที่เปลี่ยน — ไม่มี plan ไม่มี apply ไม่มี provider RPC เกินกว่าการเขียน state เอง
+- **"`lineage` เปลี่ยนไปตามอายุของ state file ตอนมันวิวัฒนาการ"** พิสูจน์ข้างบน (และโดยนิยาม): `lineage` สร้างครั้งเดียวและไม่เปลี่ยนอีกเลย มีแค่ `serial` ที่เพิ่มขึ้น `lineage` จะเปลี่ยนก็ต่อเมื่อเริ่ม history ใหม่จริง ๆ เท่านั้น (เช่น `terraform state push` ไฟล์ที่ไม่เกี่ยวข้อง ซึ่ง — พิสูจน์ข้างบน — คือกรณีที่ถูกปฏิเสธเป๊ะ ๆ ถ้า push ทับ state ที่มี lineage ต่างกัน)
+
+## อ่านโค้ดที่ AI เขียน
+
+- runbook "disaster recovery" หรือ script ที่ AI เขียน step มาแก้ `serial` ใน `terraform.tfstate` มือเพื่อ "unstick" การ push — พิสูจน์ข้างบน นี่คือกรณีที่ Terraform ปฏิเสธตรง ๆ ทางแก้จริงคือ `terraform force-unlock` (สำหรับ *lock* ที่ค้าง กลไกคนละอันกัน) หรือการ restore state แบบตั้งใจและ document ไว้ ไม่ใช่การแก้ `serial` เลย
+- โค้ดหรือ doc ที่อ้างว่า `terraform show -json` (ไม่มี argument) expose `serial`/`lineage` แล้วสร้าง logic ตรวจ drift อิงกับ field ที่ไม่มีอยู่จริงตรงนั้น — พิสูจน์ข้างบน มีแค่ `state pull` ดิบเท่านั้นที่มี ถ้าต้องการทั้ง snapshot ค่าและ version metadata ต้องใช้คู่กับ `state pull`
+- migration script ที่เรียก `state replace-provider` แล้วสมมติว่า resource เข้ากันได้เต็มที่กับ provider fork ที่ต่างกันจริง (ไม่ใช่ mirror) — พิสูจน์ข้างบน คำสั่งนี้แก้แค่ string FQN ใน state ไม่ validate หรือ migrate อะไรเกี่ยวกับ schema หรือพฤติกรรมจริงของ resource เลย
+
+<SpotTheBug lang="text" code={`# "fix-stuck-state.sh" -- an AI-generated runbook step
+terraform state pull > state.json
+python3 -c "import json; d=json.load(open('state.json')); d['serial']-=1; json.dump(d, open('state.json','w'))"
+terraform state push state.json`}>
+script นี้ลด `serial` ลง 1 แล้ว push คงเพื่อ "retry" การเขียนที่ผู้เขียนคิดว่าล้มเหลว พิสูจน์ข้างบนด้วยการรันจริงของบทนี้เอง: การ push `serial` ที่ **ต่ำกว่า** ที่ backend ถืออยู่ตอนนี้ถูกปฏิเสธตรง ๆ — `"cannot import state with serial 1 over newer state with serial 4"` คือรูปแบบจริงของ error ที่ script นี้จะกระตุ้น (ด้วยตัวเลขของมันเอง) `serial` ของ Terraform ต้องเดินหน้าอัตโนมัติจากการเขียนปกติเท่านั้น ไม่มี workflow ที่รองรับให้ลดมันด้วยมือเลย state ที่ค้างจริง ๆ มักหมายถึง **lock** ที่ stale ไม่ใช่ปัญหา `serial` — ทางแก้จริงคือ `terraform force-unlock <lock-id>` (อธิบายใน [Remote Backends and Locking](/terraform-gcp/th/state-management/remote-backends-and-locking/)) ไม่ใช่การแก้ JSON ที่ pull มาเลย
+</SpotTheBug>
+
+export const quizStateAnatomy = [
+  {
+    q: '```text\n$ terraform state pull\n{\n  "version": 4,\n  "terraform_version": "1.16.4",\n  "serial": 4,\n  "lineage": "4dd73a2e-...",\n  ...\n}\n```\nfield "version": 4 ระดับบนสุดนี้จริง ๆ หมายถึงอะไร?',
+    options: [
+      'The Terraform CLI major version (i.e. Terraform 4.x)',
+      'The state FILE FORMAT version, currently 4 and stable since Terraform 0.12 -- unrelated to the CLI version, which is separately recorded in terraform_version',
+      'The number of times this state has been applied',
+      'The schema_version of the resources it contains',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ข้างบน: version (state format, 4) และ terraform_version (CLI, "1.16.4") เป็น field จริง 2 อันแยกกันในเอกสารเดียวกัน อย่าสับสน',
+  },
+  {
+    q: '```text\n$ terraform state push state.staleserial.json\nFailed to write state: cannot import state with serial 1 over newer state with serial 4\n```\nerror นี้พิสูจน์กลไกจริงอะไร?',
+    options: [
+      'Terraform silently ignores serial and pushes anyway',
+      'A real state push enforces that the incoming serial is not older than the backend\'s current serial, and refuses outright when it is',
+      'This only happens with remote backends, never local',
+      'serial is advisory only and this is just a warning, not a failure',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ข้างบนด้วยข้อความ error จริงและตัวเลข serial ทั้งสอง (1 กับ 4) ระบุชัด — การปฏิเสธที่บังคับใช้จริง',
+  },
+  {
+    q: 'การรัน terraform state replace-provider hashicorp/local registry.example.com/hashicorp/local จริง รายงาน "Changing 1 resources" และ "Successfully replaced provider for 1 resources." จริง ๆ แล้วอะไรเปลี่ยน?',
+    options: [
+      'The resource was destroyed and recreated under the new provider',
+      'Only the provider[...] FQN string recorded in that resource\'s state entry -- no plan, apply, or provider RPC against real infrastructure',
+      'Terraform re-downloaded and re-validated the resource\'s schema from the new provider',
+      'Nothing changed; the command is a dry-run by default',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ข้างบน: state pull ทันทีหลังจากนั้นแสดงว่ามีแค่ string FQN ของ provider ที่เปลี่ยนสำหรับ resource ตัวนั้น — การเขียนแค่ metadata',
+  },
+  {
+    q: '```text\n$ terraform show -json | python3 -c "...print(list(d.keys()))"\n[\'format_version\', \'terraform_version\', \'values\']\n```\nทำไมตรงนี้ถึงไม่มี serial หรือ lineage ต่างจาก output ของ terraform state pull?',
+    options: [
+      'It is a bug in this version of Terraform',
+      'show -json (no plan argument) is a different, derived, tooling-oriented document of current values only -- not a reformat of raw state',
+      'serial and lineage were removed from Terraform entirely in 1.16',
+      'You must pass a special --full flag to see them in show -json',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ข้างบน: key ระดับบนจริงของ show -json คือ format_version/terraform_version/values — เอกสารคนละแบบจริง ที่สร้างมาเพื่อ tooling ภายนอก ไม่ใช่ state ดิบ',
+  },
+  {
+    q: 'runbook step ที่ AI เขียน ลด serial ลง 1 มือแล้ว push state ใหม่เพื่อ "unstick" การเขียนที่ล้มเหลว บทนี้พิสูจน์อะไรเกี่ยวกับวิธีนี้?',
+    options: [
+      'It is the documented, correct way to retry a failed state write',
+      'It is exactly the pattern a real state push refuses -- proven above, pushing a lower serial than the backend holds is rejected outright, and a stuck write is usually a stale lock, fixed with force-unlock instead',
+      'It works but only on remote backends',
+      'serial only matters for the very first terraform apply, not afterward',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ข้างบน (ทั้งตรง ๆ และใน SpotTheBug): การลด serial ไม่ได้ "unstick" อะไรเลย -- Terraform จะปฏิเสธการ push state ที่ค้างคือปัญหาเรื่อง locking ไม่ใช่ serial',
+  },
+];
+
+<Quiz client:visible id="terraform-internals/state-file-anatomy" questions={quizStateAnatomy} />
+
+<ProgressTracker client:visible id="terraform-internals/state-file-anatomy" />
