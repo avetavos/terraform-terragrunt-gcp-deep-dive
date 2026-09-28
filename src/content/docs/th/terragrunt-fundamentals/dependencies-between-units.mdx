@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## ไอเดียในหนึ่งประโยค
 
@@ -66,8 +67,153 @@ export const dependencyDiagram = `flowchart LR
   dep --> inputsBlock["compute unit inputs: network_id"]
   mock["mock_outputs: network_id = mock-network-id"] -.->|used only for plan, before vpc is applied| dep`;
 
+## พิสูจน์: two-unit tree จริง, `run --all plan` ก่อน `vpc` ถูก apply
+
+Terragrunt 1.1.0 tree จริง ใช้ local backend (ไม่ต้องมี GCP เพื่อพิสูจน์ *กลไก* — `vpc` output string `network_id` แบบเดียวกับที่ `google_compute_network.this.id` จะทำ):
+
+```hcl
+# root.hcl
+remote_state {
+  backend = "local"
+  generate = {
+    path      = "backend.tf"
+    if_exists = "overwrite_terragrunt"
+  }
+  config = {
+    path = "${get_terragrunt_dir()}/terraform.tfstate"
+  }
+}
+```
+
+```hcl
+# vpc/terragrunt.hcl
+include "root" {
+  path = find_in_parent_folders("root.hcl")
+}
+
+terraform {
+  source = "."
+}
+```
+
+```hcl
+# vpc/main.tf
+terraform {
+  required_providers {
+    local = { source = "hashicorp/local", version = "~> 2.5" }
+  }
+}
+
+resource "local_file" "vpc" {
+  filename = "${path.module}/network-id.txt"
+  content  = "network-0123456789abcdef0\n"
+}
+
+output "network_id" {
+  value = "network-0123456789abcdef0"
+}
+```
+
+`compute/terragrunt.hcl` คือ `dependency` block เดียวกันเป๊ะกับที่โชว์ข้างบน module ของมัน:
+
+```hcl
+# compute/main.tf
+terraform {
+  required_providers {
+    local = { source = "hashicorp/local", version = "~> 2.5" }
+  }
+}
+
+variable "network_id" { type = string }
+
+resource "local_file" "compute" {
+  filename = "${path.module}/compute-network-ref.txt"
+  content  = "launched into ${var.network_id}\n"
+}
+```
+
+ก่อนที่ `vpc` จะเคย apply เลย รัน `terragrunt run --all -- plan` จากบนสุดของ tree:
+
+```text
+$ terragrunt run --all --non-interactive -- plan
+INFO  The following units will be run, starting with dependencies and then their dependents:
+╰── vpc
+    ╰── compute
+WARN  [compute] Config .../vpc/terragrunt.hcl is a dependency of .../compute/terragrunt.hcl
+      that has no outputs, but mock outputs provided and returning those in
+      dependency output.
+STDOUT [compute] terraform:             launched into mock-network-id
+```
+
+ordering log list `vpc` ก่อน `compute` มาจาก `dependency "vpc"` block ล้วน ๆ และเนื้อหา plan `launched into mock-network-id` คือค่า `mock_outputs` literal ตอนนี้ apply `vpc` จริง (ยัง offline เต็มรูปแบบ) แล้วรัน plan ของ `compute` ใหม่ โดยไม่แก้ config อะไรเลย:
+
+```text
+$ terragrunt run --non-interactive -- apply -auto-approve   # inside vpc/
+Outputs:
+network_id = "network-0123456789abcdef0"
+
+$ terragrunt run --non-interactive -- plan   # inside compute/, unchanged config
+STDOUT terraform:             launched into network-0123456789abcdef0
+```
+
+`compute/terragrunt.hcl` เดิม `dependency` block เดิม — เนื้อหา plan สลับจากค่า mock ไปเป็นค่า `terraform output` จริงทันทีที่ `vpc` มี state จริง
+
+## error จริงเมื่อ dependency ไม่มี output และ command ไม่อยู่ใน allow-list
+
+`apply` ถูกตั้งใจเอาออกจาก `mock_outputs_allowed_terraform_commands = ["plan"]` ข้างบน รัน `terragrunt apply` กับ `compute` ก่อนที่ `vpc` จะถูก apply — error จริงของ Terragrunt 1.1.0:
+
+```text
+$ terragrunt apply --non-interactive   # compute/, before vpc has been applied, apply not in the allow-list
+ERROR resolving dependency "vpc" outputs: .../vpc/terragrunt.hcl is a dependency of
+      .../compute/terragrunt.hcl but detected no outputs. Either the target module has
+      not been applied yet, or the module has no outputs.
+
+      If this dependency is accessed before the outputs are ready (which can happen
+      during the planning phase of an unapplied stack), consider using mock_outputs:
+      ...
+```
+
+<SpotTheBug code={`# compute/terragrunt.hcl
+dependency "vpc" {
+  config_path = "../vpc"
+
+  mock_outputs = {
+    network_id = "mock-network-id"
+  }
+
+  mock_outputs_allowed_terraform_commands = ["plan", "apply"]
+}
+
+inputs = {
+  network_id = dependency.vpc.outputs.network_id
+}`}>
+บั๊กคือ \`"apply"\` ที่อยู่ใน \`mock_outputs_allowed_terraform_commands\` ควบคู่กับ \`"plan"\` พิสูจน์ข้างบนว่าการจำกัด list เหลือแค่ \`["plan"]\` คือตัวที่ทำให้ \`apply\` ปฏิเสธไม่รันด้วย error จริง จนกว่า \`vpc\` จะถูก apply จริง ๆ — ถ้ามี \`"apply"\` รวมอยู่ \`terragrunt apply\` บน \`compute\` จะสำเร็จเงียบ ๆ โดยใช้ \`network_id = "mock-network-id"\` ต่อ infrastructure จริงของ GCP เข้ากับค่า placeholder แทนที่จะเป็น network จริง
+</SpotTheBug>
+
+## อ่านโค้ดที่ AI สร้าง
+
+- \`mock_outputs_allowed_terraform_commands\` ที่มี \`"apply"\` รวมอยู่ด้วย — พิสูจน์ข้างบนว่า guardrail เฉพาะนี้มีไว้เพื่อหยุด \`apply\` ไม่ให้รันกับข้อมูลปลอม
+- \`mock_outputs\` ที่มีอยู่แต่ไม่มี \`mock_outputs_allowed_terraform_commands\` เลย — mock ไม่ถูกใช้เลย \`plan\` ครั้งแรกบน environment ใหม่ล้วนจะ fail ด้วย error "detected no outputs" เป๊ะ ๆ แบบที่พิสูจน์ข้างบน
+- \`dependencies { paths = [...] }\` block ที่โค้ดข้างในพยายามอ่าน \`dependencies.vpc.something\` — attribute นั้นไม่มีอยู่บน \`dependencies\` block เลย มีแค่ \`dependency\` (เอกพจน์) เท่านั้นที่ expose \`.outputs\`
+
+## Mental Model
+
+\`dependency\` block คือตัวแทนของ cross-module reference ที่ Terraform ให้ฟรีภายใน state เดียว — พิสูจน์ข้างบนว่ามันทำงานด้วยการ shell out ไปเรียก \`terraform output -json\` กับอีก unit จริง ๆ ก่อนที่ \`plan\`/\`apply\` ของ unit นี้จะเริ่มด้วยซ้ำ
+
+## Trade-offs
+
+| ทางเลือก | ได้อะไร | เสียอะไร |
+|---|---|---|
+| \`dependency\` block แทนการใช้ Terraform state เดียวร่วมกัน | state แยกอิสระต่อ unit \`run --all\` ยังได้ลำดับที่ถูกต้อง พิสูจน์ข้างบน | มี \`terraform output\` shell-out เพิ่มต่อ dependency ต่อ run |
+| \`mock_outputs\` scope ด้วย \`mock_outputs_allowed_terraform_commands\` | \`plan\`/CI บน environment ที่ apply ไปแค่บางส่วนไม่ fail แข็ง | พิสูจน์ข้างบน: ตั้ง allow-list ผิด แลกจาก fail ที่ดังและถูกต้อง เป็น fail เงียบ ๆ ที่ผิด |
+
+## ความเข้าใจผิดที่พบบ่อย
+
+- **"dependency block link state ของสอง unit เข้าด้วยกัน"** พิสูจน์ข้างบน: Terraform ไม่เห็น \`vpc\` เลยตอน plan \`compute\` Terragrunt resolve ค่าก่อน ผ่าน \`terraform output\` call แยกต่างหาก
+- **"mock_outputs ถูกใช้อัตโนมัติทุกครั้งที่ state จริงของ dependency หายไป"** พิสูจน์ข้างบนด้วย error จริงของ apply: mock ถูกใช้แค่กับ command ที่ list ไว้ใน \`mock_outputs_allowed_terraform_commands\` ตรง ๆ เท่านั้น
+
 <Callout title="สรุปหนึ่งบรรทัด">
-`dependency "vpc" { config_path = "../vpc" }` block คือวิธีที่ unit หนึ่งอ่าน output ของอีก unit เป็น `dependency.vpc.outputs.<name>` ข้าม state boundary ที่ module composition ธรรมดาของ Terraform ข้ามไม่ได้ แล้วส่งค่านั้นตรงเข้า `inputs` ของ unit ที่อ่านค่า `mock_outputs` ที่ scope ด้วย `mock_outputs_allowed_terraform_commands` ทำให้ `plan` บน unit ที่พึ่งพาสำเร็จได้ก่อนที่จะ apply unit ที่พึ่งพาจริง ส่วน `apply` จริงยังต้องการ output จริงอยู่ดี เพราะทุก `dependency` block เรียกชื่อ unit ที่พึ่งพาตรง ๆ Terragrunt จึงคำนวณลำดับ apply ที่ถูกต้องทั่วทั้ง tree ของ unit ได้เอง โดยไม่มีใครต้อง hard-code ลำดับนั้น
+\`dependency "vpc" { config_path = "../vpc" }\` block คือวิธีที่ unit หนึ่งอ่าน output ของอีก unit เป็น \`dependency.vpc.outputs.<name>\` ข้าม state boundary ที่ module composition ธรรมดาของ Terraform ข้ามไม่ได้ แล้วส่งค่านั้นตรงเข้า \`inputs\` ของ unit ที่อ่าน — พิสูจน์ข้างบนด้วย \`terraform output\` call จริงที่สลับจากค่า mock เป็นค่าจริงทันทีที่ dependency ถูก apply ค่า \`mock_outputs\` ที่ scope ด้วย \`mock_outputs_allowed_terraform_commands\` ทำให้ \`plan\` บน unit ที่พึ่งพาสำเร็จได้ก่อนที่จะ apply unit ที่พึ่งพาจริง ส่วน \`apply\` จริงยังต้องการ output จริงอยู่ดี — พิสูจน์ข้างบนด้วย error จริงแบบ "detected no outputs" ของ Terragrunt เพราะทุก \`dependency\` block เรียกชื่อ unit ที่พึ่งพาตรง ๆ Terragrunt จึงคำนวณลำดับ apply ที่ถูกต้องทั่วทั้ง tree ของ unit ได้เอง โดยไม่มีใครต้อง hard-code ลำดับนั้น — พิสูจน์ข้างบนด้วย ordering log จริง
 </Callout>
 
 export const quizDependency = [
@@ -110,6 +256,28 @@ export const quizDependency = [
       'path ไปยัง directory ของ unit vpc',
     ],
     answer: 1,
+  },
+  {
+    q: 'mock_outputs_allowed_terraform_commands ถูกตั้งเป็น ["plan", "apply"] แทนที่จะเป็น ["plan"] เฉย ๆ มีผลจริงอะไรบ้าง พิสูจน์ข้างบน',
+    options: [
+      'ไม่มีผลอะไรเลย — entry เพิ่มถูกเพิกเฉยและทำตัวเหมือน ["plan"] เพียว ๆ',
+      'terragrunt apply บน compute สำเร็จเงียบ ๆ โดยใช้ network_id ที่เป็น mock แม้ vpc จะยังไม่ถูก apply ต่อ infrastructure จริงเข้ากับค่า placeholder',
+      'Terragrunt ปฏิเสธ parse config เพราะ apply ห้ามอยู่ใน list นี้',
+      'มันปิด mock_outputs ไปเลยทั้งหมด บังคับทุก command ให้อ่าน state จริง',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ข้างบนใน SpotTheBug: จำกัด list เหลือแค่ ["plan"] คือตัวที่ทำให้ apply ปฏิเสธไม่รันด้วย error จริงแบบ "detected no outputs" การเพิ่ม "apply" เข้าไปทำลาย guardrail นั้นเงียบ ๆ',
+  },
+  {
+    q: 'state จริงของ dependency มี output network_id จริงอยู่บน disk แล้ว และ compute ถูก plan ไปครั้งหนึ่งแล้วกับค่า mock การรัน terragrunt run --all -- plan ครั้งถัดไปจะโชว์อะไร พิสูจน์ข้างบน',
+    options: [
+      'ยังโชว์ค่า mock อยู่ เพราะ cache มาจาก plan ครั้งแรก',
+      'อ่านค่า network_id จริงผ่าน terraform output call ใหม่ โดยฝั่ง compute ไม่ต้องแก้อะไรเลย',
+      'fail เพราะ unit สลับจาก mock ไปเป็นค่าจริงไม่ได้โดยไม่ต้องรัน init ใหม่',
+      'โชว์ทั้งสองค่าพร้อมกันใน plan diff',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ข้างบน: หลัง apply vpc จริง รัน plan ของ compute ใหม่ด้วย terragrunt.hcl เดิมเป๊ะ ได้ "launched into network-0123456789abcdef0" แทนค่า mock เดิม',
   },
 ];
 

@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## The idea in one sentence
 
@@ -66,8 +67,153 @@ export const dependencyDiagram = `flowchart LR
   dep --> inputsBlock["compute unit inputs: network_id"]
   mock["mock_outputs: network_id = mock-network-id"] -.->|used only for plan, before vpc is applied| dep`;
 
+## Proof: a real two-unit tree, `run --all plan` before `vpc` is ever applied
+
+A real Terragrunt 1.1.0 tree with a local backend (no GCP needed to prove the *mechanism* — `vpc` outputs a `network_id` string the same way `google_compute_network.this.id` would):
+
+```hcl
+# root.hcl
+remote_state {
+  backend = "local"
+  generate = {
+    path      = "backend.tf"
+    if_exists = "overwrite_terragrunt"
+  }
+  config = {
+    path = "${get_terragrunt_dir()}/terraform.tfstate"
+  }
+}
+```
+
+```hcl
+# vpc/terragrunt.hcl
+include "root" {
+  path = find_in_parent_folders("root.hcl")
+}
+
+terraform {
+  source = "."
+}
+```
+
+```hcl
+# vpc/main.tf
+terraform {
+  required_providers {
+    local = { source = "hashicorp/local", version = "~> 2.5" }
+  }
+}
+
+resource "local_file" "vpc" {
+  filename = "${path.module}/network-id.txt"
+  content  = "network-0123456789abcdef0\n"
+}
+
+output "network_id" {
+  value = "network-0123456789abcdef0"
+}
+```
+
+`compute/terragrunt.hcl` is exactly the `dependency` block shown above; its module:
+
+```hcl
+# compute/main.tf
+terraform {
+  required_providers {
+    local = { source = "hashicorp/local", version = "~> 2.5" }
+  }
+}
+
+variable "network_id" { type = string }
+
+resource "local_file" "compute" {
+  filename = "${path.module}/compute-network-ref.txt"
+  content  = "launched into ${var.network_id}\n"
+}
+```
+
+Before `vpc` has ever been applied, running `terragrunt run --all -- plan` from the tree root:
+
+```text
+$ terragrunt run --all --non-interactive -- plan
+INFO  The following units will be run, starting with dependencies and then their dependents:
+╰── vpc
+    ╰── compute
+WARN  [compute] Config .../vpc/terragrunt.hcl is a dependency of .../compute/terragrunt.hcl
+      that has no outputs, but mock outputs provided and returning those in
+      dependency output.
+STDOUT [compute] terraform:             launched into mock-network-id
+```
+
+The ordering log lists `vpc` before `compute` purely from the `dependency "vpc"` block, and the plan content, `launched into mock-network-id`, is the literal `mock_outputs` value. Now apply `vpc` for real (still fully offline) and re-run `compute`'s plan with no config changes at all:
+
+```text
+$ terragrunt run --non-interactive -- apply -auto-approve   # inside vpc/
+Outputs:
+network_id = "network-0123456789abcdef0"
+
+$ terragrunt run --non-interactive -- plan   # inside compute/, unchanged config
+STDOUT terraform:             launched into network-0123456789abcdef0
+```
+
+Same `compute/terragrunt.hcl`, same `dependency` block — the plan content flips from the mock value to the real `terraform output` value the instant `vpc` has real state.
+
+## The real error when a dependency has no outputs and the command isn't allow-listed
+
+`apply` was deliberately left out of `mock_outputs_allowed_terraform_commands = ["plan"]` above. Running `terragrunt apply` against `compute` before `vpc` has been applied — the real Terragrunt 1.1.0 error:
+
+```text
+$ terragrunt apply --non-interactive   # compute/, before vpc has been applied, apply not in the allow-list
+ERROR resolving dependency "vpc" outputs: .../vpc/terragrunt.hcl is a dependency of
+      .../compute/terragrunt.hcl but detected no outputs. Either the target module has
+      not been applied yet, or the module has no outputs.
+
+      If this dependency is accessed before the outputs are ready (which can happen
+      during the planning phase of an unapplied stack), consider using mock_outputs:
+      ...
+```
+
+<SpotTheBug code={`# compute/terragrunt.hcl
+dependency "vpc" {
+  config_path = "../vpc"
+
+  mock_outputs = {
+    network_id = "mock-network-id"
+  }
+
+  mock_outputs_allowed_terraform_commands = ["plan", "apply"]
+}
+
+inputs = {
+  network_id = dependency.vpc.outputs.network_id
+}`}>
+The bug is \`"apply"\` sitting in \`mock_outputs_allowed_terraform_commands\` alongside \`"plan"\`. Proven above, restricting the list to \`["plan"]\` is what makes \`apply\` refuse to run with a real error until \`vpc\` has genuinely been applied — with \`"apply"\` included, \`terragrunt apply\` on \`compute\` succeeds silently using \`network_id = "mock-network-id"\`, wiring real GCP infrastructure to a placeholder value instead of the real network.
+</SpotTheBug>
+
+## Reading AI-generated code
+
+- \`mock_outputs_allowed_terraform_commands\` including \`"apply"\` — proven above, that specific safety refusal exists precisely to stop \`apply\` from running against fake data.
+- \`mock_outputs\` present with no \`mock_outputs_allowed_terraform_commands\` at all — the mock is never used, so a fresh environment's first \`plan\` fails with the exact "detected no outputs" error proven above.
+- A \`dependencies { paths = [...] }\` block where code then tries to read \`dependencies.vpc.something\` — that attribute never exists on a \`dependencies\` block; only \`dependency\` (singular) exposes \`.outputs\`.
+
+## Mental Model
+
+A \`dependency\` block is Terragrunt's stand-in for the cross-module reference Terraform gives you for free inside one state — proven above, it works by shelling out to \`terraform output -json\` against the other unit before this unit's own \`plan\`/\`apply\` ever starts.
+
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---|---|---|
+| \`dependency\` blocks instead of one shared Terraform state | Independent state per unit; \`run --all\` still gets correct ordering, proven above | An extra \`terraform output\` shell-out per dependency per run |
+| \`mock_outputs\` scoped by \`mock_outputs_allowed_terraform_commands\` | \`plan\`/CI on a partially-applied environment doesn't hard-fail | Proven above: getting the allow-list wrong silently trades a loud, correct failure for a quiet, wrong one |
+
+## Common Misconceptions
+
+- **"A dependency block links two units' state together."** Proven above: Terraform never sees \`vpc\` at all when planning \`compute\`. Terragrunt resolves the value first, via a separate \`terraform output\` call.
+- **"mock_outputs are used automatically whenever a dependency's real state is missing."** Proven above with the real apply error: mocks are only used for commands explicitly listed in \`mock_outputs_allowed_terraform_commands\`.
+
 <Callout title="The one-line takeaway">
-A `dependency "vpc" { config_path = "../vpc" }` block is how one unit reads another unit's outputs as `dependency.vpc.outputs.<name>` across the separate-state boundary that ordinary Terraform module composition cannot cross, feeding that value straight into the reading unit's own `inputs`. `mock_outputs`, scoped to specific commands with `mock_outputs_allowed_terraform_commands`, lets a `plan` on the dependent unit succeed even before the depended-on unit has actually been applied, while a real `apply` still demands the real output. Because every `dependency` block names the unit it depends on explicitly, Terragrunt can compute the correct apply order across an entire tree of units on its own, without anyone hard-coding that sequence.
+A `dependency "vpc" { config_path = "../vpc" }` block is how one unit reads another unit's outputs as `dependency.vpc.outputs.<name>` across the separate-state boundary that ordinary Terraform module composition cannot cross, feeding that value straight into the reading unit's own `inputs` — proven above with a real `terraform output` call that flips from a mock value to a real one the instant `vpc` is applied. `mock_outputs`, scoped to specific commands with `mock_outputs_allowed_terraform_commands`, lets a `plan` on the dependent unit succeed even before the depended-on unit has actually been applied, while a real `apply` still demands the real output — proven above with Terragrunt's real "detected no outputs" error. Because every `dependency` block names the unit it depends on explicitly, Terragrunt can compute the correct apply order across an entire tree of units on its own, without anyone hard-coding that sequence — proven above in a real ordering log.
 </Callout>
 
 export const quizDependency = [
@@ -110,6 +256,28 @@ export const quizDependency = [
       'The path to the vpc unit directory',
     ],
     answer: 1,
+  },
+  {
+    q: 'mock_outputs_allowed_terraform_commands is set to ["plan", "apply"] instead of just ["plan"]. What real, proven-above consequence does this have?',
+    options: [
+      'None — the extra entry is ignored and behaves identically to ["plan"] alone',
+      'terragrunt apply on compute succeeds silently using the mock network_id even before vpc is applied, wiring real infrastructure to a placeholder value',
+      'Terragrunt refuses to parse the config because apply cannot appear in this list',
+      'It disables mock_outputs entirely, forcing every command to read real state',
+    ],
+    answer: 1,
+    explain: 'Proven above in the SpotTheBug: restricting the list to ["plan"] is what makes apply refuse to run with a real "detected no outputs" error; adding "apply" defeats that safety refusal silently.',
+  },
+  {
+    q: 'A dependency real state already has a real network_id output on disk, and compute has already been planned once against the mock. What does the next real terragrunt run --all -- plan show, proven above?',
+    options: [
+      'It keeps showing the mock value, cached from the first plan',
+      'It now reads the real network_id via a fresh terraform output call, with zero changes needed on the compute side',
+      'It fails, since a unit cannot switch from mock to real values without re-running init',
+      'It shows both values simultaneously in the plan diff',
+    ],
+    answer: 1,
+    explain: 'Proven above: after applying vpc for real, re-running compute plan with the exact same terragrunt.hcl produced "launched into network-0123456789abcdef0" instead of the earlier mock value.',
   },
 ];
 
