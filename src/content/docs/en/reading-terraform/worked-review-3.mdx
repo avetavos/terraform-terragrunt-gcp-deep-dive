@@ -1,0 +1,445 @@
+---
+title: 'Worked review 3: a CI pipeline and policy checks'
+description: 'An AI-generated GitHub Actions workflow (plan on PR, apply on main) with Workload Identity Federation, a conftest policy, and tflint/checkov config, reviewed bug by bug against real actionlint, conftest, tflint, checkov, and terraform exit codes.'
+sidebar:
+  order: 6
+---
+
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import Mermaid from '../../../../components/Mermaid.astro';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
+
+## The feature
+
+The prompt was: *"Write a GitHub Actions pipeline that runs Terraform plan on pull requests and apply on merge to main, using Workload Identity Federation instead of a stored GCP key, with policy checks."* What follows is the kind of first draft an AI assistant hands back for exactly that prompt — plausible YAML, a real `google-github-actions/auth` action, a Rego policy that reads like every OPA tutorial. It has **10 real bugs**; check the **[AI bug catalog](/terraform-gcp/en/reading-terraform/ai-bug-catalog/)** for the general pattern behind several of them (entries 4, 18, 19, 20, 22). Nine of these ten are identical, provider-agnostic CI/policy mechanics to both sibling reviews' worked review 3 — proven fresh here, in this repo — plus one genuinely GCP-specific Workload Identity Federation bug. This review complements — and links to — **[CI/CD for Infrastructure](/terraform-gcp/en/production-and-ecosystem/ci-cd-for-infrastructure/)**, which shows the corrected pipeline shape in full. Every claim below was proven with real `actionlint`, `tflint`, `checkov`, and `conftest` (via `docker run --rm` against the pinned `rhysd/actionlint`, `ghcr.io/terraform-linters/tflint`, `bridgecrew/checkov`, and `openpolicyagent/conftest` images), plus real Terraform exit codes and a real `terragrunt run --all plan --out-dir`.
+
+## The generated code
+
+```yaml
+# .github/workflows/terraform.yml, as generated -- fragment, not a collected fence
+name: terraform
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@master
+      - uses: hashicorp/setup-terraform@v3
+      - name: Authenticate to GCP via Workload Identity Federation
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: projects/111122223333/locations/global/workloadIdentityPools/github-pool/providers/github-provider
+          service_account: github-actions-terraform@acme-prod-123456.iam.gserviceaccount.com
+      - run: terraform init
+      - name: plan
+        run: |
+          echo "TF_VAR_db_password=$TF_VAR_db_password"
+          terraform plan -detailed-exitcode -out=$PLAN_FILE
+        env:
+          PLAN_FILE: tfplan
+          TF_VAR_db_password: ${{ secrets.DB_PASSWORD }}
+
+  apply:
+    needs: plan
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@master
+      - uses: hashicorp/setup-terraform@v3
+      - run: terraform init
+      - run: terraform apply -auto-approve
+```
+
+```text
+# ci/gitignore, as generated -- fragment, not a collected fence
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.backup
+```
+
+```hcl
+# terraform.tfvars, as generated -- fragment, committed alongside the workflow above
+db_password = "Sup3rSecret!2024"
+api_token   = "ghp_1234567890abcdefghijklmnopqrstuvwxyz"
+```
+
+```rego
+# policy/deny_no_tags.rego, as generated -- fragment, not a collected fence
+package main
+
+deny[msg] {
+  resource := input.resource_changes[_]
+  resource.type == "google_compute_instance"
+  msg := sprintf("%s must set labels", [resource.address])
+}
+```
+
+```hcl
+# .tflint.hcl, as generated -- fragment, not a collected fence
+plugin "google" {
+  enabled = true
+  version = "0.30.0"
+  source  = "github.com/terraform-linters/tflint-ruleset-google"
+}
+```
+
+## The review walk
+
+### Workflow: `actions/checkout@master` — a mutable branch treated as pinned
+
+**Symptom — real `actionlint`, `rhysd/actionlint`, one-shot container:**
+
+```text
+$ docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:latest -color
+(no output -- 0 exit code)
+```
+
+<SpotTheBug code={`- uses: actions/checkout@master`}>
+Same bug as **[AI bug catalog](/terraform-gcp/en/reading-terraform/ai-bug-catalog/)** entry 19, and identical mechanics to both sibling reviews' entry 1 — proven fresh here. `actionlint` only requires *a* `@ref` token to exist syntactically; removing it entirely (`uses: actions/checkout` with no `@` at all) is a real, caught error — confirmed separately: `specifying action "actions/checkout" in invalid format because ref is missing`. But `@master` supplies a syntactically valid ref, so `actionlint` accepts it identically to a pinned commit SHA. Fix: `uses: actions/checkout@<40-char-sha>  # v5.0.0`.
+</SpotTheBug>
+
+### Workflow: a shellcheck issue `actionlint` genuinely does catch
+
+**Symptom — real `actionlint` against `run: terraform plan -detailed-exitcode -out=$PLAN_FILE`:**
+
+```text
+$ docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:latest -color
+.github/workflows/terraform.yml:16:9: shellcheck reported issue in this script: SC2086:info:1:40: Double quote to prevent globbing and word splitting [shellcheck]
+   |
+16 |         run: |
+   |         ^~~~
+```
+
+<SpotTheBug code={`run: |
+  terraform plan -detailed-exitcode -out=$PLAN_FILE`}>
+`actionlint` embeds `shellcheck` against every multi-line `run:` script. `$PLAN_FILE` unquoted is subject to word-splitting and glob expansion by the shell. Fix: `-out="$PLAN_FILE"`.
+</SpotTheBug>
+
+### Workflow: `env: TF_VAR_db_password` echoed in a debug line
+
+**Symptom — real, `env` reproducing exactly what a CI runner's environment looks like once `env:` sets a secret-backed variable:**
+
+```text
+$ export TF_VAR_db_password="SuperSecret123"
+$ env | grep TF_VAR_db_password
+TF_VAR_db_password=SuperSecret123
+```
+
+<SpotTheBug code={`- name: plan
+  run: |
+    echo "TF_VAR_db_password=$TF_VAR_db_password"
+    terraform plan -detailed-exitcode -out=$PLAN_FILE
+  env:
+    TF_VAR_db_password: \${{ secrets.DB_PASSWORD }}`}>
+GitHub Actions masks a *recognized secret value* in raw log output, but proven above, the plain shell fact underneath is that `TF_VAR_db_password` is a completely ordinary environment variable the moment `env:` sets it. Fix: never echo a secret-backed variable, even for debugging.
+</SpotTheBug>
+
+### `apply`: no saved plan — `terraform apply -auto-approve` re-plans from scratch
+
+**Symptom — real, side by side. First, `apply` with no saved plan file:**
+
+```text
+$ terraform apply -auto-approve
+terraform_data.x: Refreshing state...
+Plan: 1 to add, 0 to change, 0 to destroy.
+Apply complete! Resources: 1 added, 0 changed, 0 destroyed.
+```
+
+Then, a real saved plan applied by its file path instead:
+
+```text
+$ terraform plan -out=tfplan
+$ terraform apply tfplan
+Apply complete! Resources: 1 added, 0 changed, 0 destroyed.
+```
+
+<SpotTheBug code={`- run: terraform init
+- run: terraform apply -auto-approve`}>
+The `apply` job never downloads the plan the `plan` job computed. Proven above: `apply -auto-approve` with no plan file prints its own fresh `Refreshing state...` / `Plan:` lines — it re-derives a plan from scratch immediately before applying it. Applying a real saved plan file instead prints neither line. Fix: `terraform plan -out=tfplan` as a build artifact in the `plan` job, downloaded and applied verbatim (`terraform apply tfplan`) in the `apply` job.
+</SpotTheBug>
+
+### `plan`: `-detailed-exitcode` computed, its three-way exit code never actually read
+
+**Symptom — real, the same command's real exit code in two different states:**
+
+```text
+$ terraform plan -detailed-exitcode   # a resource actually needs to change
+$ echo $?
+2
+
+$ terraform plan -detailed-exitcode   # re-run immediately after, nothing left to change
+$ echo $?
+0
+```
+
+<SpotTheBug code={`terraform plan -detailed-exitcode -out=$PLAN_FILE
+# (workflow never checks $? here at all)`}>
+`-detailed-exitcode` exists specifically so a script can tell "real changes are ready to review" (`2`) apart from "a real error occurred" (`1`) apart from "nothing to do" (`0`) — proven above. Fix: capture `$?` explicitly and branch on it, the way this course's **[CI/CD for Infrastructure](/terraform-gcp/en/production-and-ecosystem/ci-cd-for-infrastructure/)** lesson's pipeline does.
+</SpotTheBug>
+
+### `.gitignore`: `.terraform.lock.hcl` gitignored alongside `.terraform/`
+
+```text
+# .gitignore, as generated
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.backup
+```
+
+Same bug as **[AI bug catalog](/terraform-gcp/en/reading-terraform/ai-bug-catalog/)** entry 4. Fix:
+
+```text
+# .gitignore, fixed
+.terraform/
+*.tfstate
+*.tfstate.backup
+```
+
+### `terraform.tfvars`: a real secret, committed alongside the workflow
+
+```hcl
+# terraform.tfvars, as generated
+db_password = "Sup3rSecret!2024"
+api_token   = "ghp_1234567890abcdefghijklmnopqrstuvwxyz"
+```
+
+Same bug as **[AI bug catalog](/terraform-gcp/en/reading-terraform/ai-bug-catalog/)** entry 22 — worse in a CI context specifically, because a committed `.tfvars` ships to every checkout, every fork's pull request, and every CI log that happens to `cat` a file for debugging. Fix: delete the file from the working tree and from git history; source `db_password`/`api_token` exclusively from `TF_VAR_*` environment variables backed by CI secrets.
+
+### `policy/deny_no_tags.rego`: pre-v1 Rego syntax fails to load
+
+```rego
+# policy/deny_no_tags.rego, as generated -- @expect-error rego_parse_error: `if` keyword is required before rule body
+package main
+
+deny[msg] {
+  resource := input.resource_changes[_]
+  resource.type == "google_compute_instance"
+  msg := sprintf("%s must set labels", [resource.address])
+}
+```
+
+**Symptom — real `conftest test`, current `openpolicyagent/conftest`, against a real `terraform show -json` plan:**
+
+```text
+$ docker run --rm -v "$(pwd)":/project openpolicyagent/conftest test --policy policy plan.json
+Error: running test: load: loading policies: load: 2 errors occurred during loading:
+policy/deny_no_tags.rego:3: rego_parse_error: `if` keyword is required before rule body
+policy/deny_no_tags.rego:3: rego_parse_error: `contains` keyword is required for partial set rules
+```
+
+<SpotTheBug code={`deny[msg] {
+  resource := input.resource_changes[_]
+  resource.type == "google_compute_instance"
+  msg := sprintf("%s must set labels", [resource.address])
+}`}>
+Same bug as **[AI bug catalog](/terraform-gcp/en/reading-terraform/ai-bug-catalog/)** entry 20. Fix:
+
+```rego
+# policy/deny_no_tags.rego, fixed
+package main
+
+import rego.v1
+
+deny contains msg if {
+  resource := input.resource_changes[_]
+  resource.type == "google_compute_instance"
+  msg := sprintf("%s must set labels", [resource.address])
+}
+```
+
+Real, against the identical plan:
+
+```text
+$ docker run --rm -v "$(pwd)":/project openpolicyagent/conftest test --policy policy plan.json
+FAIL - plan.json - main - google_compute_instance.app must set labels
+
+1 test, 0 passed, 0 warnings, 1 failure, 0 exceptions
+```
+</SpotTheBug>
+
+### `.tflint.hcl`/checkov: real, working, never wired into CI at all
+
+**Symptom — real `tflint` and `checkov`, one-shot containers, against the pipeline's own `main.tf` (a `google_compute_instance` with a default network, no Shielded VM, no project-wide-SSH-key block, no CSEK encryption):**
+
+```text
+$ docker run --rm -v "$(pwd)":/data -w /data ghcr.io/terraform-linters/tflint
+1 issue(s) found:
+
+Warning: terraform "required_version" attribute is required (terraform_required_version)
+
+  on main.tf line 1:
+   1: terraform {
+```
+
+```text
+$ docker run --rm -v "$(pwd)":/tf bridgecrew/checkov -d /tf --compact --quiet
+Passed checks: 5, Failed checks: 3, Skipped checks: 0
+
+Check: CKV_GCP_38: "Ensure VM disks for critical VMs are encrypted with Customer Supplied Encryption Keys (CSEK)"
+FAILED for resource: google_compute_instance.app
+Check: CKV_GCP_32: "Ensure 'Block Project-wide SSH keys' is enabled for VM instances"
+FAILED for resource: google_compute_instance.app
+Check: CKV_GCP_39: "Ensure Compute instances are launched with Shielded VM enabled"
+FAILED for resource: google_compute_instance.app
+```
+
+<Callout title="A gap in the pipeline, not in the config files shown">
+Both tools work correctly and find real issues, proven above — but nothing in the generated CI workflow ever invokes either one. A `.tflint.hcl`/checkov config sitting in the repo, never run by any CI step, provides exactly the same protection as no file at all. Fix: real `tflint` and `checkov` steps in the `plan` job, failing the job on any finding.
+</Callout>
+
+### `run --all plan` with no `--out-dir` at the Terragrunt layer
+
+**Symptom — real `terragrunt run --all plan --out-dir`, a real per-unit plan file for every unit in the tree, and the exact next command printed:**
+
+```text
+$ terragrunt run --all --non-interactive --no-color --out-dir /tmp/tg-plans -- plan
+[live/prod/app] terraform apply "/tmp/tg-plans/live/prod/app/tfplan.tfplan"
+
+❯❯ Run Summary  4 units
+   Succeeded    4
+```
+
+```text
+$ find /tmp/tg-plans -maxdepth 3
+/tmp/tg-plans/live/dev/network
+/tmp/tg-plans/live/dev/app
+/tmp/tg-plans/live/prod/network
+/tmp/tg-plans/live/prod/app
+```
+
+<SpotTheBug code={`terragrunt run --all -- plan
+# ... later, in a separate job/step ...
+terragrunt run --all -- apply -auto-approve`}>
+Exactly the same bug as the plain-Terraform "no `-out`" entry above, one layer up. Fix: `run --all plan --out-dir <dir>` in the `plan` job, `run --all apply --out-dir <dir>` (the same directory) in the `apply` job.
+</SpotTheBug>
+
+### Workload Identity Federation's attribute condition scoped too broadly
+
+<Callout title="Docs-sourced, not run-proven">
+No GCP project exists in this course to create a real Workload Identity Pool or provider in, so this entry is quoted directly rather than reproduced live — same convention as **[CI/CD for Infrastructure](/terraform-gcp/en/production-and-ecosystem/ci-cd-for-infrastructure/)**'s own Workload Identity Federation section. Per [GitHub's OIDC-in-GCP guide](https://docs.github.com/en/actions/how-tos/secure-your-work/security-harden-deployments/oidc-in-google-cloud-platform), a Workload Identity Pool provider needs an **attribute condition** restricting which repository/branch can use it, then a grant of `roles/iam.workloadIdentityUser` on the target service account scoped to that condition's principal.
+</Callout>
+
+The generated workflow's `google-github-actions/auth` step with `workload_identity_provider`/`service_account` is real and correctly-shaped, but nothing in this lesson's generated code shows the provider's own attribute condition — the part that actually decides *which* GitHub identities may impersonate that service account. A Workload Identity Pool provider with no attribute condition, or one that only checks the repository without the branch/ref, lets **any** branch — including a pull request from a fork — impersonate the service account through the pool. Fix: an attribute condition scoping `assertion.ref` to the exact branch that runs `apply`, and a separate, more narrowly-scoped service account (or none at all) for the `plan` job that runs on pull requests from untrusted forks.
+
+## What changed and why
+
+| # | Bug | Fix |
+|---|---|---|
+| 1 | `actions/checkout@master` — mutable ref, `actionlint` accepts it identically to a SHA | Pin to a full commit SHA |
+| 2 | `-out=$PLAN_FILE` unquoted in a `run:` script | `-out="$PLAN_FILE"` — real `actionlint`/shellcheck SC2086 finding |
+| 3 | Secret-backed `TF_VAR_db_password` echoed in a debug line | Never echo it — real `env` output proved it is a plain, readable variable once set |
+| 4 | `apply -auto-approve` with no saved plan file | `plan -out=tfplan` as an artifact, `apply tfplan` in the apply job |
+| 5 | `-detailed-exitcode` computed, its 3-way exit code never branched on | Capture `$?`, branch on `0`/`1`/`2` explicitly |
+| 6 | `.terraform.lock.hcl` gitignored alongside `.terraform/` | Only `.terraform/` ignored |
+| 7 | `terraform.tfvars` with a real secret, committed | Deleted; secrets sourced from `TF_VAR_*` CI secrets only |
+| 8 | Pre-v1 Rego (`deny[msg] { ... }`) | `import rego.v1` + `deny contains msg if { ... }` |
+| 9 | `.tflint.hcl`/checkov config present, no CI step ever runs either | Real `tflint`/`checkov` steps added — both tools proven to find real issues against this exact `main.tf` |
+| 10 | No `--out-dir` on `terragrunt run --all plan` | `--out-dir <dir>` in plan, same dir in apply |
+| — | Workload Identity Pool provider's attribute condition missing or too broad | Scope `assertion.ref` to the exact branch — docs-sourced, no GCP project in this course |
+
+## Mental Model
+
+Nine of these ten bugs are identical, provider-agnostic CI/policy mechanics to both sibling reviews — the same `actionlint` behaviors, the same `-out`/`-detailed-exitcode` gaps, the same disconnected linter configs, the same `terragrunt --out-dir` fix. The one genuinely GCP-specific bug is the trust boundary: AWS scopes an IAM role's trust policy `sub` condition, azurerm scopes an App Registration's federated credential `subject`, GCP scopes a Workload Identity Pool provider's attribute condition on `assertion.ref` — three different mechanisms, identical failure mode when any of them is too broad.
+
+## Common Misconceptions
+
+- **"If a `.tflint.hcl`/checkov config file exists in the repo, it's being enforced."** Proven above: both tools, run directly against the pipeline's own `main.tf`, found real issues that a CI run relying only on the config files' presence would never see.
+- **"`actionlint` catches unpinned third-party actions."** Proven above: it requires *a* `@ref` to exist syntactically, but does not distinguish a mutable branch name like `@master` from an immutable commit SHA.
+- **"GitHub's secret masking means a `TF_VAR_*` secret can't leak through CI logs."** Proven above: the moment a secret becomes a plain environment variable, it is readable by any tool that dumps its environment.
+
+<Mermaid title="Where each bug sits in this pipeline's real toolchain" code={wr3Diagram} />
+
+export const wr3Diagram = `flowchart TD
+  Y["workflow YAML"] --> AL["actionlint"]
+  AL -->|"1: @master accepted, ref exists"| AL
+  AL -->|"2: unquoted $PLAN_FILE, real SC2086"| AL
+  Y --> R["terraform plan -detailed-exitcode"]
+  R -->|"3: TF_VAR_* echoed"| R
+  R -->|"5: exit code 0/1/2 never branched"| R
+  R --> A["terraform apply"]
+  A -->|"4: no -out, re-plans from scratch"| A
+  G[".gitignore / terraform.tfvars"] -->|"6: lockfile ignored"| G
+  G -->|"7: secret committed"| G
+  P["policy/*.rego"] --> CF["conftest"]
+  CF -->|"8: pre-v1 Rego, load error"| CF
+  L[".tflint.hcl / checkov config"] -->|"9: never wired into CI"| L
+  TG["terragrunt run --all plan"] -->|"10: no --out-dir"| TG
+  WIF["Workload Identity Pool provider"] -->|"attribute condition too broad -- docs"| WIF
+`;
+
+<Callout title="The one-line takeaway">
+A CI pipeline's real safety comes from what actually runs, in order, on the actual artifact — not from a policy file existing, a tool being installed, or a flag being present in a command. Nine of these ten gaps are identical to both sibling reviews regardless of cloud; the tenth — where the trust boundary actually lives — is the one place GCP's shape genuinely differs, through a Workload Identity Pool's attribute condition rather than a trust policy or federated credential.
+</Callout>
+
+export const quizWorkedReview3 = [
+  {
+    q: '`actions/checkout@master` and a bare `uses: actions/checkout` with no ref at all are both potential problems. What does real `actionlint` show for each?',
+    options: [
+      'Both are flagged identically as unpinned',
+      '@master passes with 0 findings (a syntactically valid ref exists); the bare form with no ref fails with a real "ref is missing" error -- actionlint checks that a ref token exists, not what kind it is',
+      'Neither is flagged -- actionlint does not check uses: refs at all',
+      'The bare form passes but @master fails',
+    ],
+    answer: 1,
+    explain: 'Proven directly with two separate real actionlint runs: @master produced zero output/exit 0; the bare form produced a real "ref is missing" error -- identical mechanics to both sibling reviews.',
+  },
+  {
+    q: '`terraform apply -auto-approve` runs with no saved plan file from an earlier `plan` step. What does the real apply output show, compared to applying a saved plan file?',
+    options: [
+      'No difference -- apply always behaves identically either way',
+      'Real "Refreshing state..." and "Plan:" lines appear before the apply, proving it recomputed its own fresh plan; applying a real saved plan file shows neither line',
+      'apply refuses to run at all without a saved plan file',
+      'The saved-plan version is slower because it re-validates the file',
+    ],
+    answer: 1,
+    explain: 'Proven directly with two real runs: apply -auto-approve with no plan file printed a real refresh and plan summary; apply tfplan against a real saved plan file printed neither.',
+  },
+  {
+    q: 'A `.tflint.hcl` and a checkov config both exist in the repository, but the generated GitHub Actions workflow never has a step that runs either tool. Running them directly against the pipeline\'s own main.tf -- what do they find?',
+    options: [
+      'Nothing -- the main.tf is already clean, which is why no CI step was needed',
+      'Real findings from both: tflint reports a missing required_version, checkov reports 3 real failed checks (CSEK encryption, project-wide SSH keys, Shielded VM) -- config files present in a repo provide zero protection until an actual CI step invokes them',
+      'Both tools refuse to run without being invoked from within a GitHub Actions workflow',
+      'Only checkov produces findings; tflint requires cloud credentials to run',
+    ],
+    answer: 1,
+    explain: 'Proven directly with two real, one-shot docker runs against the exact same main.tf the pipeline uses: tflint found a real required_version warning, checkov found 3 real failed checks.',
+  },
+  {
+    q: 'The generated workflow shows a real `google-github-actions/auth` step with `workload_identity_provider`/`service_account`, but no attribute condition on the pool provider. Why does this matter?',
+    options: [
+      'It does not matter -- google-github-actions/auth alone is sufficient authorization',
+      "A Workload Identity Pool provider's attribute condition is what actually decides which GitHub identities can impersonate the service account -- without one scoped to assertion.ref, any branch (including a fork's pull request) could impersonate it, per GitHub's own OIDC-in-GCP docs",
+      'google-github-actions/auth automatically scopes itself to the current branch with no further configuration needed',
+      'This is only a concern for AWS IAM roles and Azure App Registrations, not GCP',
+    ],
+    answer: 1,
+    explain: "Docs-sourced (no GCP project exists in this course to create one in): per GitHub's OIDC-in-GCP guide, the pool provider's attribute condition is the actual authorization boundary -- the auth action's inputs alone do not restrict which identities can impersonate the service account.",
+  },
+  {
+    q: 'A workflow step sets `env: TF_VAR_db_password: ${{ secrets.DB_PASSWORD }}` and a later line does `echo "TF_VAR_db_password=$TF_VAR_db_password"`. Why is GitHub\'s log masking not a reliable defense here?',
+    options: [
+      'Masking is a best-effort match on the known secret string -- proven that the moment a secret becomes a plain shell environment variable, any command that dumps or rebuilds that string is a real, readable leak path masking cannot guarantee catching',
+      'Masking works perfectly here, so this pattern is actually safe',
+      'env: blocks are encrypted separately from secrets.*, so this never reaches the shell at all',
+      'This only leaks if the workflow is triggered from a fork',
+    ],
+    answer: 0,
+    explain: 'Proven directly: `env | grep TF_VAR_db_password` against a real exported variable showed the plain, unmasked value.',
+  },
+];
+
+<Quiz client:visible id="reading-terraform/worked-review-3" questions={quizWorkedReview3} />
+
+<ProgressTracker client:visible id="reading-terraform/worked-review-3" />
