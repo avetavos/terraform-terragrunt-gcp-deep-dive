@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## ไอเดียในหนึ่งประโยค
 
@@ -158,14 +159,180 @@ resource "google_compute_instance" "web" {
 }
 ```
 
-<Mermaid title="Terraform builds a DAG from references, applying independent branches in parallel" code={dagDiagram} />
+<Mermaid title="Terraform สร้าง DAG จาก reference แล้ว apply กิ่งที่เป็นอิสระต่อกันพร้อมกัน" code={dagDiagram} />
 
 export const dagDiagram = `flowchart LR
   network["google_compute_network.vpc"] --> subnet["google_compute_subnetwork.app"] --> instance["google_compute_instance.web"]
   bucket["google_storage_bucket.logs (unrelated, applies in parallel)"]`;
 
+## `lifecycle` block: เปลี่ยนพฤติกรรม default ของ Terraform
+
+ทุก resource รับ `lifecycle` block เป็นตัวเลือกได้ ซึ่งเปลี่ยนวิธีที่ Terraform plan การเปลี่ยนแปลงสำหรับ *resource นั้นตัวเดียว* โดยไม่เกี่ยวกับส่วนอื่นใน configuration argument สี่ตัวครอบคลุมความต้องการจริงแทบทั้งหมด
+
+**`prevent_destroy`** เปลี่ยนการ destroy ที่ plan ไว้ให้กลายเป็น error หนัก ๆ แทนที่จะปล่อยให้ดำเนินต่อ — ราวกั้นความปลอดภัยสำหรับ resource ที่ต้องไม่ถูกลบโดยไม่ตั้งใจเด็ดขาด:
+
+```hcl
+resource "local_file" "protected" {
+  filename = "${path.module}/protected.txt"
+  content  = var.content
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+```
+
+Error จริงจาก `terraform plan -destroy` กับบล็อกเดียวกันเป๊ะข้างบน:
+
+```text
+$ terraform plan -destroy
+Plan: 0 to add, 0 to change, 1 to destroy.
+╷
+│ Error: Instance cannot be destroyed
+│
+│   on main.tf line 10:
+│   10: resource "local_file" "protected" {
+│
+│ Resource local_file.protected has lifecycle.prevent_destroy set, but the
+│ plan calls for this resource to be destroyed. To avoid this error and
+│ continue with the plan, either disable lifecycle.prevent_destroy or reduce
+│ the scope of the plan using the -target option.
+╵
+```
+
+สังเกตว่า Terraform ยังคำนวณ plan อยู่ (`Plan: 0 to add, 0 to change, 1 to destroy` พิมพ์ก่อน) — `prevent_destroy` ถูกเช็คและหยุดการทำงานหลังจาก plan ตัดสินใจแล้วว่าต้อง destroy เท่านั้น ไม่ใช่ก่อนหน้านั้น
+
+**`create_before_destroy`** สลับลำดับ replace default ปกติแล้วการ replace resource คือ destroy-แล้ว-create (`-/+` ใน plan); เมื่อตั้งค่านี้ Terraform จะสร้างตัวแทนก่อน แล้วค่อย destroy ตัวเก่าหลังจากตัวใหม่มีอยู่แล้ว — จำเป็นมากสำหรับอะไรก็ตามที่ช่วงเวลา "ไม่มีทั้งคู่" ยอมรับไม่ได้ อย่าง `google_compute_instance` ที่อยู่หลัง load balancer
+
+```hcl
+resource "local_file" "app" {
+  filename = "${path.module}/app-${var.content}.txt"
+  content  = var.content
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+```
+
+Plan จริงหลังเปลี่ยน `var.content` (ซึ่งบังคับให้ `filename` เปลี่ยนตามไปด้วย และ `filename` บังคับให้ replace):
+
+```text
+$ terraform plan
+  # local_file.app must be replaced
++/- resource "local_file" "app" {
+      ~ content  = "v1" -> "v2" # forces replacement
+      ~ filename = "./app-v1.txt" -> "./app-v2.txt" # forces replacement
+        # (2 unchanged attributes hidden)
+    }
+Plan: 1 to add, 0 to change, 1 to destroy.
+```
+
+สัญลักษณ์คือตัวบ่งชี้: `+/-` (create แล้ว destroy) แทน `-/+` default (destroy แล้ว create) ที่เห็นทั่วทั้งคอร์สนี้ `create_before_destroy` เปลี่ยนแค่สัญลักษณ์ลำดับนั้น ไม่เปลี่ยนจำนวนบรรทัดของ plan เลย
+
+**`ignore_changes`** บอก Terraform ให้เลิกมองการเปลี่ยนแปลงของ argument เฉพาะเป็น drift — มีประโยชน์เมื่อบางอย่างนอก Terraform (autoscaler, คนแก้ label ใน Cloud Console) คาดว่าจะเปลี่ยนค่า และการยืนยันค่าเดิมซ้ำทุก `apply` จะไปขัดกับมัน
+
+```hcl
+resource "terraform_data" "app" {
+  input = {
+    labels = { managed_by = "terraform" }
+  }
+  lifecycle {
+    ignore_changes = [input]
+  }
+}
+```
+
+Plan จริงหลังเปลี่ยน `input` ใน configuration เอง:
+
+```text
+$ terraform plan
+No changes. Your infrastructure matches the configuration.
+```
+
+ถ้าไม่มี `ignore_changes = [input]` การแก้คอนฟิกแบบเดียวกันนั้นจะ plan update จริง แต่มีมันแล้ว Terraform ไม่เทียบ `input` ปัจจุบันกับค่าคอนฟิกใหม่สำหรับ argument นั้นเลยด้วยซ้ำ — การเปลี่ยนแปลงมองไม่เห็นสำหรับ `plan` ไม่ใช่แค่ปล่อยให้เกิดครั้งเดียวแล้วค่อย track ใหม่
+
+**`replace_triggered_by`** (อธิบายลึกพร้อมพิสูจน์จริงในบท Count and For Each) บังคับให้ resource ถูก replace ทุกครั้งที่ค่าที่*อ้างอิง*เปลี่ยน แม้ argument ของ resource เองจะไม่เปลี่ยนเลย — ปัญหาตรงข้ามกับ `ignore_changes`: แทนที่จะซ่อนการเปลี่ยนแปลง มันสร้างการ replace ขึ้นมาจากการเปลี่ยนแปลงที่ปกติมองไม่เห็นสำหรับ resource นี้
+
+## `terraform graph` output จริง
+
+`terraform graph` พิมพ์ dependency graph จริงที่ Terraform คำนวณ — ไม่ใช่คำอธิบาย แต่เป็น DOT output จริงที่ GraphViz (หรือเครื่องมืออ่าน DOT ไหนก็ได้) render ได้ตรง ๆ รันโดยไม่มี `-type` จะได้ resource-level summary graph เป็น default ซึ่งอ่านด้วยตาเปล่าง่ายที่สุด และไม่ต้องมี GCP credentials เลย — มันไม่เรียก Google Cloud API เลย เพียงแค่ resolve reference ที่มีอยู่แล้วในคอนฟิก:
+
+```text
+$ terraform graph
+digraph G {
+  rankdir = "RL";
+  node [shape = rect, fontname = "sans-serif"];
+  "data.google_compute_image.debian" [label="data.google_compute_image.debian"];
+  "google_compute_instance.web" [label="google_compute_instance.web"];
+  "google_compute_network.vpc" [label="google_compute_network.vpc"];
+  "google_compute_subnetwork.app" [label="google_compute_subnetwork.app"];
+  "google_storage_bucket.logs" [label="google_storage_bucket.logs"];
+  "google_compute_instance.web" -> "data.google_compute_image.debian";
+  "google_compute_instance.web" -> "google_compute_subnetwork.app";
+  "google_compute_subnetwork.app" -> "google_compute_network.vpc";
+}
+```
+
+นั่นคือกราฟจริงของ chain `google_compute_network.vpc` → `google_compute_subnetwork.app` → `google_compute_instance.web` ที่แสดงไว้ก่อนหน้าในบทนี้ บวกกับ `google_storage_bucket.logs` ที่ไม่เกี่ยวข้องกัน — อ่านตาม `rankdir = "RL"` (ขวาไปซ้าย) edge `A -> B` หมายถึง "A ขึ้นกับ B" ตรงกับเหตุผลเรื่อง implicit dependency จากหัวข้อก่อนหน้าเป๊ะ: `google_compute_instance.web` ขึ้นกับทั้ง `data.google_compute_image.debian` และ `google_compute_subnetwork.app` และ `google_compute_subnetwork.app` ขึ้นกับ `google_compute_network.vpc` `google_storage_bucket.logs` ไม่มี edge เข้าหรือออกจากอะไรเลย ซึ่งเป็นเหตุผลที่ Terraform สร้างมันพร้อมกับ chain ของ network ได้อย่างอิสระ
+
+<Mermaid title="dependency graph เดียวกันที่ terraform graph พิมพ์ข้างบน วาดใหม่" code={realGraphDiagram} />
+
+export const realGraphDiagram = `flowchart RL
+  instance["google_compute_instance.web"] --> image["data.google_compute_image.debian"]
+  instance --> subnet["google_compute_subnetwork.app"]
+  subnet --> network["google_compute_network.vpc"]
+  bucket["google_storage_bucket.logs (no edges: parallel)"]`;
+
+## Provider protocol: เกิดอะไรขึ้นจริง ๆ ตอน `terraform init`
+
+ทุก provider — รวมถึง `hashicorp/google` — เป็น binary แยกต่างหากที่มี version เป็นของตัวเอง ที่ Terraform Core ดาวน์โหลดแล้วรันเป็น subprocess คุยกันผ่าน gRPC ด้วย protocol ตายตัว (protocol version 5 หรือ 6 แล้วแต่ SDK ของ provider) นี่คือเหตุผลที่ `terraform init` ต้องดาวน์โหลด binary เฉพาะต่อ OS/architecture แทนที่ Terraform จะ "รู้" วิธีคุยกับ GCP, AWS หรือ Azure เองมาตั้งแต่ต้น — provider plugin protocol, plugin handshake และเหตุผลที่ provider crash แล้วเกิด log แบบเฉพาะเจาะจง จะอธิบายลึกพร้อม trace จริงของ `TF_LOG=TRACE` ตอน provider เริ่มทำงาน ใน [Provider Plugin Protocol](/terraform-gcp/en/terraform-internals/provider-plugin-protocol/) ในโมดูล Terraform Internals
+
+## Mental Model
+
+ทุกอย่างในบทนี้มีหน้าที่เดียว: ช่วยให้ Terraform สร้าง plan ที่ถูกต้องก่อนที่มันจะแตะ GCP เลย `resource`/`data` block และการอ้างอิงของมันสร้าง dependency graph; การ override ด้วย `lifecycle` คือข้อยกเว้นที่ซ้อนอยู่*บน*พฤติกรรมปกติของกราฟนั้นสำหรับ resource ทีละตัว (หยุดหนัก ๆ, สลับลำดับ, จุดบอดที่ตั้งใจ, edge เพิ่ม) — ไม่มีตัวไหนเปลี่ยนหน้าตาของกราฟเลย เปลี่ยนแค่สิ่งที่ Terraform ทำเมื่อไปถึง node นั้น ตัว provider เองเป็น process แยกที่ Terraform Core คุยด้วยผ่าน protocol ตายตัว ซึ่งเป็นเหตุผลที่ "provider" กับ "Terraform" มี version อิสระจากกันได้ — `required_providers` pin ตัวหนึ่ง `required_version` pin อีกตัว
+
+## Trade-offs
+
+| ตัวเลือก | ข้อดี | ต้นทุน |
+|---|---|---|
+| `prevent_destroy` | หยุดหนัก ๆ ป้องกัน destroy โดยไม่ตั้งใจ พิสูจน์ข้างบนด้วย error จริงก่อน API call ใด ๆ | บล็อก*ทุก*การ destroy รวมถึงที่ตั้งใจด้วย — ต้องลบออกจากโค้ด (ไม่ใช่แค่ `-target` เลี่ยง) เพื่อรื้อ resource จริง ๆ |
+| `create_before_destroy` | ไม่มีช่วง "ไม่มีทั้งคู่" ตอน replace พิสูจน์ข้างบนผ่านสัญลักษณ์ลำดับ `+/-` | ต้องมีสองชุดอยู่ร่วมกันชั่วขณะ — ปัญหาสำหรับอะไรที่มี uniqueness constraint (ชื่อตายตัว, static IP ที่จองไว้) นอกจาก argument นั้นจะเปลี่ยนด้วย |
+| `ignore_changes` | หยุด Terraform สู้กับการเปลี่ยนแปลงนอกระบบ พิสูจน์ข้างบนด้วย "No changes" จริงแม้แก้คอนฟิก | ค่าจริงของ argument ที่ถูก ignore ใน console/API เบี่ยงห่างจากที่อยู่ใน `.tf` ได้ไม่จำกัด โดย `plan` ไม่พูดถึงเลย |
+| `replace_triggered_by` | ทำให้ dependency ที่ปกติมองไม่เห็นบังคับ replace จริงได้ อย่างตั้งใจ | ต้นทุนเดียวกับ forced replacement ใด ๆ: destroy + recreate ทั้งหมด ไม่ใช่ update บางส่วน |
+| `terraform graph` (default ไม่มี `-type`) | สะอาด เป็น summary ระดับ resource — ตัวที่ควรอ่านด้วยตาเปล่า พิสูจน์ข้างบน และไม่ต้องมี GCP credentials | ไม่มี provider node, internal `(expand)` และ action เฉพาะ plan ที่ `-type=plan` แสดง — ไม่ใช่ภาพเต็มที่ Terraform เดินจริง |
+
+## ความเข้าใจผิดที่พบบ่อย
+
+- **"`prevent_destroy` หยุด Terraform ไม่ให้คำนวณ destroy plan เลยด้วยซ้ำ"** พิสูจน์ข้างบนแล้วว่าไม่ใช่: บรรทัดสรุป plan (`Plan: 0 to add, 0 to change, 1 to destroy`) พิมพ์ *ก่อน* error — `prevent_destroy` ดักการทำงานหลังจาก plan เสร็จ ไม่ใช่ก่อน
+- **"`create_before_destroy` หลีกเลี่ยงการเปลี่ยนจำนวนบรรทัดของ plan diff"** มันเปลี่ยนแค่*สัญลักษณ์* (`+/-` กับ `-/+`) พิสูจน์ข้างบน ไม่เปลี่ยนจำนวนบรรทัด — `1 to add, 0 to change, 1 to destroy` เหมือนกันทั้งคู่
+- **"`ignore_changes` แค่ ignore drift ครั้งแรก แล้วก็ resync"** พิสูจน์ข้างบนแล้วว่าไม่ใช่การข้ามครั้งเดียว — ทุก `plan` ถัดไปยังมองว่า argument นั้นมองไม่เห็นต่อไปเรื่อย ๆ จนกว่า `lifecycle` block เองจะถูกแก้
+- **"Terraform apply resource ตามลำดับที่เขียนในไฟล์"** พิสูจน์ข้างบนด้วย `terraform graph` จริง: ลำดับมาจาก dependency graph ทั้งหมด ไม่ใช่ตำแหน่งในไฟล์ — `google_storage_bucket.logs` ที่เขียนไว้ท้ายสุด ไม่มี edge เลยและ apply ก่อนได้
+- **"provider เป็นส่วนหนึ่งของ Terraform binary compile ติดมาด้วย"** มันเป็น binary ที่ดาวน์โหลดแยกต่างหาก รันเป็น subprocess ผ่าน gRPC — อธิบายพร้อม trace จริงในโมดูล Terraform Internals นี่คือเหตุผลที่ `terraform init` ต้องใช้ network access สำหรับ provider ที่ Terraform เองไม่ได้มากับตัว
+
+## อ่านโค้ดที่ AI สร้างให้
+
+- `lifecycle { prevent_destroy = true }` ที่ใส่ในทุก resource "เพื่อความปลอดภัย" รวมถึงตัวที่จำเป็นต้องถูก destroy จริงเป็นส่วนหนึ่งของการทำงานปกติ (resource ชั่วคราว, อะไรก็ตามที่อยู่หลัง `count`/`for_each` ที่หดตัวจริง ๆ) — พิสูจน์ข้างบนแล้วว่านี่เปลี่ยน destroy ที่ตั้งใจให้เป็น error หนัก ๆ ที่ต้องแก้ด้วยการแก้โค้ด ไม่ใช่คำเตือนเบา ๆ
+- `create_before_destroy = true` ที่ใส่ใน resource ที่มี uniqueness constraint บน argument ที่ไม่ได้เปลี่ยน (`name` ตายตัว, static IP ที่จองไว้) — ตัวแทนจะสร้างไม่สำเร็จเพราะตัวเก่าที่ยังไม่ถูก destroy ยังถือชื่อนั้นอยู่
+- `ignore_changes = [labels]` (หรือแย่กว่านั้น `ignore_changes = all`) ที่ copy มาจากตัวอย่างโดยไม่เช็คว่า label ของ resource *นี้* ควรถูกจัดการโดย Terraform ไหม — พิสูจน์ข้างบนแล้วว่านี่ซ่อน drift แบบเงียบและตลอดไป ไม่ใช่แค่ครั้งเดียว
+- `depends_on` ที่หายไปเมื่อ comment อ้างว่า "X ต้องมีก่อน Y" แต่ไม่มี argument reference ไหนเข้ารหัสสิ่งนั้นจริง — พิสูจน์ข้างบนแล้วว่า implicit dependency ต้องการ attribute reference จริง comment เฉย ๆ ไม่เข้ากราฟเลย
+- `google_compute_instance` ที่ generate มาโดยไม่มี `network_interface` block เลย — นี่ไม่ใช่ตัวเลือก `terraform validate` จะปฏิเสธทันทีเพราะ `network_interface` เป็น block ที่จำเป็น
+- โค้ดที่อ้างพฤติกรรมของ provider version เฉพาะโดยไม่เช็ค `required_providers` — หัวข้อ provider protocol ข้างบนเตือนว่า "Terraform" กับ "Google provider" เป็นซอฟต์แวร์สอง version อิสระที่คุยกันผ่าน wire protocol ตายตัว
+
+<SpotTheBug code={`resource "google_storage_bucket" "assets" {
+  name          = "acme-assets-prod"
+  location      = "US"
+  storage_class = "STANDARD"
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}`}>
+`name` ไม่ได้แสดงว่าเปลี่ยนตรงนี้ แต่ไม่จำเป็นต้องเปลี่ยนด้วย — ชื่อ GCS bucket ต้อง**ไม่ซ้ำกันทั่วทั้ง Google Cloud Storage** ไม่ใช่แค่ในระดับ project ถ้ามีการเปลี่ยนแปลงใด ๆ กับ resource นี้ที่บังคับให้ replace (`location` เป็น `ForceNew` argument จริงของ resource นี้ ยืนยันแล้วใน source ของ provider) `create_before_destroy` จะพยายามสร้าง `acme-assets-prod` ตัว*ใหม่*ก่อน destroy ตัวเก่า — และ GCS จะปฏิเสธการสร้างทันที เพราะ bucket `acme-assets-prod` ตัวเก่ายังอยู่และถือชื่อนั้นแบบ global อาการที่เห็นคือความล้มเหลวจริงตอน `apply` (ไม่ใช่ `plan` เพราะ `plan` ขอให้ GCS จองชื่อที่ unique ทั่วโลกไว้ล่วงหน้าไม่ได้) ประมาณ "409 Conflict: the requested bucket name is not available" ทางแก้คือถอด `create_before_destroy` ออกจาก resource นี้ (ยอมรับช่วง destroy-แล้ว-create) หรือทำให้ `name` เองเปลี่ยนทุกครั้งที่ replace (เช่น ใส่ suffix จาก `random_id`) เพื่อให้ชื่อใหม่กับเก่าไม่ชนกันตอนที่ทั้งคู่ยังอยู่
+</SpotTheBug>
+
 <Callout title="สรุปหนึ่งบรรทัด">
-configuration แบบ HCL ประกอบด้วย **block**: `terraform` ประกาศ provider และ version ที่ต้องใช้, `provider` ตั้งค่าว่า Terraform คุยกับ GCP ยังไง, `resource` block (ระบุด้วย **type** และ **name** ที่คุณเลือก รวมกันเป็น **address**) ประกาศสิ่งที่ Terraform ควรสร้างและจัดการ ส่วน `data` block มีหน้าที่ **อ่าน** infrastructure ที่มีอยู่แล้วเท่านั้นโดยไม่เข้าไปเป็นเจ้าของ Terraform สร้าง **dependency graph (DAG)** จาก implicit reference กับ `depends_on` แบบ explicit แล้ว apply resource ที่เป็นอิสระต่อกันพร้อมกัน
+configuration แบบ HCL ประกอบด้วย **block**: `terraform` ประกาศ provider และ version ที่ต้องใช้, `provider` ตั้งค่าว่า Terraform คุยกับ GCP ยังไง, `resource` block (ระบุด้วย **type** และ **name** ที่คุณเลือก รวมกันเป็น **address**) ประกาศสิ่งที่ Terraform ควรสร้างและจัดการ ส่วน `data` block มีหน้าที่ **อ่าน** infrastructure ที่มีอยู่แล้วเท่านั้นโดยไม่เข้าไปเป็นเจ้าของ Terraform สร้าง **dependency graph (DAG)** จาก implicit reference กับ `depends_on` แบบ explicit แล้ว apply resource ที่เป็นอิสระต่อกันพร้อมกัน — พิสูจน์ข้างบนด้วย `terraform graph` DOT dump จริง **`lifecycle`** block override พฤติกรรม default ของ Terraform ต่อ resource: **`prevent_destroy`** เปลี่ยน destroy ที่ plan ไว้ให้เป็น error หนัก ๆ (พิสูจน์ข้างบน), **`create_before_destroy`** สลับลำดับ replace เป็น `+/-` แทน `-/+` (พิสูจน์ข้างบน), **`ignore_changes`** ทำให้การเปลี่ยน argument เฉพาะมองไม่เห็นต่อ `plan` (พิสูจน์ข้างบนด้วย "No changes" จริง) และ **`replace_triggered_by`** บังคับ replace จากสัญญาณภายนอก ทุก provider เป็น binary แยกที่คุยผ่าน gRPC protocol ตายตัวกับ Terraform Core อธิบายในโมดูล Terraform Internals
 </Callout>
 
 export const quizHcl = [
@@ -208,6 +375,50 @@ export const quizHcl = [
       'จำเป็นเฉพาะตอนใช้ data block เท่านั้น',
     ],
     answer: 1,
+  },
+  {
+    q: 'เกิดอะไรขึ้นเมื่อรัน terraform plan -destroy กับ resource ที่มี lifecycle.prevent_destroy = true',
+    options: [
+      'Terraform ข้ามการ destroy resource นั้นแบบเงียบ ๆ ไม่มี output เลย',
+      'Terraform ยังคำนวณและพิมพ์ plan (รวมถึง destroy) แล้วค่อย error: "Instance cannot be destroyed"',
+      'Terraform ตั้ง prevent_destroy = false ให้อัตโนมัติแล้วดำเนินต่อ',
+      'คำสั่ง plan เองปฏิเสธที่จะรันเลย',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ข้างบนด้วย terraform plan -destroy จริง: บรรทัดสรุป plan พิมพ์ก่อน ("Plan: 0 to add, 0 to change, 1 to destroy") แล้ว error จริงถึงหยุดการทำงาน -- prevent_destroy ถูกเช็คหลัง plan ไม่ใช่ก่อน',
+  },
+  {
+    q: 'ใน plan diff ของ terraform สัญลักษณ์ +/- (เทียบกับ -/+ default) บ่งบอกอะไรสำหรับ resource ที่ถูก replace',
+    options: [
+      'update บางส่วนแทนที่จะ replace ทั้งหมด',
+      'create_before_destroy ถูกตั้งไว้: ตัวแทนถูกสร้างก่อน แล้วตัวเก่าค่อยถูก destroy -- กลับด้านจากลำดับ default',
+      'resource จะถูก import แทนที่จะสร้าง',
+      'การเปลี่ยนแปลงกระทบแค่ resource ที่อยู่ใน module เท่านั้น',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ข้างบนด้วย plan จริง: create_before_destroy สลับสัญลักษณ์จาก -/+ default (destroy แล้ว create) เป็น +/- (create แล้ว destroy) โดยจำนวน 1 to add / 1 to destroy เท่าเดิมทั้งคู่',
+  },
+  {
+    q: 'argument ของ resource อยู่ใน lifecycle.ignore_changes แล้วค่าของมันถูกเปลี่ยนตรง ๆ ในไฟล์ .tf terraform plan ถัดไปจะแสดงอะไร',
+    options: [
+      '"No changes" -- การเปลี่ยนแปลงของ argument นั้นมองไม่เห็นสำหรับ plan ตลอดไป จนกว่า lifecycle block เองจะถูกแก้',
+      'คำเตือน drift ครั้งเดียว แล้ว resync ใน plan ถัดไป',
+      'error จริงที่ปฏิเสธจะ plan จนกว่า ignore_changes list จะถูกอัปเดต',
+      'การเปลี่ยนแปลงถูก apply ทันทีโดยไม่ถาม',
+    ],
+    answer: 0,
+    explain: 'พิสูจน์ข้างบนด้วย terraform plan จริง: เปลี่ยน argument ที่ถูก ignore ใน configuration เองให้ผลลัพธ์เป็น "No changes. Your infrastructure matches the configuration." -- ไม่ใช่การข้ามครั้งเดียว',
+  },
+  {
+    q: 'terraform graph (default ไม่มี flag -type) ต้องมี GCP credentials ไหมถึงจะรันได้',
+    options: [
+      'ต้องมี ต้องเรียก Google Cloud API เพื่อ resolve resource ID ก่อนวาดกราฟ',
+      'ไม่ต้อง -- มัน resolve แค่ reference ที่มีอยู่แล้วในคอนฟิก และไม่เรียก Google Cloud API เลย พิสูจน์ข้างบนด้วยการรันจริงกับ google provider ที่ไม่ได้ authenticate',
+      'ต้องมีเฉพาะตอนคอนฟิกใช้ data block',
+      'ต้องมีเฉพาะตอน argument project หายไปจาก provider block',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ข้างบน: terraform graph รันสำเร็จกับ chain google_compute_network -> google_compute_subnetwork -> google_compute_instance จริง โดยมีแค่ค่า project/region ปลอมและไม่มี GCP credentials จริงเลย',
   },
 ];
 
