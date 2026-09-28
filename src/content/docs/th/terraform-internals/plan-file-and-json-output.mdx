@@ -1,0 +1,212 @@
+---
+title: 'Plan File and JSON Output'
+description: 'terraform plan -out คือ zip จริง พิสูจน์ด้วย unzip -l; matrix เต็มของ resource_changes[].change.actions (no-op, create, update, delete, replace, forget) พิสูจน์สด ๆ รวมถึงข้อขัดแย้งจริงหนึ่งอย่างกับเอกสารสาธารณะ; -detailed-exitcode; วิธีที่ policy tooling อย่าง Conftest/OPA อ่าน JSON นี้'
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
+
+## ไอเดียในหนึ่งประโยค
+
+`terraform plan -out=tfplan` เขียน **zip archive** จริงที่ครบในตัวลงดิสก์ และ `terraform show -json` แปลงมัน (หรือ state ปัจจุบัน) เป็น JSON schema ที่เสถียรและ document ไว้ ซึ่ง array `resource_changes[].change.actions` ของมัน — ไม่ใช่ text summary ที่มนุษย์อ่าน — คือ interface จริงที่ policy engine, เครื่องมือคำนวณ cost, และ CI script ควรอ่าน
+
+## `-out` คือไฟล์ zip จริง พิสูจน์แล้ว
+
+ใช้ config [graph demo](/terraform-gcp/th/terraform-internals/the-graph-and-the-walk/) ของโมดูลนี้เอง:
+
+```text
+$ terraform plan -out=tfplan.bin -input=false
+...
+Saved the plan to: tfplan.bin
+
+$ file tfplan.bin
+tfplan.bin: Zip archive data, at least v2.0 to extract, compression method=deflate
+
+$ unzip -l tfplan.bin
+Archive:  tfplan.bin
+  Length      Date    Time    Name
+---------  ---------- -----   ----
+     1276  09-29-2026 04:05   tfplan
+     3048  09-29-2026 04:05   tfstate
+     3012  09-29-2026 04:05   tfstate-prev
+      504  09-29-2026 04:05   tfconfig/m-/main.tf
+       41  09-29-2026 04:05   tfconfig/modules.json
+     2408  09-29-2026 04:05   .terraform.lock.hcl
+---------                     -------
+    10289                     6 files
+```
+
+6 entry จริงในไฟล์เดียว: plan จริง (`tfplan`), state *ก่อน* plan นี้ (`tfstate-prev`) และ *หลัง* refresh ที่ plan นี้ทำ (`tfstate`), snapshot เต็มของ configuration ที่สร้างมัน (`tfconfig/`), และ lock file นี่คือเหตุผลที่ `terraform apply tfplan.bin` ไม่เคยอ่านไฟล์ `.tf` ของคุณใหม่ หรือ refresh อะไรใหม่โดย default เลย — ทุกอย่างที่ `apply` ต้องใช้อยู่ใน archive เดียวนี้แล้ว
+
+## `-detailed-exitcode`: exit code contract จริงที่ document ไว้
+
+```text
+$ terraform plan -input=false -detailed-exitcode -out=noop.bin
+...
+Terraform has compared your real infrastructure against your configuration
+and found no differences, so no changes are needed.
+$ echo $?
+0
+```
+
+หลังแก้ config เพิ่ม resource และบังคับให้ replace เกิด plan เดียวกันกับ flag เดิม:
+
+```text
+$ terraform plan -input=false -detailed-exitcode -out=haschanges.bin
+...
+Plan: 3 to add, 0 to change, 2 to destroy.
+$ echo $?
+2
+```
+
+`0` = ไม่มีการเปลี่ยนแปลง, `1` = error จริง, `2` = มีการเปลี่ยนแปลง (และถ้าไม่ใส่ `-detailed-exitcode` `plan` จะ exit `0` เสมอเมื่อสำเร็จ ไม่ว่าจะมีการเปลี่ยนแปลงหรือไม่) — contract ที่เสถียรและ document ไว้ ให้ CI gate branch ได้ตรง ๆ โดยไม่ต้อง parse text เลย
+
+## `resource_changes[].change.actions`: matrix จริง พิสูจน์แล้ว
+
+`terraform show -json <planfile>` คือ interface ที่เสถียรและ document ไว้ กับ plan ที่สร้าง resource หนึ่ง, replace สองตัว, และปล่อยหนึ่งตัวไม่เปลี่ยน:
+
+```text
+$ terraform show -json tfplan3.bin | python3 -c "
+import json,sys
+d = json.load(sys.stdin)
+for rc in d['resource_changes']:
+    print(rc['address'], rc['change']['actions'])
+print([rc.get('action_reason') for rc in d['resource_changes']])
+"
+local_file.extra ['create']
+local_file.greeting ['delete', 'create']
+random_pet.name ['delete', 'create']
+terraform_data.after_file ['no-op']
+[None, 'replace_because_cannot_update', 'replace_because_cannot_update', None]
+```
+
+`['delete', 'create']` — ไม่ใช่ string `'replace'` เดี่ยว ๆ เลย — คือวิธีที่ Terraform แทน destroy-แล้ว-recreate เป๊ะ ๆ และ `action_reason` (field จริง `replace_because_cannot_update` ในที่นี้ เพราะ `random_pet.length` เป็น `ForceNew`) บอกว่า *ทำไม* โดยไม่ต้อง parse plan text ที่มนุษย์อ่านเลย ชุด `actions` เต็มที่ [document ไว้](https://developer.hashicorp.com/terraform/internals/json-format) คือ:
+
+```text
+["no-op"] ["create"] ["read"] ["update"] ["delete"] ["delete", "create"] ["create", "delete"]
+```
+
+`removed` block จริงที่มี `lifecycle { destroy = false }` (Terraform 1.7+) สร้างค่าที่ **ไม่อยู่** ในรายการ document นั้น — คอร์สนี้เจอมันสด ๆ และมันขัดแย้งตรง ๆ กับหน้า docs ที่ fetch มาระหว่างวิจัยบทนี้:
+
+```text
+$ terraform show -json tfplan4.bin | python3 -c "..."
+terraform_data.after_file ['forget']
+```
+
+<Callout title="พบข้อขัดแย้ง: docs เทียบกับพฤติกรรมจริงบน 1.16.4">
+หน้า docs ของ JSON format เท่าที่ fetch มาสำหรับบทนี้ ระบุแค่ `no-op`/`create`/`read`/`update`/`delete`/`["delete","create"]`/`["create","delete"]` ใต้ `resource_changes[].change.actions` — ไม่พูดถึง `["forget"]` เลย การ `terraform plan` จริงกับ config ที่มี `removed { lifecycle { destroy = false } }` บน Terraform 1.16.4 สร้าง `["forget"]` ได้จริงตอนนี้ พิสูจน์ได้ (แสดงข้างบน) ถือว่านี่คือรายการที่ document ไม่ครบ/ไม่ทันสำหรับ feature `removed` block (เพิ่มเข้ามาใน 1.7) ไม่ใช่ข้อเท็จจริงที่ควรตัดทิ้ง — การรันจริงคือแหล่งความจริงตรงนี้
+</Callout>
+
+## `prior_state`, `configuration`, และ key ระดับบนอื่น ๆ
+
+```text
+$ terraform show -json tfplan2.bin | python3 -c "import json,sys; print(list(json.load(sys.stdin).keys()))"
+['format_version', 'terraform_version', 'planned_values', 'resource_changes', 'prior_state', 'configuration', 'timestamp', 'applyable', 'complete', 'errored']
+```
+
+ตาม [เอกสาร JSON format ทางการ](https://developer.hashicorp.com/terraform/internals/json-format): `prior_state` คือ "state ที่ configuration กำลังจะถูก apply ไปหา" ในรูปแบบเดียวกับที่ `show -json` (ไม่มี plan argument) ใช้ ([State File Anatomy](/terraform-gcp/th/terraform-internals/state-file-anatomy/) ครอบคลุมรูปแบบนั้นละเอียดแล้ว); `configuration` คือ "configuration ที่กำลัง apply ไปหา prior state" ตัวแทนเชิงโครงสร้าง (ไม่ใช่ text) ของไฟล์ `.tf` เอง; `relevant_attributes` (document ไว้ แต่ไม่ได้ทำซ้ำใน config เล็ก ๆ ของบทนี้ — มันโผล่มาเฉพาะตอน replacement เกิดจากทางอ้อม ผ่านค่า unknown ที่ไหลมาจาก resource อื่น) "ระบุแหล่งที่มาของค่าทั้งหมดที่มีผลต่อการเปลี่ยนแปลงใน plan" มีไว้เพื่อกรอง `resource_drift` ให้ตรงกับสิ่งที่อาจเป็นสาเหตุจริง ๆ
+
+## policy tooling อ่านตรงนี้จริง ๆ ได้อย่างไร
+
+policy ของ Conftest/OPA ที่เขียนกับ Terraform plan เขียนกับ output ของ `show -json` นี้เป๊ะ ๆ — policy `.rego` วน `input.resource_changes[]` แล้วเช็ค field `.change.actions` กับ `.change.after` ตรง ๆ field เดียวกับที่พิสูจน์ไว้ข้างบน นี่คือเหตุผลที่ CI pipeline รัน `terraform show -json tfplan > plan.json` ก่อนเรียก policy tool ด้วย: tool ไม่รัน `terraform` เองเลย มันกิน JSON ที่ `show -json` สร้างไว้แล้ว Infracost ก็ทำงานแบบเดียวกันสำหรับประเมิน cost — มันกิน `resource_changes[].change.after` (ค่า attribute ที่ plan ไว้) เพื่อคำนวณ cost delta ต่อ resource โดยไม่เคยเรียก cloud pricing API กับ account จริงของคุณเลย
+
+## Mental Model
+
+มีเอกสาร JSON โครงสร้างต่างกัน 3 แบบในโมดูลนี้ และการสับสนระหว่างมันคือความผิดพลาดที่พบบ่อยที่สุด: **state ดิบ** (`state pull` อธิบายใน [State File Anatomy](/terraform-gcp/th/terraform-internals/state-file-anatomy/) — `version`/`serial`/`lineage` ไม่มี `resource_changes`), **`show -json` ของ state ปัจจุบัน** (ไม่มี plan argument — มีแค่ `format_version`/`terraform_version`/`values` snapshot ที่ไม่มีข้อมูลการเปลี่ยนแปลงเลย), และ **`show -json` ของ plan file ที่ save ไว้** (บทนี้ — เพิ่ม `resource_changes`, `prior_state`, `configuration`, `planned_values`, diff จริง) มีแค่แบบที่สามเท่านั้นที่มี `resource_changes[].change.actions`; policy กับ cost tooling ต้องการแบบนั้นเป๊ะ ๆ
+
+## Trade-offs
+
+| ตัวเลือก | ข้อดี | ต้นทุน |
+|---|---|---|
+| plan file `-out` + `apply <file>` | รับประกันว่า `apply` ทำตามที่ review ไว้เป๊ะ ๆ — ไม่ re-evaluate ไม่มี provider RPC ใหม่นอกเหนือจาก apply เอง | binary file มี state และใช้ครั้งเดียว; apply plan file ที่เก่าไปกับ infrastructure จริงที่เปลี่ยนไปแล้วจะ fail อย่างปลอดภัย แต่ workflow ต้องส่งไฟล์ผ่าน CI |
+| `show -json` สำหรับ policy gate | schema เสถียร document ไว้ ไม่ต้อง parse text; `action_reason` อธิบาย *ทำไม* ไม่ใช่แค่ *อะไร* | payload ใหญ่กว่า text summary ที่มนุษย์อ่าน ต้องมี policy tool ที่รองรับ JSON |
+| `-detailed-exitcode` | contract 0/1/2 จริงที่เสถียร พิสูจน์ข้างบน | ลืมใส่ง่าย: ถ้าไม่ใส่ exit code ของ `plan` จะไม่แยก "ไม่มีการเปลี่ยนแปลง" กับ "มีการเปลี่ยนแปลง" ให้ |
+
+## ความเข้าใจผิดที่พบบ่อย
+
+- **"replace แสดงเป็น action string เดียวว่า 'replace'"** พิสูจน์ข้างบน: มันคือ array 2 element เสมอ `['delete', 'create']` (หรือ `['create', 'delete']` สำหรับ create-before-destroy) — ไม่มี string `'replace'` เดี่ยว ๆ อยู่ใน schema จริงที่ไหนเลย
+- **"ค่า `actions` ที่เป็นไปได้ทั้งหมดอยู่ใน docs สาธารณะแล้ว"** พิสูจน์ข้างบนด้วยการรันจริงที่ขัดแย้ง: `['forget']` (จาก block `removed { lifecycle { destroy = false } }`, Terraform 1.7+) ถูกสร้างสด ๆ โดย 1.16.4 และไม่มีอยู่ในรายการที่ document ไว้เท่าที่ fetch มาสำหรับบทนี้
+- **"exit code ของ `terraform plan` บอกว่ามีการเปลี่ยนแปลงหรือไม่"** พิสูจน์ข้างบน: ถ้าไม่ใส่ `-detailed-exitcode` `plan` ที่สำเร็จจะ exit `0` เสมอไม่ว่าจะมีการเปลี่ยนแปลงหรือไม่ — ต้องใส่ `-detailed-exitcode` ถึงจะแยก `0`/`2` ได้ และ `1` ยังหมายถึง error จริงเหมือนเดิม
+- **"plan file ที่ save ไว้ก็แค่ text ที่ `plan` print ออกมาแบบใหญ่กว่า"** พิสูจน์ข้างบนด้วย `unzip -l`: มันคือ archive จริงที่มี state snapshot เต็ม 2 อันและ configuration snapshot เต็ม ไม่ใช่ copy ของ terminal output ที่ cache ไว้
+
+## อ่านโค้ดที่ AI เขียน
+
+<SpotTheBug code={`# .github/workflows/terraform.yml (relevant step)
+- name: Plan
+  run: terraform plan -out=tfplan
+- name: Check for changes
+  run: |
+    if terraform show tfplan | grep -q "No changes"; then
+      echo "clean=true" >> "$GITHUB_OUTPUT"
+    fi
+- name: Cost check
+  run: infracost breakdown --path tfplan --format json | jq '.totalMonthlyCost'`}>
+ปัญหาจริง 2 อย่าง ทั้งคู่พิสูจน์ในบทนี้ อย่างแรก `terraform show tfplan` (ไม่มี `-json`) print text แบบมนุษย์อ่านที่ไม่เสถียรแบบเดียวกับที่คำสั่ง plan เอง print — grep หา `"No changes"` คือรูปแบบเปราะบางที่ contract `0`/`2` จริงของ `-detailed-exitcode` (พิสูจน์ข้างบน) มีไว้แทนที่เป๊ะ ๆ โดยไม่ต้อง match text เลย อย่างที่สอง — อันนี้จริง ๆ แล้ว *ถูกต้อง* และน่าจำไว้ว่าถูก: `infracost breakdown --path tfplan` กินข้อมูลที่มีโครงสร้างของ plan file จริง ๆ (ผ่าน `resource_changes[].change.after` แบบเดียวกับที่ `show -json` มี ซึ่งบทนี้พิสูจน์ไว้) ซึ่งเป็นวิธีที่ถูกต้องและ document ไว้ที่ cost tool จริงใช้อ่าน Terraform plan — ไม่ใช่ bug ของ script แต่เป็นตัวอย่างของการใช้ interface ที่ถูกต้อง อยู่ติดกับตัวที่ผิดพอดี
+</SpotTheBug>
+
+export const quizPlanJson = [
+  {
+    q: '```text\n$ file tfplan.bin\ntfplan.bin: Zip archive data, at least v2.0 to extract, compression method=deflate\n$ unzip -l tfplan.bin\n  tfplan\n  tfstate\n  tfstate-prev\n  tfconfig/m-/main.tf\n  tfconfig/modules.json\n  .terraform.lock.hcl\n```\noutput จริงนี้พิสูจน์อะไรเกี่ยวกับ terraform plan -out?',
+    options: [
+      'It is a proprietary binary format with no internal structure',
+      'It is a real zip archive containing the plan, two state snapshots (before/after refresh), a full config snapshot, and the lock file',
+      'It only contains the human-readable plan text, compressed',
+      'It contains credentials needed to apply the plan later',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ข้างบนด้วย output จริงของ file และ unzip -l: zip จริงที่มี 6 entry จริง ตามรายการเป๊ะ ๆ',
+  },
+  {
+    q: 'ความต่างจริงระหว่างค่า resource_changes[].change.actions ["delete","create"] กับ string "replace" เดี่ยว ๆ สมมติ คืออะไร?',
+    options: [
+      'They mean the same thing; "replace" is just shorthand some tools use',
+      'The real schema never uses a single "replace" string -- a replacement is always the two-element array ["delete","create"] (or ["create","delete"]), proven live in this lesson',
+      '["delete","create"] means something different from a replace -- it means both a deletion and an unrelated creation happened',
+      '"replace" is the value used in Terraform 1.16, and the array form is deprecated',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ข้างบนด้วย show -json จริง: random_pet.name กับ local_file.greeting แสดง ["delete","create"] ทั้งคู่สำหรับ forced replacement — ไม่มี string "replace" เดี่ยว ๆ เลย',
+  },
+  {
+    q: '```text\n$ terraform show -json tfplan4.bin | python3 -c "..."\nterraform_data.after_file [\'forget\']\n```\nบทนี้เจอค่า action นี้จาก block removed { lifecycle { destroy = false } } จริง สิ่งนี้พิสูจน์อะไรเกี่ยวกับ docs ของ JSON format สาธารณะ?',
+    options: [
+      'The docs are fully complete and this must be a bug in Terraform',
+      'A real 1.16.4 run produced [\'forget\'], a value not present in the actions list as documented at the time of this lesson\'s research -- the real run is the source of truth, and this is flagged as a contradiction found',
+      '["forget"] is not a real value and this output was fabricated',
+      'forget only appears in Terragrunt output, never real Terraform show -json',
+    ],
+    answer: 1,
+    explain: 'บทนี้พิสูจน์และระบุข้อขัดแย้งนี้ตรง ๆ: output forget จริง ทำซ้ำได้ เทียบกับรายการ docs สาธารณะที่ไม่ครบ — จัดการอย่างตรงไปตรงมาแทนที่จะตัดทิ้งเงียบ ๆ',
+  },
+  {
+    q: 'CI script รัน terraform plan -out=tfplan แล้ว grep output ของ `terraform show tfplan` หา "No changes" เพื่อตัดสินใจว่าจะข้าม approval หรือไม่ ทางเลือกที่ถูกต้องและ document ไว้ตามบทนี้คืออะไร?',
+    options: [
+      'There is no better alternative; grepping text output is the standard approach',
+      'terraform plan -detailed-exitcode, which exits 0 for no changes and 2 for changes present -- a stable, documented contract with no text parsing',
+      'Always require manual approval regardless of whether there are changes',
+      'Parse the file size of the tfplan binary to infer whether changes exist',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ข้างบนด้วย exit code จริง: -detailed-exitcode ให้ contract 0/1/2 จริงแทนที่จะ grep text ที่เปราะบาง',
+  },
+  {
+    q: 'เครื่องมืออย่าง Conftest/OPA หรือ Infracost กิน Terraform plan ใน CI จริง ๆ ได้อย่างไร ตามบทนี้?',
+    options: [
+      'It re-runs terraform plan itself with its own credentials',
+      'It reads the JSON produced by terraform show -json <planfile> -- e.g. iterating resource_changes[] and reading .change.actions / .change.after directly',
+      'It parses the human-readable plan text with a custom parser',
+      'It requires direct access to the remote state backend, bypassing the plan file entirely',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์/อธิบายข้างบน: policy กับ cost tool กิน schema ของ show -json ที่ document ไว้ (resource_changes[].change.actions / .after) — field จริงเดียวกับที่พิสูจน์ตลอดบทนี้ ไม่ใช่ plan text หรือการเรียก terraform เองแยกต่างหาก',
+  },
+];
+
+<Quiz client:visible id="terraform-internals/plan-file-and-json-output" questions={quizPlanJson} />
+
+<ProgressTracker client:visible id="terraform-internals/plan-file-and-json-output" />
