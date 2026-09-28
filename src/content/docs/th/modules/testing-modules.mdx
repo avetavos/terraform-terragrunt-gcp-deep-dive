@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## ไอเดียในหนึ่งประโยค
 
@@ -41,7 +42,7 @@ terraform plan
 native test framework ของ Terraform ที่เปิดตัวใน Terraform 1.6 รันไฟล์ `.tftest.hcl` ผ่านคำสั่ง `terraform test` ไฟล์ test หนึ่งไฟล์มี `variables` block ระดับบนสุดสำหรับค่า input เฉพาะของ test และมี `run` block หนึ่งตัวขึ้นไป แต่ละตัวมี `assert` block หนึ่งตัวขึ้นไปที่มี `condition` expression กับ `error_message` ที่จะโชว์เมื่อ condition นั้นเป็นเท็จ
 
 ```hcl
-# tests/gcs_bucket.tftest.hcl
+# Illustrative: tests/gcs_bucket.tftest.hcl (targets the gcs-bucket module from writing-a-reusable-module.mdx)
 variables {
   bucket_name = "acme-app-logs-test"
   project_id  = "acme-app-test"
@@ -87,13 +88,224 @@ run "bucket_actually_created" {
 }
 ```
 
-<Mermaid title="Three levels of confidence: terraform validate, terraform plan, and terraform test" code={testingLevelsDiagram} />
+## `mock_provider`, `override_resource`, `override_module` และ `expect_failures`
+
+Terraform 1.7 เพิ่มเครื่องมือตัวที่สี่ที่อยู่ระหว่าง `plan` กับ `apply` จริง คือ **mocking** `mock_provider` แทน provider จริงทั้งหมด — ทุก resource ที่มันจัดการจะได้ mock value จาก provider สำหรับ attribute ไหนก็ตามที่ config ของคุณไม่ได้ตั้งไว้ตรง ๆ ดังนั้น `command = apply` รันได้ครบวงจรโดยไม่มี API call จริงเลยและไม่มี credential จริงเลย นี่คือกลไกพิสูจน์หลักของ harness คอร์สนี้เอง และพิสูจน์เต็มรูปแบบข้างล่างด้วย module จริงครบและไฟล์ `.tftest.hcl` จริง — ไม่มี GCP project เข้ามาเกี่ยวเลย
+
+module ที่ถูกทดสอบ — `google_storage_bucket` เล็ก ๆ ที่มี module `logging` ซ้อนอยู่ข้างใน และ variable `validation`
+
+```hcl
+# modules/logging/main.tf
+resource "google_logging_project_sink" "this" {
+  name        = "sink-${var.app_name}"
+  destination = "storage.googleapis.com/${var.bucket_name}"
+  filter      = "severity >= WARNING"
+}
+
+output "sink_id" {
+  value = google_logging_project_sink.this.id
+}
+```
+
+```hcl
+# modules/logging/variables.tf
+variable "app_name" {
+  type = string
+}
+
+variable "bucket_name" {
+  type = string
+}
+```
+
+```hcl
+# main.tf
+terraform {
+  required_providers {
+    google = {
+      source  = "hashicorp/google"
+      version = "~> 8.0"
+    }
+  }
+}
+
+variable "bucket_name" {
+  type = string
+  validation {
+    condition     = length(var.bucket_name) >= 3
+    error_message = "bucket_name must be at least 3 characters."
+  }
+}
+
+variable "app_name" {
+  type    = string
+  default = "web"
+}
+
+resource "google_storage_bucket" "this" {
+  name     = var.bucket_name
+  location = "US"
+}
+
+module "logging" {
+  source      = "./modules/logging"
+  app_name    = var.app_name
+  bucket_name = var.bucket_name
+}
+```
+
+ไฟล์ test — `mock_provider "google" {}` ที่บนสุดใช้กับทุก `run` block ในไฟล์ที่ไม่ได้ประกาศของตัวเอง
+
+```hcl
+# tests/bucket.tftest.hcl
+mock_provider "google" {}
+
+variables {
+  bucket_name = "acme-app-logs-test"
+}
+
+run "bucket_name_matches_input" {
+  command = plan
+
+  assert {
+    condition     = google_storage_bucket.this.name == var.bucket_name
+    error_message = "Bucket name did not match the bucket_name input variable"
+  }
+}
+
+run "override_logging_module_output" {
+  command = plan
+
+  override_module {
+    target = module.logging
+    outputs = {
+      sink_id = "projects/my-project/sinks/fake"
+    }
+  }
+
+  assert {
+    condition     = module.logging.sink_id == "projects/my-project/sinks/fake"
+    error_message = "override_module did not replace the logging module output"
+  }
+}
+
+run "override_bucket_resource" {
+  command = plan
+
+  override_resource {
+    target          = google_storage_bucket.this
+    override_during = plan
+    values = {
+      self_link = "https://storage.googleapis.com/storage/v1/b/overridden-bucket"
+    }
+  }
+
+  assert {
+    condition     = google_storage_bucket.this.self_link == "https://storage.googleapis.com/storage/v1/b/overridden-bucket"
+    error_message = "override_resource did not replace the computed self_link attribute"
+  }
+}
+
+run "bucket_name_too_short_fails_validation" {
+  command = plan
+
+  variables {
+    bucket_name = "ab"
+  }
+
+  expect_failures = [
+    var.bucket_name,
+  ]
+}
+
+run "bucket_is_created_with_correct_name" {
+  command = apply
+
+  assert {
+    condition     = google_storage_bucket.this.name == var.bucket_name
+    error_message = "Real bucket name did not match the bucket_name input variable"
+  }
+}
+```
+
+output จริงของ `terraform test` — ทุก run รันจริง ไม่มี GCP credential ตั้งค่าไว้ที่ไหนเลย
+
+```text
+$ terraform test
+tests/bucket.tftest.hcl... in progress
+  run "bucket_name_matches_input"... pass
+  run "override_logging_module_output"... pass
+  run "override_bucket_resource"... pass
+  run "bucket_name_too_short_fails_validation"... pass
+  run "bucket_is_created_with_correct_name"... pass
+tests/bucket.tftest.hcl... tearing down
+tests/bucket.tftest.hcl... pass
+
+Success! 5 passed, 0 failed.
+```
+
+สี่กลไก แต่ละตัวพิสูจน์ด้วยหนึ่งในห้า run นั้น
+
+- **`override_module`** แทนที่ output ทั้งหมดของ child module ด้วยค่าคงที่ โดยไม่รัน resource ของ module นั้นเลย — พิสูจน์ข้างบน `module.logging.sink_id` resolve เป็น fake ID ตัวที่ระบุไว้เป๊ะ ไม่ใช่ค่าที่ mock generate ให้ ทำให้ test แยก logic ของ root module ออกจาก behavior จริงของ dependency ได้
+- **`override_resource`** แทนที่ attribute ของ resource ตัวเดียว nuance จริงที่ไม่ obvious ที่พิสูจน์ข้างบน ความพยายามครั้งแรกของ test นี้ (ไม่แสดงในโค้ด — ดูความเข้าใจผิดด้านล่าง) ลอง override `self_link` ภายใต้ `command = plan` **โดยไม่มี** `override_during = plan` แล้ว fail ด้วย "Unknown condition value... executed a run block with command = plan and one of the values your condition depended on is not known until after the plan has been applied" การเพิ่ม `override_during = plan` เข้าไปใน `override_resource` block คือสิ่งที่ทำให้ค่าที่ override ใช้ได้ใน assertion ระดับ plan-time — พิสูจน์ด้วยการ pass ข้างบนทันทีที่เพิ่ม argument นั้นเข้าไป
+- **`expect_failures`** พิสูจน์ว่า `variable` `validation` block ปฏิเสธ input ที่ผิดจริง — พิสูจน์ข้างบน การส่ง `bucket_name = "ab"` (2 ตัวอักษร) เข้า `run` ที่ระบุ `var.bucket_name` ใน `expect_failures` ทำให้ **test นั้น pass** เพราะ validation fail ตามที่คาดไว้เป๊ะ ถ้า validation ไม่ fire test นี้จะ fail แทน
+- **`command = apply`** กับ `mock_provider` ยังรัน apply-แล้ว-destroy รอบเต็มจริง — แค่กับ resource ที่ mock generate ให้แทนที่จะเป็น GCP จริง พิสูจน์ข้างบน มัน pass เหมือนกับ run ที่เป็น `plan` เท่านั้น และ harness ของคอร์สนี้ใช้กลไกนี้เป๊ะ (`mock_provider` + `command = apply`) เพื่อพิสูจน์ว่า fence `.tftest.hcl` รันจริงแบบ offline สำหรับทุก cloud ในคอร์สนี้
+
+<Mermaid title="สามระดับความมั่นใจ terraform validate, terraform plan และ terraform test" code={testingLevelsDiagram} />
 
 export const testingLevelsDiagram = `flowchart LR
   v["terraform validate: HCL syntax and internal consistency only"] --> p["terraform plan: talks to the real GCP API, shows the diff"] --> t["terraform test: asserts specific expected behavior via .tftest.hcl"]`;
 
-<Callout title="The one-line takeaway">
-`terraform validate`, `terraform plan` และ `terraform test` ตรวจสามเรื่องที่ต่างกัน และไม่มีตัวไหนแทนที่กันได้ `validate` ตรวจแค่ **HCL syntax และ internal consistency** โดยไม่เคยคุยกับ GCP เลย `plan` คุยกับ **GCP API** จริงและโชว์ diff แต่ไม่ assert ว่าอะไรถูกต้อง ส่วน `terraform test` เป็นตัวเดียวที่ **assert** behavior ที่คาดหวังไว้จริง ๆ ผ่านไฟล์ `.tftest.hcl` ที่มี `variables`, `run` block และ `assert` condition ภายใน `run` block `command = plan` assert กับ plan ที่คำนวณไว้อย่างเร็วและไม่มีค่าใช้จ่าย ส่วน `command = apply` สร้างและทำลาย resource จริงเพื่อ integration testing ของจริง การผ่าน `validate` หรือแม้แต่ `plan` ที่ clean ไม่ใช่หลักฐานว่า module ทำงานได้ — มีแค่ `test` ที่ assert กับ behavior จริงเท่านั้นที่เป็นหลักฐานนั้น
+## Mental Model
+
+แต่ละขั้นในสี่ขั้นนี้ถามคำถามที่แคบลงกว่าขั้นก่อนหน้า และนั่นคือประเด็น `validate` ถามว่า "HCL นี้สอดคล้องภายในหรือไม่" `plan` ถามว่า "provider จริงจะทำอะไรกับสิ่งนี้" `test` ที่ `command = plan` ถามว่า "shape ที่ *วางแผนไว้* ตรงกับที่ตั้งใจไหม" `test` ที่ `command = apply` (จริงหรือ `mock_provider`) ถามว่า "shape ที่ *apply แล้ว* ตรงกับที่ตั้งใจไหม" `mock_provider` ไม่ใช่ขั้นที่ห้า — มันคือคำถาม `apply` เดียวกันที่ถามโดยไม่ต้องจ่ายต้นทุน (เวลา, credential, infrastructure จริง) ของ provider จริง `override_resource`/`override_module` ทำให้คำถามแคบลงไปอีก "ถ้าทุกอย่างอื่นคงที่ ชิ้นนี้ชิ้นเดียวทำงานตามที่คาดไหม" — พิสูจน์ข้างบน `override_during = plan` คือรายละเอียดที่ตัดสินว่าคำตอบที่แคบลงนี้จะมีให้ก่อนหรือหลัง apply จริงเท่านั้น
+
+## ข้อแลกเปลี่ยน
+
+| ทางเลือก | ได้อะไร | เสียอะไร |
+|---|---|---|
+| `mock_provider` + `command = apply` | apply-แล้ว-destroy รอบเต็มโดยไม่มี credential หรือ infrastructure จริงเลย — พิสูจน์ข้างบน test suite ทั้งชุดรันโดยไม่มี GCP project | ค่า attribute ที่ mock generate ให้ไม่ใช่ behavior จริงของ provider — GCP API ที่ปฏิเสธ combination ของ argument ที่ดูดีบนกระดาษยังต้อง apply จริงกับ GCP จริงถึงจะจับได้ |
+| `override_resource` กับ `override_during = plan` | assert บน attribute ที่ override แล้วได้ก่อนจ่ายต้นทุน apply จริง — พิสูจน์ข้างบน | เผลอใช้ `plan` เป็น default แล้วได้ error "Unknown condition value" จริงง่ายมาก พิสูจน์ข้างบน ถ้าลืม argument นี้ |
+| `override_module` | แยก module ที่ถูกทดสอบออกจาก behavior จริงของ dependency ได้เต็มที่ — พิสูจน์ข้างบน resource ของ child module เองไม่ถูกรันเลยด้วยซ้ำ | behavior จริงของ dependency เองไม่ถูกทดสอบโดย run นี้ ต้องมี test แยกของตัวเอง |
+| `expect_failures` | พิสูจน์ว่า `validation` block ปฏิเสธ input ที่ผิดจริง ไม่ใช่แค่ compile ผ่าน — พิสูจน์ข้างบน | การ "pass" ของ run หมายถึง validation fail ตามที่คาดไว้ — อ่าน test output ให้ถูกต้องต้องใช้เวลาปรับตัวสักหน่อย |
+
+## ความเข้าใจผิดที่พบบ่อย
+
+- **"`values` ของ `override_resource` ใช้ได้เสมอกับ assertion ที่ command = plan"** พิสูจน์ข้างบนด้วย error จริงที่เจอตอนเขียนการพิสูจน์นี้ — ถ้าไม่มี `override_during = plan` ค่าที่ override ยังคง unknown จนกว่าจะ apply และ assertion fail ด้วย "Unknown condition value ... executed a run block with command = plan"
+- **"`command = apply` ใน test แตะ infrastructure จริงเสมอ"** พิสูจน์ข้างบน ด้วย `mock_provider` ที่มีผลอยู่ `apply` รัน create-แล้ว-destroy รอบเต็มกับ resource ที่ mock generate ให้ — ทดสอบ code path ของ apply จริง ๆ โดยไม่เคยเรียก GCP เลย
+- **"`override_module` ยังรัน resource ของ child module เอง แค่ด้วย input ต่างกัน"** พิสูจน์ข้างบน `module.logging.sink_id` ที่ถูก override คืนค่า fake string ตัวที่ระบุไว้เป๊ะ ไม่ใช่ค่าที่มาจาก `google_logging_project_sink.this` — resource ของ child module ถูกแทนที่ทั้งหมด ไม่ใช่ re-plan ด้วยค่าต่างกัน
+- **"`run` block ที่ใช้ `expect_failures` คือ test ที่ยอมให้ fail ได้"** พิสูจน์ข้างบน run นั้น *pass* เพราะ validation ของ object ที่ระบุไว้ fail ตามที่คาดไว้เป๊ะ — ถ้า validation ปล่อย input ที่ผิดผ่านไปโดยไม่ fail run นี้จะเป็นตัวที่ report fail แทน
+
+## อ่านโค้ดที่ AI เขียน
+
+ตอน review ไฟล์ `.tftest.hcl` ที่ generate มา เช็คสิ่งเหล่านี้
+
+- `override_resource` override attribute ที่เป็น computed ภายใต้ `command = plan` โดยไม่มี `override_during = plan` — พิสูจน์ข้างบน สิ่งนี้ fail ด้วย "Unknown condition value" ไม่ใช่ pass เงียบ ๆ ด้วยค่าผิด
+- `command = apply` ถูกใช้ตลอดทั้ง test suite กับ provider จริง (ไม่มี `mock_provider`) ทั้งที่ assertion ส่วนใหญ่ต้องการแค่ `command = plan` — พิสูจน์ข้างบน `plan` เร็วกว่าและไม่แตะอะไรจริง ควรเป็น default ตามคำแนะนำเดิมของบทนี้
+- ไฟล์ test ที่ assert บน attribute ของ resource โดยไม่มี `mock_provider` และไม่มี credential จริงตั้งค่าไว้ที่ไหนเลย — ไฟล์แบบนี้ไม่มีทาง pass `command = apply` ได้เลย เช็คว่า `mock_provider` ควรอยู่ตรงนั้นหรือเปล่า
+- `expect_failures` ระบุ checkable object ผิดตัว (assert ว่า `var.bucket_name` fail ทั้งที่ตั้งใจทดสอบ postcondition ของ resource เอง หรือกลับกัน) — test อาจ pass ด้วยเหตุผลผิด ถ้า object ที่ระบุไว้บังเอิญ fail อยู่แล้วไม่ว่ากรณีไหน
+- หลาย `run` block ในไฟล์เดียวที่ `run` แบบ `command = apply` ตัวก่อนหน้าสร้าง state จริงที่เปลี่ยนสิ่งที่ `run` แบบ `command = plan` ตัวถัดไปเห็น — พิสูจน์โดยนัยข้างบนจากเหตุผลที่ `run` แบบ `apply` ในไฟล์ test ของบทนี้ถูกจัดไว้ตัวสุดท้าย apply ก่อนหน้าที่ทิ้ง state จริงไว้อาจทำให้ override ที่ plan-time ตัวถัดไปทำงานต่างจากตอนที่ยังไม่มี state นั้น
+
+<SpotTheBug code={`run "check_bucket_self_link" {
+  command = plan
+
+  override_resource {
+    target = google_storage_bucket.this
+    values = {
+      self_link = "https://storage.googleapis.com/storage/v1/b/overridden-bucket"
+    }
+  }
+
+  assert {
+    condition     = google_storage_bucket.this.self_link == "https://storage.googleapis.com/storage/v1/b/overridden-bucket"
+    error_message = "override did not take effect"
+  }
+}`}>
+พิสูจน์ข้างบนด้วย error จริงที่สิ่งนี้สร้างขึ้น `self_link` เป็น attribute แบบ computed ที่ยัง unknown จนกว่า `google_storage_bucket.this` จะถูกสร้างจริง — ภายใต้ `command = plan` Terraform ยัง resolve มันไม่ได้ ดังนั้นค่าที่ override แทนก็ยังไม่พร้อมให้ assertion ใช้ด้วย เว้นแต่ `override_resource` block จะระบุ `override_during = plan` ชัดเจน ถ้าไม่มี run นี้จะ fail ด้วย "Unknown condition value ... one of the values your condition depended on is not known until after the plan has been applied" ไม่ใช่ pass เงียบ ๆ ด้วยค่าผิด และไม่ใช่ no-op เงียบ ๆ ด้วย — test fail ดัง ๆ แต่ด้วยเหตุผลที่ดูเหมือน bug ใน module มากกว่า test argument ที่ขาดไป ทางแก้คือบรรทัดเดียว `override_during = plan` ในตัว `override_resource` block ซึ่งพิสูจน์ข้างบนแล้วว่าทำให้ assertion เดียวกันเป๊ะ pass
+</SpotTheBug>
+
+<Callout title="สรุปหนึ่งบรรทัด">
+`terraform validate`, `terraform plan` และ `terraform test` ตรวจสามเรื่องที่ต่างกัน และไม่มีตัวไหนแทนที่กันได้ `validate` ตรวจแค่ **HCL syntax และ internal consistency** โดยไม่เคยคุยกับ GCP เลย `plan` คุยกับ **GCP API** จริงและโชว์ diff แต่ไม่ assert ว่าอะไรถูกต้อง ส่วน `terraform test` เป็นตัวเดียวที่ **assert** behavior ที่คาดหวังไว้จริง ๆ ผ่านไฟล์ `.tftest.hcl` ที่มี `variables`, `run` block และ `assert` condition **`mock_provider`** (พิสูจน์ข้างบนด้วย suite 5 run เต็ม ไม่มี GCP credential เลย) ทำให้ `command = apply` รัน code path ของ apply จริงกับ resource ที่ mock generate ให้แทนที่จะเป็นของจริง — คือ default ที่ถูกต้องสำหรับคอร์สนี้และ test suite ของ module ส่วนใหญ่ **`override_resource`** (พิสูจน์ข้างบน ต้องมี `override_during = plan` สำหรับ assertion ระดับ plan-time บน attribute ที่ computed) และ **`override_module`** (พิสูจน์ข้างบน แทนที่ output ของ child module ทั้งหมด) แยกชิ้นหนึ่งของ graph ออกมาทดสอบทีละชิ้น และ **`expect_failures`** (พิสูจน์ข้างบน) เปลี่ยนการปฏิเสธของ `validation` block ให้กลายเป็น test ที่ pass
 </Callout>
 
 export const quizTestingModules = [
@@ -116,6 +328,28 @@ export const quizTestingModules = [
       'command = apply เร็วกว่าเพราะข้าม assert block ไปเลย',
     ],
     answer: 2,
+  },
+  {
+    q: '```text\n$ terraform test\n...\nError: Unknown condition value\n...\ngoogle_storage_bucket.this.self_link is a string\n\nCondition expression could not be evaluated at this time. ... executed a\n`run` block with `command = plan` and one of the values your condition\ndepended on is not known until after the plan has been applied.\n```\nerror จริงนี้เกิดตอน override attribute ที่ computed ภายใต้ command = plan อะไรแก้ได้ พิสูจน์ข้างบน',
+    options: [
+      'เปลี่ยน command เป็น apply แทน plan',
+      'เพิ่ม override_during = plan เข้าไปใน override_resource block ทำให้ค่าที่ override พร้อมใช้ตอน plan phase',
+      'ลบ assert block ทิ้งไปเลย',
+      'เพิ่ม mock_provider ที่บนสุดของไฟล์',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ข้างบน การเพิ่ม override_during = plan เข้าไปใน override_resource block คือสิ่งที่ทำให้ assertion เดียวกันเป๊ะ pass — mock_provider มีอยู่แล้วทั้งในเวอร์ชันที่ fail และที่ pass',
+  },
+  {
+    q: '```text\nrun "bucket_name_too_short_fails_validation" {\n  command = plan\n  variables { bucket_name = "ab" }\n  expect_failures = [var.bucket_name]\n}\n... run "bucket_name_too_short_fails_validation"... pass\n```\nทำไม run นี้ report ว่า pass ทั้งที่ bucket_name เป็น input ที่ตั้งใจให้ผิด',
+    options: [
+      'expect_failures ทำให้ Terraform ข้าม validation สำหรับ variable นั้นไปเลย',
+      'run นี้ pass เพราะ validation condition ของ var.bucket_name fail ตามที่คาดไว้เป๊ะ — expect_failures กลับความหมายของ pass/fail ปกติสำหรับ object ที่ระบุไว้',
+      'นี่คือ bug ใน Terraform 1.16.4 ที่จะถูกแก้ในเวอร์ชันถัดไป',
+      'command = plan pass เสมอไม่ว่าผล validation จะเป็นอะไร',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ข้างบน expect_failures ระบุ checkable object ที่คาดว่าจะ report ปัญหา test pass เพราะ bucket_name = "ab" fail validation length >= 3 ตามที่คาดไว้เป๊ะ — ถ้า validation ไม่ fire run นี้จะ fail แทน',
   },
   {
     q: 'ทำไมการผ่าน terraform validate ไม่ได้แปลว่า module ทำงานได้จริงกับ GCP จริง',
