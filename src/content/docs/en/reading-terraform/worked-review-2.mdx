@@ -1,0 +1,575 @@
+---
+title: 'Worked review 2: a multi-environment Terragrunt live tree'
+description: 'An AI-generated root.hcl plus a dev/prod live tree of network and app units, reviewed bug by bug against real terragrunt hcl validate, render, run --all plan, and find --dag output.'
+sidebar:
+  order: 5
+---
+
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import Mermaid from '../../../../components/Mermaid.astro';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
+
+## The feature
+
+The prompt was: *"Set up a Terragrunt live tree with dev and prod environments, each with a network unit and an app unit that depends on it."* What follows is the kind of first draft an AI assistant hands back for exactly that prompt — a shared `root.hcl`, four `terragrunt.hcl` units that all look individually reasonable, and a CI snippet that reads like every Terragrunt tutorial published before the 1.1 CLI redesign. It has **8 real bugs**; check the **[AI bug catalog](/terraform-gcp/en/reading-terraform/ai-bug-catalog/)** for the general pattern behind each one. Seven of these eight are identical, provider-agnostic Terragrunt-core mechanics to both sibling reviews' worked review 2 — proven fresh here, in this repo, against `google` — plus one genuinely GCS-specific backend bug in place of AWS's `dynamodb_table`/`use_lockfile` pair and azurerm's missing `use_azuread_auth`. Every claim below was proven with real `terragrunt hcl validate`/`render`/`run --all`/`find --dag` against Terragrunt 1.1.0 and Terraform 1.16.4, with `backend = "local"` standing in for the real GCS backend — per this course's own convention, offline proof never touches real GCP.
+
+## The generated code
+
+```hcl
+# root.hcl, as generated -- realistic GCS backend (see review walk for why the proof tree below uses backend = "local" instead)
+remote_state {
+  backend = "gcs"
+
+  generate = {
+    path      = "backend.tf"
+    if_exists = "overwrite"
+  }
+
+  config = {
+    bucket   = "acme-terraform-state"
+    project  = "acme-prod-123456"
+    location = "US"
+  }
+}
+```
+
+```hcl
+# live tree, as generated -- live/dev/network/terragrunt.hcl and live/prod/network/terragrunt.hcl (byte-identical)
+include "root" {
+  path = find_in_parent_folders()
+}
+
+locals {
+  environment = "dev"
+  project     = "acme-dev-123456"
+  region      = "us-central1"
+}
+
+terraform {
+  source = "${get_terragrunt_dir()}/../../../modules/network"
+}
+
+inputs = {
+  environment = local.environment
+}
+```
+
+```hcl
+# live tree, as generated -- live/dev/app/terragrunt.hcl and live/prod/app/terragrunt.hcl (byte-identical)
+include "root" {
+  path = find_in_parent_folders()
+}
+
+dependency "network" {
+  config_path = "../network"
+}
+
+terraform {
+  source = "${get_terragrunt_dir()}/../../../modules/app"
+}
+
+inputs = {
+  vpc_id = dependency.network.outputs.vpc_id
+}
+```
+
+```bash
+# ci/deploy.sh, as generated -- fragment, not a collected fence
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd live/dev
+terragrunt run-all plan --terragrunt-non-interactive
+terragrunt plan-all --terragrunt-non-interactive --queue-include-dir network
+```
+
+## The review walk
+
+### CI script: `run-all`/`plan-all` — removed in the 1.1 CLI redesign
+
+**Symptom — real, run directly (identical mechanics to both sibling reviews, since this is Terragrunt-core, not provider-specific):**
+
+```text
+$ terragrunt plan-all --non-interactive --no-color
+ERROR unknown command: "plan-all". Terragrunt no longer forwards unknown commands by default. Use 'terragrunt run -- plan-all ...' or a supported shortcut. Learn more: https://docs.terragrunt.com/migrate/cli-redesign/#use-the-new-run-command
+
+$ terragrunt run-all plan --non-interactive --no-color
+ERROR unknown command: "run-all". Terragrunt no longer forwards unknown commands by default. Use 'terragrunt run -- run-all ...' or a supported shortcut. Learn more: https://docs.terragrunt.com/migrate/cli-redesign/#use-the-new-run-command
+```
+
+<SpotTheBug code={`terragrunt run-all plan --terragrunt-non-interactive
+terragrunt plan-all --terragrunt-non-interactive --queue-include-dir network`}>
+Same bug as **[AI bug catalog](/terraform-gcp/en/reading-terraform/ai-bug-catalog/)** entry 16 — both commands are all over pre-1.1 tutorials and AI training data, and both were replaced by the 1.1 CLI redesign's `run --all`. Fix: `terragrunt run --all --non-interactive -- plan`.
+</SpotTheBug>
+
+### CI script: pre-1.1 `--terragrunt-*`-prefixed flags
+
+**Symptom — real, run directly against the corrected `run --all` command:**
+
+```text
+$ terragrunt run --all --terragrunt-non-interactive --no-color -- plan
+ERROR flag `-terragrunt-non-interactive` is not a Terragrunt flag. If this is an OpenTofu/Terraform flag, use `--` to forward it (e.g., `terragrunt run -- <command> -terragrunt-non-interactive`).
+```
+
+<SpotTheBug code={`terragrunt run --all --terragrunt-non-interactive --no-color -- plan`}>
+Every Terragrunt flag lost its `terragrunt-` prefix in the same CLI redesign that replaced `run-all`. A `--terragrunt-*`-prefixed flag is rejected outright, not silently ignored — a stale CI script fails its very first run rather than quietly behaving differently. Fix: drop the `terragrunt-` prefix from every flag.
+</SpotTheBug>
+
+### Every unit: `find_in_parent_folders()` with no argument, on a root file named `root.hcl`
+
+```hcl
+# excerpt, as generated -- entries/03-find-in-parent-no-arg/unit/terragrunt.hcl
+include "root" {
+  path = find_in_parent_folders()
+}
+```
+
+**Symptom — real `terragrunt hcl validate` across the whole 4-unit tree, all four units failing the same way at once:**
+
+```text
+$ terragrunt hcl validate --working-dir .
+Error: Error in function call
+
+  on live/dev/network/terragrunt.hcl line 2, in include "root":
+   2:   path = find_in_parent_folders()
+
+Call to function "find_in_parent_folders" failed: ParentFileNotFoundError:
+Could not find a terragrunt.hcl in any of the parent folders of
+live/dev/network/terragrunt.hcl. Cause: Traversed all the way to the root..
+
+The include configuration in live/dev/app/terragrunt.hcl must specify a 'path' parameter
+... (identical for the other 3 units)
+4 HCL validation error(s) found
+```
+
+<SpotTheBug code={`include "root" {
+  path = find_in_parent_folders()
+}`}>
+`find_in_parent_folders()` called with **zero arguments** defaults to searching for a file literally named `terragrunt.hcl` — the pre-1.1 convention. This course's root config, like most current Terragrunt guidance, is named `root.hcl` specifically to avoid the file being mistaken for a unit config of its own. Fix: `find_in_parent_folders("root.hcl")`, naming the actual file.
+</SpotTheBug>
+
+### `app` units: a `dependency` block with no `mock_outputs` at all
+
+```hcl
+# excerpt, as generated -- entries/04-no-mock-outputs/app/terragrunt.hcl
+dependency "network" {
+  config_path = "../network"
+}
+```
+
+**Symptom — real `terragrunt run --all plan` against the whole tree, fresh, `network` never applied:**
+
+```text
+$ terragrunt run --all --non-interactive --no-color -- plan
+❯❯ Run Summary  4 units
+   Succeeded    2
+   Failed       2
+
+ERROR  ... resolving dependency "network" outputs: live/dev/network/terragrunt.hcl is
+a dependency of live/dev/app/terragrunt.hcl but detected no outputs. Either the target
+module has not been applied yet, or the module has no outputs.
+... There is no variable named "dependency".
+```
+
+<SpotTheBug code={`dependency "network" {
+  config_path = "../network"
+}`}>
+See **[Dependencies Between Units](/terraform-gcp/en/terragrunt-fundamentals/dependencies-between-units/)** for the full mechanism — this is that lesson's `mock_outputs_allowed_terraform_commands` guardrail with the underlying problem one step earlier: no `mock_outputs` declared at all. Fix: add `mock_outputs = { vpc_id = "mock-vpc-id" }` and `mock_outputs_allowed_terraform_commands = ["plan"]`.
+</SpotTheBug>
+
+### `network` units: `dev` and `prod` carrying byte-identical `locals`
+
+**Symptom — real, on the actual generated files:**
+
+```text
+$ diff live/dev/network/terragrunt.hcl live/prod/network/terragrunt.hcl
+(no output -- the files are byte-identical)
+```
+
+Both files declare `environment = "dev"`, `project = "acme-dev-123456"` — including inside `live/prod/network/terragrunt.hcl`.
+
+<SpotTheBug code={`# live/prod/network/terragrunt.hcl
+locals {
+  environment = "dev"
+  project     = "acme-dev-123456"
+}`}>
+Same bug as **[AI bug catalog](/terraform-gcp/en/reading-terraform/ai-bug-catalog/)** entry 17 — `terragrunt hcl validate`/`hcl format --check` both pass; nothing about this is invalid HCL, and with `backend = "local"` for this course's offline proof nothing fails at `plan` either. Against a real GCS backend targeting `project = "acme-dev-123456"` from both `dev` and `prod`, this deploys `prod` into `dev`'s GCP project, silently. `diff` on the two files is the only thing that catches a copy-paste this clean. Fix: move the values that must differ per environment into a per-environment `env.hcl`, and have each `network/terragrunt.hcl` become identical to its sibling, reading `include.env.locals.*` instead of its own hardcoded `locals`.
+</SpotTheBug>
+
+### A second `include` for shared values, declared without `expose = true`
+
+```hcl
+# excerpt, as generated -- entries/06-include-no-expose/unit/terragrunt.hcl
+include "env" {
+  path           = find_in_parent_folders("env.hcl")
+  merge_strategy = "no_merge"
+}
+
+inputs = {
+  project = include.env.locals.project
+}
+```
+
+**Symptom — real `terragrunt render`:**
+
+```text
+$ terragrunt render --format json
+Error: Unsupported attribute
+
+  on unit/terragrunt.hcl line 15:
+  15:   project = include.env.locals.project
+
+This object does not have an attribute named "env".
+```
+
+<SpotTheBug code={`include "env" {
+  path           = find_in_parent_folders("env.hcl")
+  merge_strategy = "no_merge"
+}`}>
+Same mechanism as **[Dry Configuration with Include](/terraform-gcp/en/terragrunt-fundamentals/dry-configuration-with-include/)** — `expose = true` is what makes an include's parsed content readable as `include.NAME.*`. Fix: add `expose = true` to the `env` include block.
+</SpotTheBug>
+
+### A module reads another environment's state directly with `terraform_remote_state`
+
+```hcl
+# entries/07-remote-state-cross-env/main.tf -- @expect-error No stored state was found for the given workspace in the given backend.
+data "terraform_remote_state" "prod_network" {
+  backend = "local"
+  config = {
+    path = "../../../prod/network/terraform.tfstate"
+  }
+}
+```
+
+**Symptom — real `terraform plan`:**
+
+```text
+Error: Unable to find remote state
+
+  with data.terraform_remote_state.prod_network,
+  on main.tf line 1, in data "terraform_remote_state" "prod_network":
+   1: data "terraform_remote_state" "prod_network" {
+
+No stored state was found for the given workspace in the given backend.
+```
+
+<SpotTheBug code={`data "terraform_remote_state" "prod_network" {
+  backend = "local"
+  config = { path = "../../../prod/network/terraform.tfstate" }
+}`}>
+Same mechanism as **[AI bug catalog](/terraform-gcp/en/reading-terraform/ai-bug-catalog/)** entry 6, applied to exactly the shape a Terragrunt live tree tempts an AI assistant into: reaching for a raw Terraform `terraform_remote_state` data source instead of a Terragrunt `dependency` block. This bypasses `mock_outputs` entirely and has no `run --all` ordering awareness at all. Fix: a proper cross-environment `dependency` block, or delete the reference entirely.
+</SpotTheBug>
+
+### `root.hcl`: GCS `remote_state` with no `prefix` — two units silently share one state object
+
+```hcl
+# root.hcl (excerpt)
+remote_state {
+  backend = "gcs"
+  config = {
+    bucket   = "acme-terraform-state"
+    project  = "acme-prod-123456"
+    location = "US"
+  }
+}
+```
+
+**Symptom — real, `terragrunt run -- init -backend=false` run against this exact `root.hcl` from two different units, `network` and `app` (this course's convention for proving `generate` output — no real GCS bucket needed, only the generated `backend.tf` content itself):**
+
+```text
+$ cd network && terragrunt run --non-interactive --no-color -- init -backend=false && cat backend.tf
+# Generated by Terragrunt. Sig: nIlQXj57tbuaRZEa
+terraform {
+  backend "gcs" {
+    bucket = "acme-terraform-state"
+  }
+}
+
+$ cd ../app && terragrunt run --non-interactive --no-color -- init -backend=false && cat backend.tf
+# Generated by Terragrunt. Sig: nIlQXj57tbuaRZEa
+terraform {
+  backend "gcs" {
+    bucket = "acme-terraform-state"
+  }
+}
+```
+
+<SpotTheBug code={`remote_state {
+  backend = "gcs"
+  config = {
+    bucket   = "acme-terraform-state"
+    project  = "acme-prod-123456"
+    location = "US"
+  }
+}`}>
+Both generated `backend.tf` files are **byte-identical**, proven above with two real, separate `init -backend=false` runs — `bucket = "acme-terraform-state"` and nothing else. `project`/`location` control bucket *auto-creation*, not the backend block's own state addressing, and no `prefix` was ever set to give each unit its own path the way `path_relative_to_include()` does for `key` (AWS) or `key` (azurerm). Without it, `network` and `app` silently target the exact same state object at the bucket root — the second unit to run `apply` would read, and overwrite, the first unit's state. Fix: add `prefix = "${path_relative_to_include()}/terraform.tfstate"` to `remote_state.config`, exactly like the sibling reviews' `key`.
+</SpotTheBug>
+
+## The corrected code
+
+```hcl
+# root.hcl
+remote_state {
+  backend  = "local"
+  generate = { path = "backend.tf", if_exists = "overwrite_terragrunt" }
+  config   = { path = "${get_terragrunt_dir()}/terraform.tfstate" }
+}
+```
+
+<Callout title="Why this proof tree uses backend = local">
+Per this course's convention, a real GCS `remote_state` needs a real bucket this course never provisions. Every claim in this lesson that depends on `remote_state` mechanics rather than backend specifics — `include`, `dependency`, `find_in_parent_folders`, the live-tree layout itself — is identical either way; only `backend = "gcs"` vs `"local"` and the corresponding `config` differ. A real deployment of this tree uses the "generated code" section's `gcs` block with `prefix = "${path_relative_to_include()}/terraform.tfstate"` added (the fix above), not this one.
+</Callout>
+
+```hcl
+# modules/network/main.tf
+variable "environment" {
+  type = string
+}
+resource "terraform_data" "vpc" {
+  input = "vpc-${var.environment}"
+}
+output "vpc_id" {
+  value = terraform_data.vpc.id
+}
+```
+
+```hcl
+# modules/app/main.tf
+variable "vpc_id" {
+  type = string
+}
+resource "terraform_data" "app" {
+  input = var.vpc_id
+}
+```
+
+```hcl
+# live/dev/env.hcl
+locals {
+  environment = "dev"
+  project     = "acme-dev-123456"
+  region      = "us-central1"
+}
+```
+
+```hcl
+# live/prod/env.hcl
+locals {
+  environment = "prod"
+  project     = "acme-prod-654321"
+  region      = "us-central1"
+}
+```
+
+```hcl
+# live/dev/network/terragrunt.hcl
+include "root" {
+  path = find_in_parent_folders("root.hcl")
+}
+
+include "env" {
+  path           = find_in_parent_folders("env.hcl")
+  expose         = true
+  merge_strategy = "no_merge"
+}
+
+terraform {
+  source = "${get_terragrunt_dir()}/../../../modules/network"
+}
+
+inputs = {
+  environment = include.env.locals.environment
+}
+```
+
+```hcl
+# live/prod/network/terragrunt.hcl
+include "root" {
+  path = find_in_parent_folders("root.hcl")
+}
+
+include "env" {
+  path           = find_in_parent_folders("env.hcl")
+  expose         = true
+  merge_strategy = "no_merge"
+}
+
+terraform {
+  source = "${get_terragrunt_dir()}/../../../modules/network"
+}
+
+inputs = {
+  environment = include.env.locals.environment
+}
+```
+
+```hcl
+# live/dev/app/terragrunt.hcl
+include "root" {
+  path = find_in_parent_folders("root.hcl")
+}
+
+dependency "network" {
+  config_path = "../network"
+
+  mock_outputs                            = { vpc_id = "mock-vpc-id" }
+  mock_outputs_allowed_terraform_commands = ["plan"]
+}
+
+terraform {
+  source = "${get_terragrunt_dir()}/../../../modules/app"
+}
+
+inputs = {
+  vpc_id = dependency.network.outputs.vpc_id
+}
+```
+
+```hcl
+# live/prod/app/terragrunt.hcl
+include "root" {
+  path = find_in_parent_folders("root.hcl")
+}
+
+dependency "network" {
+  config_path = "../network"
+
+  mock_outputs                            = { vpc_id = "mock-vpc-id" }
+  mock_outputs_allowed_terraform_commands = ["plan"]
+}
+
+terraform {
+  source = "${get_terragrunt_dir()}/../../../modules/app"
+}
+
+inputs = {
+  vpc_id = dependency.network.outputs.vpc_id
+}
+```
+
+Real proof, the whole tree at once:
+
+```text
+$ terragrunt hcl validate --working-dir .
+(no output -- 0 errors)
+
+$ diff live/dev/network/terragrunt.hcl live/prod/network/terragrunt.hcl
+(no output -- now correctly identical; env.hcl differs instead)
+
+$ terragrunt run --all --non-interactive --no-color --working-dir . -- plan
+❯❯ Run Summary  4 units
+   Succeeded    4
+
+$ terragrunt find --dag --working-dir .
+live/dev/network
+live/prod/network
+live/dev/app
+live/prod/app
+```
+
+## What changed and why
+
+| # | Bug | Fix |
+|---|---|---|
+| 1 | `run-all`/`plan-all` in the CI script | `run --all` — real "unknown command" rejection for both, before the fix |
+| 2 | `--terragrunt-non-interactive` and other pre-1.1-prefixed flags | Bare `--non-interactive` etc. — real "not a Terragrunt flag" rejection before the fix |
+| 3 | `find_in_parent_folders()` with no argument, root file named `root.hcl` | `find_in_parent_folders("root.hcl")` — real "Could not find a terragrunt.hcl" across all 4 units before the fix |
+| 4 | `dependency "network"` with no `mock_outputs` at all | `mock_outputs` + `mock_outputs_allowed_terraform_commands = ["plan"]` — real `run --all plan` failure on a fresh environment before the fix |
+| 5 | `dev` and `prod` network units with byte-identical `locals` (`project` included) | Values that must differ moved to `env.hcl` per environment; the unit files become identical instead — real `diff` proved the bug and the fix |
+| 6 | A second `include "env"` with no `expose = true` | `expose = true` added — real "This object does not have an attribute named env" before the fix |
+| 7 | `terraform_remote_state` reading another environment's state directly from inside a module | Replaced with a proper `dependency` block (or removed) — real "No stored state was found" before the fix |
+| 8 | `root.hcl` GCS `remote_state` with no `prefix` | `prefix = "${path_relative_to_include()}/terraform.tfstate"` added — proven by two real, separate units generating byte-identical `backend.tf` (a real state-collision risk) |
+
+## Mental Model
+
+Four of these eight bugs (1, 2, 3, 6) are hard, immediate failures at the CLI/HCL-evaluation layer, identical in mechanism to both sibling reviews. One (4) is a hard failure but only on the very first `run --all plan` against a genuinely fresh environment. One (7) is a hard failure specific to state that was never applied, at the Terraform layer. The remaining two (5, 8) never error at all — and entry 8 is the one bug in this whole lesson that is genuinely GCS-specific: instead of a deprecated `dynamodb_table` argument (AWS) or a backend silently missing identity-based auth (azurerm), the equivalent silent gap here is two structurally different units generating the exact same backend configuration — a real state-collision risk that `hcl validate` has no way to notice, since both generated files are individually well-formed.
+
+## Common Misconceptions
+
+- **"If `terragrunt hcl validate` passes, a multi-environment tree is actually safe to deploy."** Proven above: `hcl validate` on the two byte-identical `network` units returns zero errors — HCL validation has no concept of "this value should differ from that sibling file," and the same is true of two units generating an identical `backend.tf`.
+- **"A `dependency` block without `mock_outputs` only breaks `apply`, never `plan`."** Proven above: on a completely fresh environment where the dependency has never been applied even once, `run --all plan` itself fails.
+- **"`project`/`location` in a GCS `remote_state.config` scope state per unit, the way `key`/`prefix` do elsewhere."** Proven above: two structurally different units (`network`, `app`) generated byte-identical `backend.tf` files differing only in nothing at all — `project`/`location` control bucket auto-creation, never state addressing; only `prefix` does that, and it was never set.
+
+<Mermaid title="Where each bug sits in this live tree's evaluation path" code={wr2Diagram} />
+
+export const wr2Diagram = `flowchart TD
+  CI["ci/deploy.sh"] -->|"1: run-all/plan-all removed"| CI
+  CI -->|"2: --terragrunt-* flags rejected"| CI
+  CI --> H["terragrunt hcl validate"]
+  H -->|"3: find_in_parent_folders() no arg"| H
+  H -->|"6: include without expose"| H
+  H --> R["terragrunt run --all plan"]
+  R -->|"4: dependency, no mock_outputs -- fresh env"| R
+  R --> M["module-level terraform plan"]
+  M -->|"7: terraform_remote_state cross-env"| M
+  D["diff dev vs prod files"] -->|"5: byte-identical locals"| D
+  L["root.hcl remote_state, generated backend.tf"] -->|"8: no prefix -- state collision"| L
+`;
+
+<Callout title="The one-line takeaway">
+Seven of this live tree's eight bugs are identical, provider-agnostic Terragrunt mechanics to both sibling reviews — the CLI's own parser, `hcl validate`'s include/function resolution, `run --all`'s dependency resolution, and a raw Terraform `data` block reaching for unapplied state all fail the same way regardless of cloud. The one bug that genuinely differs by cloud is the backend-scoping gap: AWS's is a deprecated locking argument, azurerm's is a backend that silently defaults to a long-lived shared key, and GCS's is the sharpest of the three — two units generating byte-identical backend configuration, a real state-collision risk with zero error anywhere.
+</Callout>
+
+export const quizWorkedReview2 = [
+  {
+    q: '`find_in_parent_folders()` is called with no argument in a tree whose root config is named `root.hcl`. What does real `terragrunt hcl validate` show?',
+    options: [
+      'It automatically finds root.hcl since that is the current Terragrunt convention',
+      'A real "Could not find a terragrunt.hcl in any of the parent folders" error across every unit in the tree at once -- the no-argument form searches specifically for a file literally named terragrunt.hcl, not whatever the actual root file is called',
+      'It searches for any file with a .hcl extension',
+      'It only fails for units nested more than two directories deep',
+    ],
+    answer: 1,
+    explain: 'Proven directly: `terragrunt hcl validate --working-dir .` against all four units returned "4 HCL validation error(s) found," each with the identical "Could not find a terragrunt.hcl ... Traversed all the way to the root" cause -- identical mechanics to both sibling reviews, since this is Terragrunt-core, not provider-specific.',
+  },
+  {
+    q: 'A fresh environment where `network` has never been applied, and `app` has a `dependency "network"` block with no `mock_outputs` at all. What does real `terragrunt run --all plan` show?',
+    options: [
+      'Both units plan successfully, with app using a zero-value placeholder',
+      '2 units succeeded (both network units), 2 failed (both app units) -- a real "detected no outputs" error naming mock_outputs as the fix, plus a follow-on "no variable named dependency" error',
+      'The entire run --all refuses to start at all',
+      'app silently skips the vpc_id input and plans without it',
+    ],
+    answer: 1,
+    explain: 'Proven directly: the real Run Summary showed 2 succeeded / 2 failed on a completely fresh run --all plan against both dev and prod, with the exact "resolving dependency \\"network\\" outputs ... detected no outputs" error.',
+  },
+  {
+    q: 'The root `remote_state.config` for a GCS backend sets `bucket`, `project`, and `location`, but no `prefix`. Two structurally different units, `network` and `app`, each run a real `init -backend=false`. What do their generated `backend.tf` files show?',
+    options: [
+      'Each unit gets a unique path automatically derived from its directory name',
+      'Byte-identical backend.tf files -- both just "bucket = ...", nothing else -- because project/location only control bucket auto-creation, never state addressing, and no prefix was ever set to scope state per unit',
+      'Terragrunt refuses to generate a backend.tf without a prefix',
+      'The second unit\'s init fails with a "duplicate backend" error',
+    ],
+    answer: 1,
+    explain: 'Proven directly: two separate real `init -backend=false` runs, one from network/ and one from app/, produced byte-identical generated backend.tf content -- a real, silent state-collision risk with zero error from any tool.',
+  },
+  {
+    q: '`dev` and `prod` network units are byte-identical, including `project`. What does `terragrunt hcl validate` show, and what actually catches this?',
+    options: [
+      'hcl validate reports a "duplicate environment" error',
+      'hcl validate passes with zero errors on both files -- only a direct diff (or a human reviewer who knows the two project IDs should differ) catches it, proven by a real diff returning no output at all',
+      'terragrunt refuses to run --all on a tree with duplicate locals',
+      'This is automatically caught by the dependency graph',
+    ],
+    answer: 1,
+    explain: 'Proven directly: `diff live/dev/network/terragrunt.hcl live/prod/network/terragrunt.hcl` returned zero output (byte-identical), and hcl validate on the full tree returned zero errors.',
+  },
+  {
+    q: 'A second `include "env"` block is declared with `merge_strategy = "no_merge"` but no `expose = true`, and a later `inputs` line reads `include.env.locals.project`. What does real `terragrunt render` show?',
+    options: [
+      'project resolves to an empty string silently',
+      '"Error: Unsupported attribute ... This object does not have an attribute named \\"env\\"" -- expose is specifically what makes include.NAME.* a readable reference, and only a root include gets its blocks merged in without it',
+      'render succeeds and merges the env locals into the top-level locals block automatically',
+      'This only fails at apply time, never at render',
+    ],
+    answer: 1,
+    explain: 'Proven directly: the real render error is exactly "This object does not have an attribute named \\"env\\"" -- identical mechanism to both sibling reviews and to the Dry Configuration with Include lesson.',
+  },
+];
+
+<Quiz client:visible id="reading-terraform/worked-review-2" questions={quizWorkedReview2} />
+
+<ProgressTracker client:visible id="reading-terraform/worked-review-2" />

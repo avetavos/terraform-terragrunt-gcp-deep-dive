@@ -1,0 +1,575 @@
+---
+title: 'Worked review 2: multi-environment Terragrunt live tree'
+description: 'root.hcl ที่ AI สร้าง บวก live tree dev/prod ที่มี network unit และ app unit รีวิวทีละ bug เทียบกับ terragrunt hcl validate, render, run --all plan, และ find --dag จริง'
+sidebar:
+  order: 5
+---
+
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import Mermaid from '../../../../components/Mermaid.astro';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
+
+## Feature ที่ต้องทำ
+
+Prompt คือ: *"ตั้ง Terragrunt live tree ที่มี dev กับ prod environment แต่ละอันมี network unit และ app unit ที่ depend บนมัน"* สิ่งที่ตามมาคือ draft แรกแบบที่ AI assistant ส่งกลับมาให้กับ prompt แบบนี้พอดี — `root.hcl` ที่ใช้ร่วมกัน, `terragrunt.hcl` สี่ไฟล์ที่ดูสมเหตุสมผลรายตัว, และ CI snippet ที่อ่านแล้วเหมือน Terragrunt tutorial ทุกอันที่ตีพิมพ์ก่อน CLI redesign 1.1 มี **bug จริง 8 ข้อ**; ดู **[AI bug catalog](/terraform-gcp/th/reading-terraform/ai-bug-catalog/)** สำหรับ pattern ทั่วไปเบื้องหลังแต่ละข้อ เจ็ดในแปดข้อนี้เป็น mechanics ของ Terragrunt-core ที่ไม่ขึ้นกับ provider เหมือนกันเป๊ะกับ worked review 2 ของ review ทั้งสองฝั่งก่อนหน้า — พิสูจน์สดใหม่ที่นี่ ใน repo นี้ กับ `google` — บวกอีกหนึ่ง bug ที่เฉพาะ backend GCS จริงๆ แทนคู่ `dynamodb_table`/`use_lockfile` ของ AWS และ `use_azuread_auth` ที่หายไปของ azurerm ทุกข้อที่กล่าวถึงด้านล่างพิสูจน์ด้วย `terragrunt hcl validate`/`render`/`run --all`/`find --dag` จริง กับ Terragrunt 1.1.0 และ Terraform 1.16.4 โดยใช้ `backend = "local"` แทน backend GCS จริง — ตามธรรมเนียมของคอร์สนี้ การพิสูจน์ offline ไม่แตะ GCP จริงเลย
+
+## โค้ดที่ AI สร้าง
+
+```hcl
+# root.hcl, as generated -- realistic GCS backend (see review walk for why the proof tree below uses backend = "local" instead)
+remote_state {
+  backend = "gcs"
+
+  generate = {
+    path      = "backend.tf"
+    if_exists = "overwrite"
+  }
+
+  config = {
+    bucket   = "acme-terraform-state"
+    project  = "acme-prod-123456"
+    location = "US"
+  }
+}
+```
+
+```hcl
+# live tree, as generated -- live/dev/network/terragrunt.hcl and live/prod/network/terragrunt.hcl (byte-identical)
+include "root" {
+  path = find_in_parent_folders()
+}
+
+locals {
+  environment = "dev"
+  project     = "acme-dev-123456"
+  region      = "us-central1"
+}
+
+terraform {
+  source = "${get_terragrunt_dir()}/../../../modules/network"
+}
+
+inputs = {
+  environment = local.environment
+}
+```
+
+```hcl
+# live tree, as generated -- live/dev/app/terragrunt.hcl and live/prod/app/terragrunt.hcl (byte-identical)
+include "root" {
+  path = find_in_parent_folders()
+}
+
+dependency "network" {
+  config_path = "../network"
+}
+
+terraform {
+  source = "${get_terragrunt_dir()}/../../../modules/app"
+}
+
+inputs = {
+  vpc_id = dependency.network.outputs.vpc_id
+}
+```
+
+```bash
+# ci/deploy.sh, as generated -- fragment, not a collected fence
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd live/dev
+terragrunt run-all plan --terragrunt-non-interactive
+terragrunt plan-all --terragrunt-non-interactive --queue-include-dir network
+```
+
+## เดินรีวิวทีละ bug
+
+### CI script: `run-all`/`plan-all` — ถูกลบใน CLI redesign 1.1
+
+**อาการ — จริง รันตรง (mechanics เดียวกับ review ทั้งสองฝั่งก่อนหน้า เพราะเป็น Terragrunt-core ไม่ใช่เฉพาะ provider):**
+
+```text
+$ terragrunt plan-all --non-interactive --no-color
+ERROR unknown command: "plan-all". Terragrunt no longer forwards unknown commands by default. Use 'terragrunt run -- plan-all ...' or a supported shortcut. Learn more: https://docs.terragrunt.com/migrate/cli-redesign/#use-the-new-run-command
+
+$ terragrunt run-all plan --non-interactive --no-color
+ERROR unknown command: "run-all". Terragrunt no longer forwards unknown commands by default. Use 'terragrunt run -- run-all ...' or a supported shortcut. Learn more: https://docs.terragrunt.com/migrate/cli-redesign/#use-the-new-run-command
+```
+
+<SpotTheBug code={`terragrunt run-all plan --terragrunt-non-interactive
+terragrunt plan-all --terragrunt-non-interactive --queue-include-dir network`}>
+bug เดียวกับ **[AI bug catalog](/terraform-gcp/th/reading-terraform/ai-bug-catalog/)** entry 16 — ทั้งสอง command เกลื่อนอยู่ใน tutorial ก่อน 1.1 และ training data ของ AI และทั้งคู่ถูกแทนที่ด้วย `run --all` ของ CLI redesign 1.1 วิธีแก้: `terragrunt run --all --non-interactive -- plan`
+</SpotTheBug>
+
+### CI script: flag แบบ `--terragrunt-*` prefix ของก่อน 1.1
+
+**อาการ — จริง รันตรงกับ command `run --all` ที่แก้แล้ว:**
+
+```text
+$ terragrunt run --all --terragrunt-non-interactive --no-color -- plan
+ERROR flag `-terragrunt-non-interactive` is not a Terragrunt flag. If this is an OpenTofu/Terraform flag, use `--` to forward it (e.g., `terragrunt run -- <command> -terragrunt-non-interactive`).
+```
+
+<SpotTheBug code={`terragrunt run --all --terragrunt-non-interactive --no-color -- plan`}>
+ทุก flag ของ Terragrunt หลุด prefix `terragrunt-` ใน CLI redesign เดียวกับที่แทนที่ `run-all` flag ที่มี prefix `--terragrunt-*` ถูกปฏิเสธตรงๆ ไม่ใช่ถูกเมินแบบเงียบๆ — CI script เก่าพังตั้งแต่ run แรกเลย วิธีแก้: ตัด prefix `terragrunt-` ออกจากทุก flag
+</SpotTheBug>
+
+### ทุก unit: `find_in_parent_folders()` ไม่มี argument บน root file ที่ชื่อ `root.hcl`
+
+```hcl
+# excerpt, as generated -- entries/03-find-in-parent-no-arg/unit/terragrunt.hcl
+include "root" {
+  path = find_in_parent_folders()
+}
+```
+
+**อาการ — `terragrunt hcl validate` จริง ทั้ง 4 unit ในต้นเดียวกัน พังแบบเดียวกันพร้อมกันหมด:**
+
+```text
+$ terragrunt hcl validate --working-dir .
+Error: Error in function call
+
+  on live/dev/network/terragrunt.hcl line 2, in include "root":
+   2:   path = find_in_parent_folders()
+
+Call to function "find_in_parent_folders" failed: ParentFileNotFoundError:
+Could not find a terragrunt.hcl in any of the parent folders of
+live/dev/network/terragrunt.hcl. Cause: Traversed all the way to the root..
+
+The include configuration in live/dev/app/terragrunt.hcl must specify a 'path' parameter
+... (identical for the other 3 units)
+4 HCL validation error(s) found
+```
+
+<SpotTheBug code={`include "root" {
+  path = find_in_parent_folders()
+}`}>
+`find_in_parent_folders()` ที่เรียกโดย **ไม่มี argument เลย** default ไปหาไฟล์ที่ชื่อ `terragrunt.hcl` เป๊ะๆ — ธรรมเนียมก่อน 1.1 root config ของคอร์สนี้ เหมือนคำแนะนำ Terragrunt ปัจจุบัน ชื่อ `root.hcl` เจาะจงเพื่อเลี่ยงไม่ให้ไฟล์นี้ถูกเข้าใจผิดว่าเป็น unit config ของตัวเอง วิธีแก้: `find_in_parent_folders("root.hcl")` ระบุชื่อไฟล์จริง
+</SpotTheBug>
+
+### `app` unit: `dependency` block ที่ไม่มี `mock_outputs` เลย
+
+```hcl
+# excerpt, as generated -- entries/04-no-mock-outputs/app/terragrunt.hcl
+dependency "network" {
+  config_path = "../network"
+}
+```
+
+**อาการ — `terragrunt run --all plan` จริง กับทั้งต้น สดใหม่ `network` ไม่เคยถูก apply เลย:**
+
+```text
+$ terragrunt run --all --non-interactive --no-color -- plan
+❯❯ Run Summary  4 units
+   Succeeded    2
+   Failed       2
+
+ERROR  ... resolving dependency "network" outputs: live/dev/network/terragrunt.hcl is
+a dependency of live/dev/app/terragrunt.hcl but detected no outputs. Either the target
+module has not been applied yet, or the module has no outputs.
+... There is no variable named "dependency".
+```
+
+<SpotTheBug code={`dependency "network" {
+  config_path = "../network"
+}`}>
+ดู **[Dependencies Between Units](/terraform-gcp/th/terragrunt-fundamentals/dependencies-between-units/)** สำหรับ mechanism เต็มรูปแบบ — นี่คือกลไก guardrail `mock_outputs_allowed_terraform_commands` ของบทนั้น แต่ปัญหาต้นตอเกิดก่อนหน้านั้นหนึ่งขั้น: ไม่มี `mock_outputs` ประกาศไว้เลย วิธีแก้: เพิ่ม `mock_outputs = { vpc_id = "mock-vpc-id" }` และ `mock_outputs_allowed_terraform_commands = ["plan"]`
+</SpotTheBug>
+
+### `network` unit: `dev` กับ `prod` มี `locals` เหมือนกันเป๊ะ
+
+**อาการ — จริง บนไฟล์ที่ AI สร้างจริง:**
+
+```text
+$ diff live/dev/network/terragrunt.hcl live/prod/network/terragrunt.hcl
+(no output -- the files are byte-identical)
+```
+
+ทั้งสองไฟล์ประกาศ `environment = "dev"`, `project = "acme-dev-123456"` — รวมถึงข้างใน `live/prod/network/terragrunt.hcl` ด้วย
+
+<SpotTheBug code={`# live/prod/network/terragrunt.hcl
+locals {
+  environment = "dev"
+  project     = "acme-dev-123456"
+}`}>
+bug เดียวกับ **[AI bug catalog](/terraform-gcp/th/reading-terraform/ai-bug-catalog/)** entry 17 — `terragrunt hcl validate`/`hcl format --check` ผ่านทั้งคู่ ไม่มีอะไรเป็น HCL ที่ invalid เลย และด้วย `backend = "local"` สำหรับการพิสูจน์ offline ของคอร์สนี้ ไม่มีอะไรพังตอน `plan` ด้วย เทียบกับ backend GCS จริงที่เล็งไป `project = "acme-dev-123456"` จากทั้ง `dev` และ `prod` นี่คือการ deploy `prod` เข้า GCP project ของ `dev` แบบเงียบๆ วิธีแก้: ย้ายค่าที่ต้องต่างกันต่อ environment ไปไว้ `env.hcl` ต่อ environment แล้วให้ `network/terragrunt.hcl` แต่ละตัวกลายเป็นเหมือนกันกับ sibling ของมัน อ่าน `include.env.locals.*` แทน
+</SpotTheBug>
+
+### `include` ตัวที่สองสำหรับค่าที่ share กัน ประกาศโดยไม่มี `expose = true`
+
+```hcl
+# excerpt, as generated -- entries/06-include-no-expose/unit/terragrunt.hcl
+include "env" {
+  path           = find_in_parent_folders("env.hcl")
+  merge_strategy = "no_merge"
+}
+
+inputs = {
+  project = include.env.locals.project
+}
+```
+
+**อาการ — `terragrunt render` จริง:**
+
+```text
+$ terragrunt render --format json
+Error: Unsupported attribute
+
+  on unit/terragrunt.hcl line 15:
+  15:   project = include.env.locals.project
+
+This object does not have an attribute named "env".
+```
+
+<SpotTheBug code={`include "env" {
+  path           = find_in_parent_folders("env.hcl")
+  merge_strategy = "no_merge"
+}`}>
+mechanism เดียวกับ **[Dry Configuration with Include](/terraform-gcp/th/terragrunt-fundamentals/dry-configuration-with-include/)** — `expose = true` คือสิ่งที่ทำให้เนื้อหาที่ parse แล้วของ include อ่านได้ผ่าน `include.NAME.*` วิธีแก้: เพิ่ม `expose = true` เข้า include block ของ `env`
+</SpotTheBug>
+
+### module อ่าน state ของ environment อื่นตรงๆ ด้วย `terraform_remote_state`
+
+```hcl
+# entries/07-remote-state-cross-env/main.tf -- @expect-error No stored state was found for the given workspace in the given backend.
+data "terraform_remote_state" "prod_network" {
+  backend = "local"
+  config = {
+    path = "../../../prod/network/terraform.tfstate"
+  }
+}
+```
+
+**อาการ — `terraform plan` จริง:**
+
+```text
+Error: Unable to find remote state
+
+  with data.terraform_remote_state.prod_network,
+  on main.tf line 1, in data "terraform_remote_state" "prod_network":
+   1: data "terraform_remote_state" "prod_network" {
+
+No stored state was found for the given workspace in the given backend.
+```
+
+<SpotTheBug code={`data "terraform_remote_state" "prod_network" {
+  backend = "local"
+  config = { path = "../../../prod/network/terraform.tfstate" }
+}`}>
+mechanism เดียวกับ **[AI bug catalog](/terraform-gcp/th/reading-terraform/ai-bug-catalog/)** entry 6 ใช้กับรูปทรงที่ Terragrunt live tree ล่อ AI assistant ให้ทำพอดี: เอื้อมไปใช้ raw Terraform `terraform_remote_state` data source แทนที่จะใช้ Terragrunt `dependency` block นอกจาก hard-fail ที่พิสูจน์ไว้ที่นี่ pattern นี้ยังข้าม `mock_outputs` ไปเลย ไม่มีความรู้เรื่องลำดับ `run --all` เลย วิธีแก้: `dependency` block cross-environment ที่ถูกต้อง หรือลบ reference นี้ทิ้งไปเลย
+</SpotTheBug>
+
+### `root.hcl`: GCS `remote_state` ไม่มี `prefix` — สอง unit share state object เดียวกันแบบเงียบๆ
+
+```hcl
+# root.hcl (excerpt)
+remote_state {
+  backend = "gcs"
+  config = {
+    bucket   = "acme-terraform-state"
+    project  = "acme-prod-123456"
+    location = "US"
+  }
+}
+```
+
+**อาการ — จริง `terragrunt run -- init -backend=false` กับ `root.hcl` นี้เป๊ะ รันจากสอง unit ต่างกัน `network` กับ `app` (ธรรมเนียมของคอร์สนี้ในการพิสูจน์ผลของ `generate` — ไม่ต้องมี GCS bucket จริง แค่เนื้อหา `backend.tf` ที่ generate ออกมาจริงก็พอ):**
+
+```text
+$ cd network && terragrunt run --non-interactive --no-color -- init -backend=false && cat backend.tf
+# Generated by Terragrunt. Sig: nIlQXj57tbuaRZEa
+terraform {
+  backend "gcs" {
+    bucket = "acme-terraform-state"
+  }
+}
+
+$ cd ../app && terragrunt run --non-interactive --no-color -- init -backend=false && cat backend.tf
+# Generated by Terragrunt. Sig: nIlQXj57tbuaRZEa
+terraform {
+  backend "gcs" {
+    bucket = "acme-terraform-state"
+  }
+}
+```
+
+<SpotTheBug code={`remote_state {
+  backend = "gcs"
+  config = {
+    bucket   = "acme-terraform-state"
+    project  = "acme-prod-123456"
+    location = "US"
+  }
+}`}>
+`backend.tf` ที่ generate ออกมาทั้งสองไฟล์ **เหมือนกันเป๊ะ byte-ต่อ-byte** พิสูจน์แล้วด้านบนด้วยการรัน `init -backend=false` จริงแยกกันสองครั้ง — `bucket = "acme-terraform-state"` แล้วไม่มีอะไรอื่นเลย `project`/`location` ควบคุมการ auto-create bucket ไม่ใช่การ address state ของ backend block เอง และไม่เคยมี `prefix` ตั้งไว้เลยเพื่อให้แต่ละ unit มี path ของตัวเองแบบที่ `path_relative_to_include()` ทำให้ `key` (AWS) หรือ `key` (azurerm) ถ้าไม่มีมัน `network` กับ `app` จะเล็งไป state object เดียวกันเป๊ะที่ bucket root แบบเงียบๆ — unit ตัวที่สองที่รัน `apply` จะอ่านและเขียนทับ state ของ unit ตัวแรก วิธีแก้: เพิ่ม `prefix = "${path_relative_to_include()}/terraform.tfstate"` เข้า `remote_state.config` เหมือน `key` ของ review ทั้งสองฝั่งก่อนหน้า
+</SpotTheBug>
+
+## โค้ดที่แก้แล้ว
+
+```hcl
+# root.hcl
+remote_state {
+  backend  = "local"
+  generate = { path = "backend.tf", if_exists = "overwrite_terragrunt" }
+  config   = { path = "${get_terragrunt_dir()}/terraform.tfstate" }
+}
+```
+
+<Callout title="ทำไม proof tree นี้ใช้ backend = local">
+ตามธรรมเนียมของคอร์สนี้ `remote_state` แบบ GCS จริงต้องมี bucket จริงที่คอร์สนี้ไม่ provision เลย ทุกคำกล่าวอ้างในบทนี้ที่อิง mechanics ของ `remote_state` มากกว่ารายละเอียด backend เอง — `include`, `dependency`, `find_in_parent_folders`, layout ของ live tree เอง — เหมือนกันทั้งคู่ ต่างกันแค่ `backend = "gcs"` เทียบกับ `"local"` และ `config` ที่ตามมา deploy จริงของ tree นี้ใช้ block `gcs` ของ "โค้ดที่ AI สร้าง" พร้อมเพิ่ม `prefix = "${path_relative_to_include()}/terraform.tfstate"` (วิธีแก้ด้านบน) ไม่ใช่อันนี้
+</Callout>
+
+```hcl
+# modules/network/main.tf
+variable "environment" {
+  type = string
+}
+resource "terraform_data" "vpc" {
+  input = "vpc-${var.environment}"
+}
+output "vpc_id" {
+  value = terraform_data.vpc.id
+}
+```
+
+```hcl
+# modules/app/main.tf
+variable "vpc_id" {
+  type = string
+}
+resource "terraform_data" "app" {
+  input = var.vpc_id
+}
+```
+
+```hcl
+# live/dev/env.hcl
+locals {
+  environment = "dev"
+  project     = "acme-dev-123456"
+  region      = "us-central1"
+}
+```
+
+```hcl
+# live/prod/env.hcl
+locals {
+  environment = "prod"
+  project     = "acme-prod-654321"
+  region      = "us-central1"
+}
+```
+
+```hcl
+# live/dev/network/terragrunt.hcl
+include "root" {
+  path = find_in_parent_folders("root.hcl")
+}
+
+include "env" {
+  path           = find_in_parent_folders("env.hcl")
+  expose         = true
+  merge_strategy = "no_merge"
+}
+
+terraform {
+  source = "${get_terragrunt_dir()}/../../../modules/network"
+}
+
+inputs = {
+  environment = include.env.locals.environment
+}
+```
+
+```hcl
+# live/prod/network/terragrunt.hcl
+include "root" {
+  path = find_in_parent_folders("root.hcl")
+}
+
+include "env" {
+  path           = find_in_parent_folders("env.hcl")
+  expose         = true
+  merge_strategy = "no_merge"
+}
+
+terraform {
+  source = "${get_terragrunt_dir()}/../../../modules/network"
+}
+
+inputs = {
+  environment = include.env.locals.environment
+}
+```
+
+```hcl
+# live/dev/app/terragrunt.hcl
+include "root" {
+  path = find_in_parent_folders("root.hcl")
+}
+
+dependency "network" {
+  config_path = "../network"
+
+  mock_outputs                            = { vpc_id = "mock-vpc-id" }
+  mock_outputs_allowed_terraform_commands = ["plan"]
+}
+
+terraform {
+  source = "${get_terragrunt_dir()}/../../../modules/app"
+}
+
+inputs = {
+  vpc_id = dependency.network.outputs.vpc_id
+}
+```
+
+```hcl
+# live/prod/app/terragrunt.hcl
+include "root" {
+  path = find_in_parent_folders("root.hcl")
+}
+
+dependency "network" {
+  config_path = "../network"
+
+  mock_outputs                            = { vpc_id = "mock-vpc-id" }
+  mock_outputs_allowed_terraform_commands = ["plan"]
+}
+
+terraform {
+  source = "${get_terragrunt_dir()}/../../../modules/app"
+}
+
+inputs = {
+  vpc_id = dependency.network.outputs.vpc_id
+}
+```
+
+พิสูจน์จริง ทั้งต้นพร้อมกัน:
+
+```text
+$ terragrunt hcl validate --working-dir .
+(no output -- 0 errors)
+
+$ diff live/dev/network/terragrunt.hcl live/prod/network/terragrunt.hcl
+(no output -- now correctly identical; env.hcl differs instead)
+
+$ terragrunt run --all --non-interactive --no-color --working-dir . -- plan
+❯❯ Run Summary  4 units
+   Succeeded    4
+
+$ terragrunt find --dag --working-dir .
+live/dev/network
+live/prod/network
+live/dev/app
+live/prod/app
+```
+
+## อะไรเปลี่ยนและทำไม
+
+| # | Bug | วิธีแก้ |
+|---|---|---|
+| 1 | `run-all`/`plan-all` ใน CI script | `run --all` — real "unknown command" rejection ทั้งคู่ ก่อนแก้ |
+| 2 | `--terragrunt-non-interactive` และ flag prefix ก่อน 1.1 อื่นๆ | `--non-interactive` เปล่าๆ ฯลฯ — real "not a Terragrunt flag" rejection ก่อนแก้ |
+| 3 | `find_in_parent_folders()` ไม่มี argument, root file ชื่อ `root.hcl` | `find_in_parent_folders("root.hcl")` — real "Could not find a terragrunt.hcl" ทั้ง 4 unit ก่อนแก้ |
+| 4 | `dependency "network"` ไม่มี `mock_outputs` เลย | `mock_outputs` + `mock_outputs_allowed_terraform_commands = ["plan"]` — real `run --all plan` พังบน environment สดใหม่ก่อนแก้ |
+| 5 | `dev` กับ `prod` network unit มี `locals` เหมือนกันเป๊ะ (รวม `project`) | ย้ายค่าที่ต้องต่างไปไว้ `env.hcl` ต่อ environment; ไฟล์ unit กลายเป็นเหมือนกันแทน — `diff` จริงพิสูจน์ทั้ง bug และวิธีแก้ |
+| 6 | `include "env"` ตัวที่สองไม่มี `expose = true` | เพิ่ม `expose = true` — real "This object does not have an attribute named env" ก่อนแก้ |
+| 7 | `terraform_remote_state` อ่าน state ของ environment อื่นตรงๆ จากข้างใน module | แทนที่ด้วย `dependency` block ที่ถูกต้อง (หรือลบทิ้ง) — real "No stored state was found" ก่อนแก้ |
+| 8 | `root.hcl` GCS `remote_state` ไม่มี `prefix` | เพิ่ม `prefix = "${path_relative_to_include()}/terraform.tfstate"` — พิสูจน์ด้วย unit สอง unit จริงที่ generate `backend.tf` เหมือนกันเป๊ะ (ความเสี่ยง state ชนกันจริง) |
+
+## Mental Model
+
+สี่ใน bug แปดข้อนี้ (1, 2, 3, 6) เป็น hard failure ที่ชัดทันทีระดับ CLI/HCL-evaluation เหมือนกับ review ทั้งสองฝั่งก่อนหน้า ข้อหนึ่ง (4) เป็น hard failure แต่เกิดเฉพาะ `run --all plan` ครั้งแรกกับ environment สดใหม่จริงๆ เท่านั้น ข้อหนึ่ง (7) เป็น hard failure เฉพาะ state ที่ไม่เคยถูก apply ที่ระดับ Terraform สองข้อที่เหลือ (5, 8) ไม่ error เลย — และ entry 8 คือ bug ข้อเดียวในบทนี้ทั้งหมดที่เฉพาะ GCS จริงๆ: แทนที่จะเป็น argument `dynamodb_table` ที่ deprecated (AWS) หรือ backend ที่ default ไป shared key แบบเงียบๆ (azurerm) ช่องว่างเทียบเท่าที่นี่คือ unit สองตัวที่มีโครงสร้างต่างกันจริง generate backend configuration เหมือนกันเป๊ะ — ความเสี่ยง state ชนกันจริง ที่ `hcl validate` ไม่มีทางสังเกตได้เลย เพราะไฟล์ที่ generate ทั้งสองไฟล์ valid สมบูรณ์รายตัว
+
+## ความเข้าใจผิดที่พบบ่อย
+
+- **"ถ้า `terragrunt hcl validate` ผ่าน แปลว่า multi-environment tree ปลอดภัยที่จะ deploy จริง"** พิสูจน์แล้วด้านบน: `hcl validate` กับ `network` unit ที่เหมือนกันเป๊ะสองตัวคืนค่า error ศูนย์ข้อ — HCL validation ไม่มีแนวคิดเรื่อง "ค่านี้ควรต่างจากไฟล์ sibling นั้น" เลย และเช่นเดียวกันกับ unit สองตัวที่ generate `backend.tf` เหมือนกันเป๊ะ
+- **"`dependency` block ที่ไม่มี `mock_outputs` พังแค่ `apply` เท่านั้น ไม่เคยพัง `plan`"** พิสูจน์แล้วด้านบน: บน environment สดใหม่สมบูรณ์ที่ dependency ไม่เคยถูก apply เลยแม้แต่ครั้งเดียว `run --all plan` เองก็พัง
+- **"`project`/`location` ใน `remote_state.config` แบบ GCS scope state ต่อ unit เหมือน `key`/`prefix` ที่อื่น"** พิสูจน์แล้วด้านบน: unit สองตัวที่มีโครงสร้างต่างกันจริง (`network`, `app`) generate `backend.tf` เหมือนกันเป๊ะ ต่างกันแค่ไม่มีอะไรเลย — `project`/`location` ควบคุมการ auto-create bucket ไม่เคย address state เลย มีแค่ `prefix` เท่านั้นที่ทำแบบนั้น และไม่เคยถูกตั้งเลย
+
+<Mermaid title="แต่ละ bug อยู่ตรงไหนในเส้นทางประเมินของ live tree นี้" code={wr2Diagram} />
+
+export const wr2Diagram = `flowchart TD
+  CI["ci/deploy.sh"] -->|"1: run-all/plan-all removed"| CI
+  CI -->|"2: --terragrunt-* flags rejected"| CI
+  CI --> H["terragrunt hcl validate"]
+  H -->|"3: find_in_parent_folders() no arg"| H
+  H -->|"6: include without expose"| H
+  H --> R["terragrunt run --all plan"]
+  R -->|"4: dependency, no mock_outputs -- fresh env"| R
+  R --> M["module-level terraform plan"]
+  M -->|"7: terraform_remote_state cross-env"| M
+  D["diff dev vs prod files"] -->|"5: byte-identical locals"| D
+  L["root.hcl remote_state, generated backend.tf"] -->|"8: no prefix -- state collision"| L
+`;
+
+<Callout title="สรุปบรรทัดเดียว">
+เจ็ดใน bug แปดข้อของ live tree นี้เป็น Terragrunt mechanics เดียวกันเป๊ะที่ไม่ขึ้นกับ provider เหมือน review ทั้งสองฝั่งก่อนหน้า — command/flag parser ของ CLI เอง, การ resolve include/function ของ `hcl validate`, การ resolve dependency ของ `run --all`, และ raw Terraform `data` block ที่เอื้อมไปหา state ที่ไม่เคยถูก apply ล้วนพังแบบเดียวกันไม่ว่า cloud ไหน bug ข้อเดียวที่ต่างกันจริงตาม cloud คือช่องว่างเรื่อง backend scoping: ของ AWS คือ argument locking ที่ deprecated, azurerm คือ backend ที่ default ไปใช้ shared key อายุยืนแบบเงียบๆ, และ GCS คือข้อที่คมที่สุดในสาม: unit สองตัว generate backend configuration เหมือนกันเป๊ะ ความเสี่ยง state ชนกันจริง ไม่มี error ไหนเลย
+</Callout>
+
+export const quizWorkedReview2 = [
+  {
+    q: '`find_in_parent_folders()` ถูกเรียกโดยไม่มี argument ใน tree ที่ root config ชื่อ `root.hcl` `terragrunt hcl validate` จริงแสดงอะไร?',
+    options: [
+      'มันหา root.hcl เจอเองอัตโนมัติเพราะเป็นธรรมเนียม Terragrunt ปัจจุบัน',
+      'error จริง "Could not find a terragrunt.hcl in any of the parent folders" ทั้งทุก unit ใน tree พร้อมกัน -- รูปแบบไม่มี argument หาไฟล์ที่ชื่อ terragrunt.hcl เจาะจง ไม่ใช่ไฟล์ root จริงที่ถูกเรียกว่าอะไรก็ได้',
+      'มันหาไฟล์ที่มีนามสกุล .hcl อะไรก็ได้',
+      'มันพังแค่กับ unit ที่ซ้อนลึกเกินสองชั้นเท่านั้น',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์โดยตรง: `terragrunt hcl validate --working-dir .` กับทั้ง 4 unit คืน "4 HCL validation error(s) found" แต่ละอันมี cause "Could not find a terragrunt.hcl ... Traversed all the way to the root" เหมือนกันเป๊ะ -- mechanics เดียวกับ review ทั้งสองฝั่งก่อนหน้า เพราะเป็น Terragrunt-core ไม่ใช่เฉพาะ provider',
+  },
+  {
+    q: 'environment สดใหม่ที่ `network` ไม่เคยถูก apply เลย และ `app` มี `dependency "network"` block ที่ไม่มี `mock_outputs` เลย `terragrunt run --all plan` จริงแสดงอะไร?',
+    options: [
+      'ทั้งสอง unit plan สำเร็จ โดย app ใช้ placeholder ค่าศูนย์',
+      '2 unit สำเร็จ (network ทั้งคู่), 2 พัง (app ทั้งคู่) -- error จริง "detected no outputs" ที่ระบุ mock_outputs เป็นวิธีแก้ บวก error ตามมา "no variable named dependency"',
+      'run --all ทั้งหมดปฏิเสธไม่เริ่มเลย',
+      'app ข้าม input vpc_id แบบเงียบๆ แล้ว plan ต่อไปโดยไม่มีมัน',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์โดยตรง: Run Summary จริงแสดง 2 สำเร็จ / 2 พัง บน run --all plan สดใหม่สมบูรณ์กับทั้ง dev และ prod พร้อม error จริงเป๊ะ "resolving dependency \\"network\\" outputs ... detected no outputs"',
+  },
+  {
+    q: 'root `remote_state.config` แบบ GCS backend ตั้ง `bucket`, `project`, และ `location` ไว้ แต่ไม่มี `prefix` unit สองตัวที่มีโครงสร้างต่างกันจริง `network` กับ `app` แต่ละตัวรัน `init -backend=false` จริง `backend.tf` ที่ generate ออกมาแสดงอะไร?',
+    options: [
+      'แต่ละ unit ได้ path เฉพาะตัวโดยอัตโนมัติจากชื่อ directory ของมัน',
+      'backend.tf ที่เหมือนกันเป๊ะ -- แค่ "bucket = ..." ไม่มีอะไรอื่นเลย -- เพราะ project/location ควบคุมแค่การ auto-create bucket ไม่เคย address state เลย และไม่เคยมี prefix ตั้งไว้เพื่อ scope state ต่อ unit เลย',
+      'Terragrunt ปฏิเสธไม่ generate backend.tf ถ้าไม่มี prefix',
+      'init ของ unit ตัวที่สองพังด้วย error "duplicate backend"',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์โดยตรง: รัน `init -backend=false` จริงแยกกันสองครั้ง ครั้งหนึ่งจาก network/ ครั้งหนึ่งจาก app/ ได้เนื้อหา backend.tf ที่ generate เหมือนกันเป๊ะ -- ความเสี่ยง state ชนกันจริงแบบเงียบๆ ที่ไม่มี error จากเครื่องมือไหนเลย',
+  },
+  {
+    q: '`dev` กับ `prod` network unit เหมือนกันเป๊ะ รวม `project` ด้วย `terragrunt hcl validate` แสดงอะไร และอะไรจับ bug นี้ได้จริง?',
+    options: [
+      'hcl validate รายงาน error "duplicate environment"',
+      'hcl validate ผ่านทั้งคู่ error ศูนย์ข้อ -- มีแค่ diff ตรงๆ (หรือ reviewer ที่รู้ว่า project ID สองตัวควรต่างกัน) เท่านั้นที่จับได้ พิสูจน์ด้วย diff จริงที่ไม่คืนอะไรเลย',
+      'terragrunt ปฏิเสธไม่ run --all กับ tree ที่มี locals ซ้ำ',
+      'สิ่งนี้ถูกจับอัตโนมัติโดย dependency graph',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์โดยตรง: `diff live/dev/network/terragrunt.hcl live/prod/network/terragrunt.hcl` คืนค่าศูนย์ (เหมือนกันเป๊ะ) และ hcl validate กับทั้งต้นคืน error ศูนย์ข้อ',
+  },
+  {
+    q: '`include "env"` ตัวที่สองประกาศด้วย `merge_strategy = "no_merge"` แต่ไม่มี `expose = true` แล้ว `inputs` บรรทัดหนึ่งอ่าน `include.env.locals.project` `terragrunt render` จริงแสดงอะไร?',
+    options: [
+      'project resolve เป็น string ว่างแบบเงียบๆ',
+      '"Error: Unsupported attribute ... This object does not have an attribute named \\"env\\"" -- expose คือสิ่งที่ทำให้ include.NAME.* เป็น reference ที่อ่านได้เจาะจง และมีแค่ root include เท่านั้นที่ blocks ของมันถูก merge เข้ามาโดยไม่ต้องมีมัน',
+      'render สำเร็จและ merge env locals เข้า locals ระดับบนสุดอัตโนมัติ',
+      'สิ่งนี้พังแค่ตอน apply เท่านั้น ไม่เคยพังตอน render',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์โดยตรง: error ของ render จริงคือ "This object does not have an attribute named \\"env\\"" เป๊ะ -- mechanism เดียวกับ review ทั้งสองฝั่งก่อนหน้าและบท Dry Configuration with Include',
+  },
+];
+
+<Quiz client:visible id="reading-terraform/worked-review-2" questions={quizWorkedReview2} />
+
+<ProgressTracker client:visible id="reading-terraform/worked-review-2" />
