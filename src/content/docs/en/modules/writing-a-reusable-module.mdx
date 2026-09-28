@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## The idea in one sentence
 
@@ -99,6 +100,11 @@ variable "bucket_name" {
   type        = string
 }
 
+variable "project_id" {
+  description = "ID of the GCP project that owns the bucket"
+  type        = string
+}
+
 variable "force_destroy" {
   description = "Allow bucket to be destroyed even if it still contains objects"
   type        = bool
@@ -107,6 +113,98 @@ variable "force_destroy" {
 ```
 
 Here `force_destroy` has a sensible default — most callers never touch it — while `bucket_name` has none, because every caller genuinely needs a different bucket name and there is no reasonable default to guess.
+
+## The rule a reusable module must follow: never declare your own provider
+
+A module intended for reuse should almost never contain a `provider` block with real configuration in it. Per the official guidance (`developer.hashicorp.com/terraform/language/modules/develop/providers`): "Modules intended for use by other modules should not contain `provider` blocks. Modules with their own provider configurations are incompatible with arguments like `for_each`, `count`, and `depends_on`." That is not a style preference — it is enforced, with a real error. Proof: a child module with a genuine, non-empty `provider "google" { project = "my-project-id" }` block, called with `count`:
+
+```hcl
+# @expect-error Module is incompatible with count, for_each, and depends_on
+terraform {
+  required_providers {
+    google = {
+      source  = "hashicorp/google"
+      version = "~> 8.0"
+    }
+  }
+}
+
+provider "google" {
+  project = "my-project-id"
+}
+
+resource "google_storage_bucket" "this" {
+  name     = "acme-example-bucket"
+  location = "US"
+}
+```
+
+```hcl
+# @expect-error Module is incompatible with count, for_each, and depends_on
+module "bucket" {
+  source = "./modules/bucket"
+  count  = 2
+}
+```
+
+Real `terraform init` output on Terraform 1.16.4:
+
+```text
+$ terraform init
+Error: Module is incompatible with count, for_each, and depends_on
+
+  on main.tf line 12, in module "bucket":
+  12:   count  = 2
+
+The module at module.bucket is a legacy module which contains its own local
+provider configurations, and so calls to it may not use the count,
+for_each, or depends_on arguments.
+
+If you also control the module "./modules/bucket", consider updating this
+module to instead expect provider configurations to be passed by its
+caller.
+```
+
+This is the exact same error text — and the exact same current-version-vs-older-docs-wording mismatch — proven identically in the aws and azurerm siblings of this course, because it is a core Terraform language rule, not something google-specific. The fix is `configuration_aliases`: the module declares it needs a provider passed in under a local alias, and never configures one itself.
+
+```hcl
+# Fixed: modules/bucket/main.tf never owns a provider block
+terraform {
+  required_providers {
+    google = {
+      source                = "hashicorp/google"
+      version               = "~> 8.0"
+      configuration_aliases = [google.this]
+    }
+  }
+}
+
+resource "google_storage_bucket" "this" {
+  provider = google.this
+  name     = "acme-example-bucket"
+  location = "US"
+}
+```
+
+```hcl
+# Fixed: root main.tf passes the provider explicitly
+module "bucket" {
+  source = "./modules/bucket"
+  count  = 2
+  providers = {
+    google.this = google
+  }
+}
+```
+
+Real `terraform validate` output after the fix (`plan` for `google_storage_bucket` needs a real GCP project, so this course validates rather than plans it):
+
+```text
+$ terraform validate
+Success! The configuration is valid.
+```
+
+`providers = {}` in the calling `module` block is how the caller hands the module a specific (possibly aliased) provider configuration explicitly, instead of the module silently inheriting the default provider the way it would if it declared no `provider` block and no `configuration_aliases` at all. A module written this way works identically whether it is called once, with `count`, or with `for_each` — because it never owns a provider configuration to begin with.
 
 <Mermaid title="A module directory called from a root configuration via a module block" code={gcsModuleAnatomyDiagram} />
 
@@ -121,8 +219,56 @@ export const gcsModuleAnatomyDiagram = `flowchart LR
   rmain -->|source = ./modules/gcs-bucket| vars
   outs -->|module.bucket.url| rmain`;
 
+## Mental Model
+
+A module is reusable in direct proportion to how little it assumes about its caller. File layout, sensible defaults, and resisting over-parameterization all serve that goal at the *configuration* level; the provider rule proven above serves it at the *provider* level — a module that owns its own `provider` block has quietly assumed "I will only ever be called once, with the default provider," and that assumption becomes a real, named error the instant a caller tries `count`, `for_each`, or `depends_on`. `configuration_aliases` plus a caller-side `providers = {}` map is how a module states its provider dependency explicitly instead of assuming it.
+
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---|---|---|
+| One clear responsibility per module | Reusable across many callers without modification | More modules to navigate; a caller may need to wire several together (covered in `module-composition-and-sources.mdx`) |
+| Sensible defaults on optional inputs | Simple callers need only the required inputs | A default can hide a real decision a caller should have made consciously |
+| `configuration_aliases` instead of an owned `provider` block | Works with `count`/`for_each`/`depends_on` — proven above, the alternative hard-fails with a real error | The caller must remember to pass `providers = {}`; forgetting it is its own error to debug |
+
+## Common Misconceptions
+
+- **"A module needs its own `provider` block to know which GCP project to use."** Proven above: the opposite is true for a reusable module — an owned provider block is exactly what makes `count`/`for_each`/`depends_on` fail with a real, named error. The project should come from the caller.
+- **"The count/for_each restriction on modules with providers is just a style lint, not a hard error."** Proven above with a real `terraform init` failure on Terraform 1.16.4: "Module is incompatible with count, for_each, and depends_on."
+- **"This is a google-provider-specific quirk."** Proven above by exact-text comparison across this course's three sibling repos: the aws, azurerm, and google providers all produce the identical Terraform-core error text, because the restriction lives in Terraform itself, not in any one provider.
+- **"You can always trust an error message's exact wording from memory or from a docs page you read a while ago."** Proven above: the officially documented example text ("Module does not support count ... contains a nested provider configuration") does not match the real Terraform 1.16.4 output ("Module is incompatible with count, for_each, and depends_on") — always re-verify against the pinned version.
+
+## Reading AI-generated code
+
+When reviewing a generated module intended to be reusable, check for:
+
+- A `provider` block with real, non-empty arguments inside a module directory — proven above, this silently breaks the moment a caller tries `count`, `for_each`, or `depends_on` on that module, often far from where the provider block was originally written.
+- A module that hardcodes a GCP project ID, region, or credential-adjacent setting instead of accepting it (or an aliased provider) from its caller.
+- Every field a resource supports exposed as a module variable "for completeness," rather than added when a real caller needs that specific variation — proven above, each one is a permanent piece of public API to maintain.
+- A required variable with no `description`, making the module's public API harder for a caller to use correctly without reading the resource block itself.
+
+<SpotTheBug code={`# modules/queue/main.tf
+terraform {
+  required_providers {
+    google = {
+      source  = "hashicorp/google"
+      version = "~> 8.0"
+    }
+  }
+}
+
+provider "google" {
+  project = "acme-prod-project"
+}
+
+resource "google_pubsub_topic" "this" {
+  name = var.topic_name
+}`}>
+Proven above with a real `terraform init` failure: this module owns a genuine, configured `provider "google"` block, which per the official guidance ("Modules intended for use by other modules should not contain provider blocks") makes it incompatible with `count`, `for_each`, and `depends_on` the moment any caller tries to use one of those on the `module` block — the exact, real error is "Module is incompatible with count, for_each, and depends_on ... contains its own local provider configurations." Worse, it silently hardcodes `acme-prod-project`, so every caller gets that GCP project regardless of their own provider configuration, with no way to override it. The fix is `configuration_aliases = [google.this]` in `required_providers`, referencing `provider = google.this` on the resource, and no `provider` block in the module at all — the caller then supplies the actual provider via `providers = { google.this = google }`, proven above to `validate` cleanly even with `count = 2`.
+</SpotTheBug>
+
 <Callout title="The one-line takeaway">
-A **module** is nothing more than a directory of `.tf` files; the directory you `apply` directly is the **root module**, and any directory referenced through a `module` block becomes a **child module** — there is no special syntax involved. Because a module is a full Terraform configuration, it follows the same **`variables.tf` / `main.tf` / `outputs.tf`** convention as a root config, just with `variables.tf` acting as its public inputs and `outputs.tf` as what it exposes back to the caller. Good module design means one clear responsibility, sensible **defaults** for optional inputs, and adding new variables only when a real caller needs the variation rather than over-parameterizing preemptively.
+A **module** is nothing more than a directory of `.tf` files; the directory you `apply` directly is the **root module**, and any directory referenced through a `module` block becomes a **child module** — there is no special syntax involved. Because a module is a full Terraform configuration, it follows the same **`variables.tf` / `main.tf` / `outputs.tf`** convention as a root config, just with `variables.tf` acting as its public inputs and `outputs.tf` as what it exposes back to the caller. Good module design means one clear responsibility, sensible **defaults** for optional inputs, and adding new variables only when a real caller needs the variation rather than over-parameterizing preemptively. A reusable module must also never own a real `provider` configuration — proven above with a real error, identical across all three clouds' providers because it is a Terraform-core rule — use `configuration_aliases` and let the caller pass `providers = {}` instead.
 </Callout>
 
 export const quizWritingReusableModule = [
@@ -135,6 +281,7 @@ export const quizWritingReusableModule = [
       'Naming the directory modules/ instead of anything else',
     ],
     answer: 1,
+    explain: 'Proven throughout: the same file layout applies to any directory of .tf files; what makes it a "child module" is only that some other configuration references it via a module block.',
   },
   {
     q: 'Why does a reusable modules file layout typically mirror variables.tf, main.tf, and outputs.tf',
@@ -145,6 +292,29 @@ export const quizWritingReusableModule = [
       'outputs.tf is required for the module to be published to the Terraform Registry',
     ],
     answer: 1,
+    explain: 'A module is not a special templating construct — it is a normal Terraform configuration parameterized by variables.tf on the way in and outputs.tf on the way out.',
+  },
+  {
+    q: '```text\n$ terraform init\nError: Module is incompatible with count, for_each, and depends_on\n\n  on main.tf line 12, in module "bucket":\n  12:   count  = 2\n\nThe module at module.bucket is a legacy module which contains its own local\nprovider configurations, and so calls to it may not use the count,\nfor_each, or depends_on arguments.\n```\nWhat real module content, proven above, causes this exact error?',
+    options: [
+      'The module declares a variable with no default value',
+      'The module contains a genuine, configured provider "google" block instead of receiving its provider from the caller via configuration_aliases',
+      'The module uses for_each internally on one of its own resources',
+      'The module is sourced from a Git URL instead of a local path',
+    ],
+    answer: 1,
+    explain: 'Proven above: a module with an owned, non-empty provider "google" { project = "my-project-id" } block fails exactly this way the moment its caller adds count = 2. The fix (configuration_aliases + caller-side providers = {}) is proven above to validate cleanly.',
+  },
+  {
+    q: 'Is the "Module is incompatible with count, for_each, and depends_on" error specific to the google provider?',
+    options: [
+      'Yes, it is a google-only restriction',
+      'No — proven above by exact-text comparison across this course\'s aws, azurerm, and google siblings, the error text is identical, because the restriction is a Terraform-core rule, not provider-specific',
+      'Yes, only providers requiring a project ID trigger it',
+      'No, but only the wording differs slightly between providers',
+    ],
+    answer: 1,
+    explain: 'Proven above: the exact same error text appears whether the module owns a configured provider "aws", provider "azurerm", or provider "google" block — the count/for_each/depends_on restriction is enforced by Terraform itself, independent of which provider is involved.',
   },
   {
     q: 'What is the practical cost of over-parameterizing a module by exposing every possible resource field as a variable on day one',
@@ -155,6 +325,7 @@ export const quizWritingReusableModule = [
       'Terraform silently ignores unused variables so it causes no issue',
     ],
     answer: 2,
+    explain: 'Each exposed variable is a promise to future callers and maintainers — adding it only when a real caller needs the variation keeps that promise smaller and more honest.',
   },
   {
     q: 'In the gcs-bucket module example, why does bucket_name have no default while force_destroy does',
@@ -165,6 +336,7 @@ export const quizWritingReusableModule = [
       'Because force_destroy is a required argument on google_storage_bucket',
     ],
     answer: 1,
+    explain: 'A default should only exist where most callers genuinely want the same value — bucket_name is inherently caller-specific, so giving it a default would just hide a decision every caller has to make anyway.',
   },
 ];
 

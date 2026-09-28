@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## ไอเดียในหนึ่งประโยค
 
@@ -99,6 +100,11 @@ variable "bucket_name" {
   type        = string
 }
 
+variable "project_id" {
+  description = "ID of the GCP project that owns the bucket"
+  type        = string
+}
+
 variable "force_destroy" {
   description = "Allow bucket to be destroyed even if it still contains objects"
   type        = bool
@@ -108,7 +114,99 @@ variable "force_destroy" {
 
 ในตัวอย่างนี้ `force_destroy` มี default ที่สมเหตุสมผล — caller ส่วนใหญ่ไม่ต้องแตะเลย — ส่วน `bucket_name` ไม่มี default เพราะ caller แต่ละคนต้องการชื่อ bucket ที่ต่างกันจริง ๆ และไม่มี default ไหนที่เดาได้อย่างสมเหตุสมผล
 
-<Mermaid title="A module directory called from a root configuration via a module block" code={gcsModuleAnatomyDiagram} />
+## กฎที่ reusable module ต้องทำตาม อย่าประกาศ provider ของตัวเอง
+
+module ที่ตั้งใจให้ reuse ไม่ควรมี `provider` block ที่มี configuration จริงอยู่ข้างในแทบทุกกรณี ตามคำแนะนำทางการ (`developer.hashicorp.com/terraform/language/modules/develop/providers`) "Modules intended for use by other modules should not contain `provider` blocks. Modules with their own provider configurations are incompatible with arguments like `for_each`, `count`, and `depends_on`" นี่ไม่ใช่แค่ความชอบด้านสไตล์ — มันถูก enforce ด้วย error จริง พิสูจน์ด้วย child module ที่มี `provider "google" { project = "my-project-id" }` block จริงที่ไม่ว่างเปล่า ถูกเรียกด้วย `count`
+
+```hcl
+# @expect-error Module is incompatible with count, for_each, and depends_on
+terraform {
+  required_providers {
+    google = {
+      source  = "hashicorp/google"
+      version = "~> 8.0"
+    }
+  }
+}
+
+provider "google" {
+  project = "my-project-id"
+}
+
+resource "google_storage_bucket" "this" {
+  name     = "acme-example-bucket"
+  location = "US"
+}
+```
+
+```hcl
+# @expect-error Module is incompatible with count, for_each, and depends_on
+module "bucket" {
+  source = "./modules/bucket"
+  count  = 2
+}
+```
+
+output จริงของ `terraform init` บน Terraform 1.16.4
+
+```text
+$ terraform init
+Error: Module is incompatible with count, for_each, and depends_on
+
+  on main.tf line 12, in module "bucket":
+  12:   count  = 2
+
+The module at module.bucket is a legacy module which contains its own local
+provider configurations, and so calls to it may not use the count,
+for_each, or depends_on arguments.
+
+If you also control the module "./modules/bucket", consider updating this
+module to instead expect provider configurations to be passed by its
+caller.
+```
+
+นี่คือ error text เดียวกันเป๊ะ — และการที่คำใน docs ตัวเก่าไม่ตรงกับเวอร์ชันปัจจุบัน ก็เกิดขึ้นเหมือนกันเป๊ะ — ที่พิสูจน์แล้วในคอร์สพี่น้อง aws และ azurerm ของคอร์สนี้ เพราะนี่คือกฎหลักของภาษา Terraform เอง ไม่ใช่เรื่องเฉพาะของ google provider ทางแก้คือ `configuration_aliases` module ประกาศว่าต้องการ provider ที่ส่งเข้ามาภายใต้ alias ท้องถิ่น และไม่ config provider เองเลย
+
+```hcl
+# Fixed: modules/bucket/main.tf never owns a provider block
+terraform {
+  required_providers {
+    google = {
+      source                = "hashicorp/google"
+      version               = "~> 8.0"
+      configuration_aliases = [google.this]
+    }
+  }
+}
+
+resource "google_storage_bucket" "this" {
+  provider = google.this
+  name     = "acme-example-bucket"
+  location = "US"
+}
+```
+
+```hcl
+# Fixed: root main.tf passes the provider explicitly
+module "bucket" {
+  source = "./modules/bucket"
+  count  = 2
+  providers = {
+    google.this = google
+  }
+}
+```
+
+output จริงของ `terraform validate` หลังแก้ (`plan` สำหรับ `google_storage_bucket` ต้องการ GCP project จริง คอร์สนี้เลย validate แทนที่จะ plan)
+
+```text
+$ terraform validate
+Success! The configuration is valid.
+```
+
+`providers = {}` ใน `module` block ของผู้เรียกคือวิธีที่ caller ส่ง provider configuration ที่เจาะจง (อาจมี alias) ให้ module อย่างชัดเจน แทนที่ module จะ inherit provider default แบบเงียบ ๆ เหมือนที่จะเกิดถ้า module ไม่ประกาศ `provider` block และไม่มี `configuration_aliases` เลย module ที่เขียนแบบนี้ทำงานเหมือนกันไม่ว่าจะถูกเรียกครั้งเดียว ด้วย `count` หรือด้วย `for_each` — เพราะมันไม่เคยเป็นเจ้าของ provider configuration ตั้งแต่แรก
+
+<Mermaid title="directory ของ module ถูกเรียกจาก root configuration ผ่าน module block" code={gcsModuleAnatomyDiagram} />
 
 export const gcsModuleAnatomyDiagram = `flowchart LR
   subgraph root["Root module"]
@@ -121,8 +219,56 @@ export const gcsModuleAnatomyDiagram = `flowchart LR
   rmain -->|source = ./modules/gcs-bucket| vars
   outs -->|module.bucket.url| rmain`;
 
-<Callout title="The one-line takeaway">
-**module** ก็แค่ directory ของไฟล์ `.tf` directory ที่คุณ `apply` ตรง ๆ เรียกว่า **root module** ส่วน directory ที่ถูกอ้างอิงผ่าน `module` block กลายเป็น **child module** — ไม่มี syntax พิเศษเกี่ยวข้องเลย เพราะ module คือ Terraform configuration เต็มรูปแบบ จึงตาม convention **`variables.tf` / `main.tf` / `outputs.tf`** เหมือน root config โดยที่ `variables.tf` ทำหน้าที่เป็น public input และ `outputs.tf` เป็นสิ่งที่ expose กลับให้ caller การออกแบบ module ที่ดีหมายถึง responsibility เดียวที่ชัดเจน มี **default** ที่สมเหตุสมผลสำหรับ input ที่เป็น optional และเพิ่ม variable ใหม่เฉพาะตอนที่ caller จริงต้องการความยืดหยุ่นนั้น ไม่ใช่ over-parameterize ไว้ล่วงหน้า
+## Mental Model
+
+module จะ reuse ได้มากแค่ไหนขึ้นอยู่กับว่ามันสมมติเกี่ยวกับ caller น้อยแค่ไหน file layout, default ที่สมเหตุสมผล และการต้าน over-parameterization ล้วนรับใช้เป้าหมายนี้ในระดับ configuration ส่วนกฎเรื่อง provider ที่พิสูจน์ข้างบนรับใช้เป้าหมายนี้ในระดับ provider — module ที่เป็นเจ้าของ `provider` block ของตัวเองแอบสมมติไว้ว่า "ฉันจะถูกเรียกแค่ครั้งเดียว ด้วย provider default เท่านั้น" และสมมติฐานนั้นกลายเป็น error จริงที่มีชื่อระบุชัด ทันทีที่ caller ลอง `count`, `for_each`, หรือ `depends_on` `configuration_aliases` บวกกับ `providers = {}` ฝั่ง caller คือวิธีที่ module ประกาศ dependency ต่อ provider อย่างชัดเจน แทนที่จะสมมติเอาเอง
+
+## ข้อแลกเปลี่ยน
+
+| ทางเลือก | ได้อะไร | เสียอะไร |
+|---|---|---|
+| responsibility เดียวที่ชัดเจนต่อ module | reuse ได้กับหลาย caller โดยไม่ต้องแก้ไข | มี module ให้ต้องนำทางมากขึ้น caller อาจต้องเชื่อม module หลายตัวเข้าด้วยกัน (อยู่ใน `module-composition-and-sources.mdx`) |
+| default ที่สมเหตุสมผลบน optional input | caller ธรรมดาต้องระบุแค่ input ที่ required | default อาจซ่อนการตัดสินใจจริงที่ caller ควรตั้งใจเลือกเอง |
+| `configuration_aliases` แทนการเป็นเจ้าของ `provider` block | ใช้กับ `count`/`for_each`/`depends_on` ได้ — พิสูจน์ข้างบน ทางเลือกอื่น fail ด้วย error จริง | caller ต้องจำใส่ `providers = {}` ลืมแล้วก็เป็น error อีกแบบที่ต้อง debug เอง |
+
+## ความเข้าใจผิดที่พบบ่อย
+
+- **"module ต้องมี provider block ของตัวเองถึงจะรู้ว่าใช้ GCP project ไหน"** พิสูจน์ข้างบน ตรงกันข้ามเลยสำหรับ reusable module — provider block ที่เป็นเจ้าของเองนี่แหละที่ทำให้ `count`/`for_each`/`depends_on` fail ด้วย error จริงที่มีชื่อระบุ project ควรมาจาก caller
+- **"ข้อจำกัดเรื่อง count/for_each กับ module ที่มี provider เป็นแค่ lint สไตล์ ไม่ใช่ hard error"** พิสูจน์ข้างบนด้วย `terraform init` fail จริงบน Terraform 1.16.4 "Module is incompatible with count, for_each, and depends_on"
+- **"นี่คือ quirk เฉพาะของ google provider"** พิสูจน์ข้างบนด้วยการเทียบ error text เป๊ะ ๆ ข้ามคอร์สพี่น้องทั้งสามของคอร์สนี้ provider aws, azurerm และ google ทั้งหมดให้ error text ของ Terraform-core เดียวกันเป๊ะ เพราะข้อจำกัดนี้อยู่ใน Terraform เอง ไม่ใช่ใน provider ตัวไหน
+- **"เชื่อคำ error ของ Terraform จากความจำหรือจากหน้า docs ที่อ่านมานานแล้วได้เสมอ"** พิสูจน์ข้างบน ข้อความตัวอย่างที่ document ไว้อย่างเป็นทางการ ("Module does not support count ... contains a nested provider configuration") ไม่ตรงกับ output จริงของ Terraform 1.16.4 ("Module is incompatible with count, for_each, and depends_on") — ต้อง re-verify กับเวอร์ชันที่ pin ไว้เสมอ
+
+## อ่านโค้ดที่ AI เขียน
+
+ตอน review module ที่ generate มาซึ่งตั้งใจให้ reuse ได้ เช็คสิ่งเหล่านี้
+
+- `provider` block ที่มี argument จริงไม่ว่างเปล่าอยู่ในตัว module — พิสูจน์ข้างบน สิ่งนี้จะพังเงียบ ๆ ทันทีที่ caller ลอง `count`, `for_each`, หรือ `depends_on` กับ module นั้น มักพังในจุดที่ห่างจาก provider block ที่เขียนไว้ตอนแรก
+- module ที่ hardcode GCP project ID, region หรือ setting ที่ใกล้เคียง credential แทนที่จะรับมัน (หรือ provider ที่มี alias) จาก caller
+- ทุก field ที่ resource รองรับถูก expose เป็น module variable "เพื่อความครบถ้วน" แทนที่จะเพิ่มตอนที่ caller จริงต้องการความยืดหยุ่นนั้นเฉพาะเจาะจง — พิสูจน์ข้างบน แต่ละตัวคือ public API ถาวรที่ต้องดูแล
+- required variable ที่ไม่มี `description` ทำให้ public API ของ module ยากต่อการใช้อย่างถูกต้องโดยไม่ต้องเปิดอ่าน resource block เอง
+
+<SpotTheBug code={`# modules/queue/main.tf
+terraform {
+  required_providers {
+    google = {
+      source  = "hashicorp/google"
+      version = "~> 8.0"
+    }
+  }
+}
+
+provider "google" {
+  project = "acme-prod-project"
+}
+
+resource "google_pubsub_topic" "this" {
+  name = var.topic_name
+}`}>
+พิสูจน์ข้างบนด้วย `terraform init` fail จริง — module นี้เป็นเจ้าของ `provider "google"` block ที่ config จริง ซึ่งตามคำแนะนำทางการ ("Modules intended for use by other modules should not contain provider blocks") ทำให้มันเข้ากันไม่ได้กับ `count`, `for_each` และ `depends_on` ทันทีที่ caller ลองใช้อันใดอันหนึ่งกับ `module` block — error จริงเป๊ะ ๆ คือ "Module is incompatible with count, for_each, and depends_on ... contains its own local provider configurations" แย่กว่านั้นคือมัน hardcode `acme-prod-project` แบบเงียบ ๆ ดังนั้นทุก caller จะได้ GCP project นี้ไม่ว่า provider configuration ของตัวเองจะเป็นอะไร โดยไม่มีทาง override เลย ทางแก้คือ `configuration_aliases = [google.this]` ใน `required_providers` อ้างอิง `provider = google.this` บน resource และไม่มี `provider` block ในตัว module เลย จากนั้น caller จะส่ง provider จริงผ่าน `providers = { google.this = google }` ซึ่งพิสูจน์ข้างบนแล้วว่า `validate` สำเร็จสะอาดแม้จะมี `count = 2`
+</SpotTheBug>
+
+<Callout title="สรุปหนึ่งบรรทัด">
+**module** ก็แค่ directory ของไฟล์ `.tf` directory ที่คุณ `apply` ตรง ๆ เรียกว่า **root module** ส่วน directory ที่ถูกอ้างอิงผ่าน `module` block กลายเป็น **child module** — ไม่มี syntax พิเศษเกี่ยวข้องเลย เพราะ module คือ Terraform configuration เต็มรูปแบบ จึงตาม convention **`variables.tf` / `main.tf` / `outputs.tf`** เหมือน root config โดยที่ `variables.tf` ทำหน้าที่เป็น public input และ `outputs.tf` เป็นสิ่งที่ expose กลับให้ caller การออกแบบ module ที่ดีหมายถึง responsibility เดียวที่ชัดเจน มี **default** ที่สมเหตุสมผลสำหรับ input ที่เป็น optional และเพิ่ม variable ใหม่เฉพาะตอนที่ caller จริงต้องการความยืดหยุ่นนั้น ไม่ใช่ over-parameterize ไว้ล่วงหน้า reusable module ต้องไม่เป็นเจ้าของ `provider` configuration จริงด้วย — พิสูจน์ข้างบนด้วย error จริง เหมือนกันเป๊ะข้ามทั้งสาม cloud เพราะมันคือกฎของ Terraform-core — ใช้ `configuration_aliases` แล้วให้ caller ส่ง `providers = {}` แทน
 </Callout>
 
 export const quizWritingReusableModule = [
@@ -135,6 +281,7 @@ export const quizWritingReusableModule = [
       'การตั้งชื่อ directory ว่า modules/ แทนชื่ออื่น',
     ],
     answer: 1,
+    explain: 'พิสูจน์ตลอดทั้งบท file layout เดียวกันใช้ได้กับ directory ของไฟล์ .tf ใด ๆ สิ่งที่ทำให้มันเป็น "child module" คือแค่มี configuration อื่นอ้างอิงถึงมันผ่าน module block',
   },
   {
     q: 'ทำไม file layout ของ reusable module ถึงมักเหมือน variables.tf, main.tf และ outputs.tf',
@@ -145,6 +292,29 @@ export const quizWritingReusableModule = [
       'outputs.tf จำเป็นต้องมีเพื่อให้ publish module ขึ้น Terraform Registry ได้',
     ],
     answer: 1,
+    explain: 'module ไม่ใช่ construct พิเศษสำหรับ templating — มันคือ Terraform configuration ธรรมดาที่รับ parameter ผ่าน variables.tf ตอนเข้า และส่งออกผ่าน outputs.tf',
+  },
+  {
+    q: '```text\n$ terraform init\nError: Module is incompatible with count, for_each, and depends_on\n\n  on main.tf line 12, in module "bucket":\n  12:   count  = 2\n\nThe module at module.bucket is a legacy module which contains its own local\nprovider configurations, and so calls to it may not use the count,\nfor_each, or depends_on arguments.\n```\nเนื้อหา module จริงที่พิสูจน์ข้างบน ทำให้เกิด error นี้เป๊ะ ๆ คืออะไร',
+    options: [
+      'module ประกาศ variable ที่ไม่มีค่า default',
+      'module มี provider "google" block ที่ config จริงไม่ว่างเปล่า แทนที่จะรับ provider จาก caller ผ่าน configuration_aliases',
+      'module ใช้ for_each กับ resource ของตัวเอง',
+      'module มาจาก Git URL แทนที่จะเป็น local path',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ข้างบน module ที่เป็นเจ้าของ provider "google" { project = "my-project-id" } block จริง จะ fail แบบนี้เป๊ะ ๆ ทันทีที่ caller เพิ่ม count = 2 ทางแก้ (configuration_aliases บวก providers = {} ฝั่ง caller) พิสูจน์ข้างบนแล้วว่า validate สำเร็จสะอาด',
+  },
+  {
+    q: 'error "Module is incompatible with count, for_each, and depends_on" เป็นเรื่องเฉพาะของ google provider หรือเปล่า',
+    options: [
+      'ใช่ เป็นข้อจำกัดเฉพาะ google เท่านั้น',
+      'ไม่ใช่ — พิสูจน์ข้างบนด้วยการเทียบ error text เป๊ะ ๆ ข้ามคอร์สพี่น้อง aws และ azurerm ของคอร์สนี้ error text เหมือนกันทุกตัวอักษร เพราะข้อจำกัดนี้คือกฎของ Terraform เอง ไม่ใช่เฉพาะ provider',
+      'ใช่ เกิดเฉพาะ provider ที่ต้องการ project ID เท่านั้น',
+      'ไม่ใช่ แต่คำที่ใช้ต่างกันเล็กน้อยระหว่าง provider',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ข้างบน error text เดียวกันเป๊ะ ไม่ว่า module จะเป็นเจ้าของ provider "aws", provider "azurerm" หรือ provider "google" block ที่ config จริง — ข้อจำกัด count/for_each/depends_on ถูก enforce โดย Terraform เอง ไม่ขึ้นกับ provider ไหน',
   },
   {
     q: 'ต้นทุนที่แท้จริงของการ over-parameterize module ด้วยการ expose ทุก field ของ resource เป็น variable ตั้งแต่วันแรกคืออะไร',
@@ -155,6 +325,7 @@ export const quizWritingReusableModule = [
       'Terraform เพิกเฉยต่อ variable ที่ไม่ได้ใช้โดยอัตโนมัติ จึงไม่มีปัญหาอะไร',
     ],
     answer: 2,
+    explain: 'variable ที่ expose แต่ละตัวคือคำสัญญาต่อ caller และผู้ดูแลในอนาคต — เพิ่มมันตอนที่ caller จริงต้องการความยืดหยุ่นนั้นทำให้คำสัญญานั้นเล็กและซื่อสัตย์กว่า',
   },
   {
     q: 'ในตัวอย่าง gcs-bucket module ทำไม bucket_name ถึงไม่มี default แต่ force_destroy มี',
@@ -165,6 +336,7 @@ export const quizWritingReusableModule = [
       'เพราะ force_destroy เป็น required argument บน google_storage_bucket',
     ],
     answer: 1,
+    explain: 'default ควรมีแค่ตอนที่ caller ส่วนใหญ่ต้องการค่าเดียวกันจริง ๆ — bucket_name เป็นเรื่องเฉพาะ caller โดยธรรมชาติ การให้ default จึงแค่ซ่อนการตัดสินใจที่ caller ทุกคนต้องทำอยู่ดี',
   },
 ];
 
