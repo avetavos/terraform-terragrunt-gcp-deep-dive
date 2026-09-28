@@ -1,0 +1,146 @@
+---
+title: 'How Terraform Works'
+description: 'dependency graph กับการ walk, state file ในระดับ schema, plan file กับ JSON output ของมัน, provider plugin protocol, และวิธีที่ Terragrunt ค้นหา unit แล้วสร้าง DAG ของตัวเอง — กลไกเบื้องหลังทุกคำสั่งที่คุณรันไปแล้วในคอร์สนี้ พิสูจน์ด้วยการรัน terraform/terragrunt 1.16.4/1.1.0 จริง ไม่ใช่การเดา'
+sidebar:
+  order: 0
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
+
+## โมดูลนี้มีไว้ทำไม
+
+ทุกโมดูลก่อนหน้านี้ในคอร์สสอนให้คุณ *ใช้* Terraform กับ Terragrunt: เขียน HCL, รัน `init`/`plan`/`apply`, เก็บ state แบบ remote, ต่อ variable กับ module, สร้าง live tree แบบ multi-environment, และ ship ผ่าน CI พร้อม policy check ไม่มีข้อไหนเลยที่ต้องรู้ว่า `terraform plan` จริง ๆ แล้ว *สร้าง* อะไรก่อนจะ print diff ออกมา, `terraform.tfstate` จริง ๆ แล้ว *คือ* อะไรในระดับ byte, `-out=tfplan` เขียนอะไรลงดิสก์จริง ๆ, `hashicorp/google` (หรือ `aws`, หรือ `azurerm`) คุยกับ `terraform` ในฐานะ *process* อย่างไร, หรือ `terragrunt run --all` ตัดสินใจอย่างไรว่า unit ไหนรันก่อนไหน
+
+ช่องว่างนี้แหละคือจุดที่ Terraform tooling หรือ review ที่ AI เขียนพังแบบที่ดูดีบนผิวหน้า: script "policy check" ที่ grep ข้อความ output ของ `terraform plan` แทนที่จะอ่าน array `resource_changes[].change.actions` ที่มีโครงสร้างจริงจาก `terraform show -json`; CI step ที่สมมติว่า `terraform apply -parallelism=50` เร็วกว่าเสมอโดยไม่รู้ว่า flag นี้จำกัดอะไร; เพื่อนร่วมทีมที่ "แก้" state lock ที่ค้างด้วยการแก้ field `serial` ใน `terraform.tfstate` มือ โดยไม่รู้ว่า `state push` จะปฏิเสธค่าที่ stale ตรง ๆ; block `dev_overrides` ที่ copy-paste มาจาก blog แล้วทำให้ `init` พังเงียบ ๆ โดยไม่มีใครอธิบายได้จาก error text อย่างเดียว ไม่มีข้อไหนเลยที่เป็น HCL syntax error ไม่มีข้อไหนเลยที่ `terraform validate` จับได้ ทุกข้อคือข้อเท็จจริงเกี่ยวกับ runtime ที่โมดูลนี้พิสูจน์ให้ดูจริง ๆ
+
+โมดูลนี้มีหน้าที่เดียว: ให้ความรู้เรื่อง runtime 5 ชิ้นที่ทำให้คุณมอง output ของ Terraform หรือ Terragrunt แบบไหนก็ได้ — graph, state file, plan `-out`, provider crash, `run --all` log — แล้วรู้ทันทีว่าอะไรสร้างมันขึ้นมาและทำไม
+
+1. **`terraform plan`/`apply` จริง ๆ walk อะไร และตามลำดับไหน?** ([The Graph and the Walk](/terraform-gcp/th/terraform-internals/the-graph-and-the-walk/) — `terraform graph` จริง ทั้ง DOT และ Mermaid, `-parallelism`, `depends_on` เทียบกับ implicit reference)
+2. **`terraform.tfstate` จริง ๆ คืออะไรในระดับ schema?** ([State File Anatomy](/terraform-gcp/th/terraform-internals/state-file-anatomy/) — JSON จริงจาก `state pull`, การบังคับใช้ `serial`/`lineage` พิสูจน์ด้วยการถูกปฏิเสธจริง, `state replace-provider`, `show -json` เทียบกับ state ดิบ)
+3. **plan file ที่ save ไว้คืออะไร และ CI/policy tooling อ่านอะไรจากมันจริง ๆ?** ([Plan File and JSON Output](/terraform-gcp/th/terraform-internals/plan-file-and-json-output/) — `-out` คือ zip จริง พิสูจน์ด้วย `unzip -l`; matrix เต็มของ `resource_changes[].change.actions`; `-detailed-exitcode`)
+4. **Terraform คุยกับ provider จริง ๆ ได้อย่างไร?** ([Provider Plugin Protocol](/terraform-gcp/th/terraform-internals/provider-plugin-protocol/) — go-plugin บน gRPC, handshake จริงจาก `TF_LOG=TRACE` กับ call `GetProviderSchema`, ทำไม `init` ต้องโหลด binary ต่อ OS/arch, provider crash ที่ทำให้เกิดขึ้นจริง, `dev_overrides`)
+5. **Terragrunt ตัดสินใจว่าจะรันอะไรอย่างไร และตามลำดับไหน?** ([Terragrunt Discovery and DAG](/terraform-gcp/th/terraform-internals/terragrunt-discovery-and-dag/) — `terragrunt find`/`list --dag` จริง, log ของ `run --all --parallelism 1` ที่เรียงลำดับจริง, `.terragrunt-cache`, `mock_outputs`)
+
+ทุก claim ในโมดูลนี้มีหลักฐานจากหนึ่งใน 3 อย่าง: การรันจริงบนเครื่อง ทำซ้ำได้ กับ **Terraform 1.16.4** และ **Terragrunt 1.1.0** (เวอร์ชันที่คอร์สนี้ pin ไว้) — วาง output ไว้ใต้ claim นั้น ตัด path เฉพาะเครื่องออกแต่ไม่เคยแต่งขึ้นเอง; เอกสารทางการที่ [developer.hashicorp.com](https://developer.hashicorp.com/terraform) หรือ [terragrunt.gruntwork.io](https://terragrunt.gruntwork.io); หรือถ้าทำทั้งสองอย่างแบบ offline ไม่ได้ ก็บอกตรง ๆ ว่าทำไม่ได้
+
+<Callout title="สรุปในหนึ่งบรรทัด">
+โมดูลนี้ไม่ได้เพิ่ม HCL ใหม่ — มันอธิบายกลไก 5 อย่างที่ `plan`, `apply`, `state`, และ `run --all` ทุกครั้งที่คุณเคยพิมพ์ผ่านจริง ๆ: **graph** (dependency graph ที่ render เป็น DOT/Mermaid ได้ ซึ่ง Terraform สร้างจาก configuration แล้ว walk ด้วย node พร้อมกันได้สูงสุดตาม `-parallelism` — default **10** พิสูจน์ด้านล่างด้วย wall-clock จริง), **state** (เอกสาร JSON ที่มีเวอร์ชัน — `version`, `serial`, `lineage`, `schema_version` ต่อ resource — ที่ `state push` จริงปฏิเสธการเขียนทับด้วยอะไรที่เก่ากว่าหรือไม่เกี่ยวข้องกัน), **plan file** (`-out` เขียน zip จริงที่มี plan, state ก่อนและหลัง refresh, และ snapshot ของ configuration และ `show -json` แปลงมันเป็น array `resource_changes[].change.actions` ที่ policy tooling อย่าง Conftest/OPA อ่านตรง ๆ), **provider plugin protocol** (provider ทุกตัวคือ binary แยกที่ Terraform สั่งรันเป็น subprocess แล้วคุยผ่าน gRPC — protocol version 5 หรือ 6 — พร้อม handshake จริงที่เห็นได้ด้วย `TF_LOG=TRACE`), และ **DAG ของ Terragrunt เอง** (สร้างจาก `dependency`/`dependencies` block ทั่ว live tree แยกจาก graph ของ Terraform เอง และ walk ด้วย `--parallelism` ของตัวมันเอง)
+</Callout>
+
+## โมดูลนี้ครอบคลุมอะไรบ้าง
+
+| บทเรียน | ตอบคำถามอะไร |
+|---|---|
+| [The Graph and the Walk](/terraform-gcp/th/terraform-internals/the-graph-and-the-walk/) | Terraform สร้างอะไรจากไฟล์ `.tf` ของคุณก่อนจะทำอะไรเลย และ `-parallelism` เปลี่ยนสิ่งที่เกิดขึ้นตอน `apply` อย่างไร? |
+| [State File Anatomy](/terraform-gcp/th/terraform-internals/state-file-anatomy/) | ข้างใน `terraform.tfstate` มีอะไรบ้างจริง ๆ และอะไรที่หยุดไม่ให้สองคนเขียนทับ state กันเงียบ ๆ? |
+| [Plan File and JSON Output](/terraform-gcp/th/terraform-internals/plan-file-and-json-output/) | plan file ที่ `-out` สร้างประกอบด้วยอะไรบ้าง และ policy engine หรือเครื่องมือคำนวณ cost อ่านอะไรจาก `show -json` จริง ๆ? |
+| [Provider Plugin Protocol](/terraform-gcp/th/terraform-internals/provider-plugin-protocol/) | ระหว่าง `terraform init` กับ provider พร้อม plan เกิดอะไรขึ้นจริง ๆ และ provider crash หน้าตาเป็นอย่างไร? |
+| [Terragrunt Discovery and DAG](/terraform-gcp/th/terraform-internals/terragrunt-discovery-and-dag/) | Terragrunt หา unit ของคุณเจอได้อย่างไร สร้างลำดับ dependency ของตัวเองอย่างไร และตัดสินใจว่า `run --all` ทำอะไรก่อนอย่างไร? |
+
+[The State File](/terraform-gcp/th/state-management/the-state-file/) แนะนำ state ไปแล้วว่าเป็น "ไฟล์ JSON ที่แมป configuration เข้ากับ infrastructure จริง" โมดูลนี้ไปไกลกว่านั้น เข้าสู่ schema จริง, อัลกอริทึม graph จริง, byte จริงบนดิสก์, และขอบเขต process จริงระหว่าง Terraform Core กับ provider
+
+<Mermaid title="หนึ่ง terraform apply จาก HCL ถึง provider RPC" code={bigDiagram} />
+
+export const bigDiagram = `flowchart TD
+  hcl["Your .tf files"] --> graphbuild["Build the dependency graph\\n(The Graph and the Walk)"]
+  graphbuild --> walk["Walk the graph, up to -parallelism nodes concurrently\\n(default 10)"]
+  walk --> rpc["Per node: gRPC call to the provider plugin\\n(Provider Plugin Protocol)"]
+  rpc --> plan["Plan result assembled"]
+  plan --> outfile["terraform plan -out=tfplan\\n(a real zip -- Plan File and JSON Output)"]
+  outfile --> apply["terraform apply tfplan"]
+  apply --> state["Written to state\\n(State File Anatomy)"]
+  state --> tg["Terragrunt units: their own DAG over many state files\\n(Terragrunt Discovery and DAG)"]`;
+
+## Mental Model
+
+ทุกอย่างในโมดูลนี้คือเรื่องเดียวกัน เล่าจาก 5 มุมของ pipeline เดียวกัน: **Terraform ไม่เคย execute configuration ของคุณจากบนลงล่าง — มัน compile มันเป็น graph แล้วทุกคำสั่ง (`plan`, `apply`, `destroy`, แม้แต่ `graph` เอง) คือการ walk บน graph นั้น ส่งแต่ละ node ไปให้ provider plugin ที่เป็นเจ้าของมันผ่าน gRPC แล้วบันทึกผลลงเอกสาร state ที่มีเวอร์ชันเดียว** Terragrunt อยู่อีกชั้นเหนือขึ้นไปและทำแบบเดียวกันแต่หยาบกว่า: แทนที่จะเป็น resource, node ของมันคือทั้ง unit Terraform (directory), edge มาจาก `dependency`/`dependencies` block แทน resource reference, และ `--parallelism` ของมันเองก็จำกัดว่า *unit* กี่ตัวรันพร้อมกัน — แยกขาดจาก `-parallelism` ที่ `terraform apply` แต่ละตัวข้างใน unit ใช้โดยสิ้นเชิง พอคุณวางข้อเท็จจริงไหนก็ตามในโมดูลนี้ลงบน "graph, walk, gRPC call, state write" (แล้วอีกชั้น "graph ของ Terragrunt เอง, walk, การรัน unit") การอ่าน diff ของ `plan` ที่ไม่คุ้น, state file, CI policy step, หรือ log ของ `run --all` ก็จะไม่ใช่ปริศนา 5 อย่างแยกกันอีกต่อไป
+
+## ความเข้าใจผิดที่พบบ่อย
+
+- **"`terraform apply` รัน resource ตามลำดับที่เขียนในไฟล์"** [The Graph and the Walk](/terraform-gcp/th/terraform-internals/the-graph-and-the-walk/) พิสูจน์ตรงข้ามด้วย `terraform graph` จริง: ลำดับมาจาก dependency graph ทั้งหมด (implicit reference กับ `depends_on` ที่ชัดเจน) และ resource ที่ไม่เกี่ยวกันจะถูกส่งพร้อมกัน สูงสุดตาม `-parallelism` (default 10) — พิสูจน์ด้วย wall-clock จริงที่ operation อิสระ 2 วินาที 5 ตัวเสร็จใน ~2 วินาทีตาม default และ ~10 วินาทีที่ `-parallelism=1`
+- **"state เป็นแค่ cache แก้มือได้ถ้าคำสั่ง `terraform state` ไม่สะดวก"** [State File Anatomy](/terraform-gcp/th/terraform-internals/state-file-anatomy/) พิสูจน์ว่า state มีเวอร์ชันและถูกบังคับใช้จริง: `terraform state push` จริงที่มี `serial` เก่าหรือ `lineage` ไม่ตรงกันจะถูกปฏิเสธตรง ๆ ด้วย error text จริง ไม่ merge เงียบ ๆ
+- **"plan file ที่ save ไว้ก็คือ output ที่มนุษย์อ่านได้ของ `plan` แค่ cache ไว้"** [Plan File and JSON Output](/terraform-gcp/th/terraform-internals/plan-file-and-json-output/) พิสูจน์ว่า `-out` สร้าง zip archive จริง (`unzip -l` แสดงสด ๆ) ที่มี plan, state ก่อนและหลัง refresh, และ config snapshot เต็ม — พอให้ `apply` ทำงานได้โดยไม่ต้อง re-evaluate ไฟล์ `.tf` ของคุณเลย
+- **"Terraform 'รู้เอง' วิธีคุยกับ AWS, Azure, GCP built-in"** [Provider Plugin Protocol](/terraform-gcp/th/terraform-internals/provider-plugin-protocol/) พิสูจน์ว่า provider ทุกตัวคือ subprocess แยกที่ Terraform สั่งรันแล้วคุยผ่าน gRPC บน Unix socket พร้อม call `GetProviderSchema` จริงที่จับได้ด้วย `TF_LOG=TRACE`
+- **"`terragrunt run --all` walk unit ตามลำดับที่ `find` แสดง"** [Terragrunt Discovery and DAG](/terraform-gcp/th/terraform-internals/terragrunt-discovery-and-dag/) พิสูจน์ว่าลำดับมาจาก `dependency`/`dependencies` block ที่สร้าง DAG ของ Terragrunt เอง แยกขาดจากลำดับตัวอักษรหรือลำดับ discovery — พิสูจน์ด้วย log จริงที่ `--parallelism 1` แสดง `plan` ของ dependency unit เสร็จก่อนที่ dependent ทั้งสองตัวจะเริ่มด้วยซ้ำ
+
+## อ่านโค้ดที่ AI เขียน
+
+ประเด็นทั้งหมดของโมดูลนี้คือ section นี้ 5 รอบ — บทละรอบ ตัวอย่างระดับภาพรวมก่อน: script "policy gate" ของ CI ที่ดูสมเหตุสมผลแต่จริง ๆ ไม่ได้เช็คอะไรเลยเงียบ ๆ
+
+<SpotTheBug code={`#!/usr/bin/env bash
+# A teammate's "policy gate" before terraform apply in CI
+terraform plan -out=tfplan > plan_output.txt
+if grep -q "Plan: 0 to add, 0 to change, 0 to destroy" plan_output.txt; then
+  echo "no changes, skipping approval"
+else
+  echo "changes detected, needs approval"
+fi
+terraform apply tfplan`}>
+script นี้ grep บรรทัดสรุปที่มนุษย์อ่าน ซึ่งเป็น string ที่เปราะบางต่อ localization และ formatting ไม่ใช่ interface ที่มั่นคง — Terraform ไม่เคย document ข้อความนั้นเป๊ะ ๆ ว่าเป็น API [Plan File and JSON Output](/terraform-gcp/th/terraform-internals/plan-file-and-json-output/) พิสูจน์ว่า interface ที่มั่นคงและเป็นทางการคือ `terraform show -json tfplan` ที่ expose `resource_changes[].change.actions` เป็น array จริง (`["no-op"]`, `["create"]`, `["update"]`, `["delete","create"]`, `["forget"]`, ...) ออกแบบมาเพื่อ use case นี้เป๊ะ ๆ — และ `terraform plan -detailed-exitcode` (พิสูจน์ในบทเดียวกัน: exit code `2` สำหรับ "มีการเปลี่ยนแปลง", `0` สำหรับ "ไม่มีการเปลี่ยนแปลง", `1` สำหรับ error จริง) แทนที่ grep ทั้งหมดด้วย exit code ที่ document ไว้ให้ script branch ได้ตรง ๆ โดยไม่ต้อง parse text เลย
+</SpotTheBug>
+
+export const quizTerraformInternalsIndex = [
+  {
+    q: 'Terraform สร้างอะไรจากไฟล์ .tf ของคุณจริง ๆ ก่อนจะรัน plan หรือ apply?',
+    options: [
+      'Nothing extra -- it evaluates resource blocks top to bottom as written',
+      'A dependency graph, which it then walks, dispatching independent nodes concurrently up to -parallelism',
+      'A single flat list of resources sorted alphabetically',
+      'A state file only, with no separate graph step',
+    ],
+    answer: 1,
+    explain: 'The Graph and the Walk พิสูจน์เรื่องนี้ด้วย terraform graph จริง (ทั้ง DOT และ Mermaid) และเวลาจริงที่แสดงให้เห็นว่า resource ที่ไม่เกี่ยวกันรันพร้อมกัน ไม่ใช่ตามลำดับในไฟล์',
+  },
+  {
+    q: 'ลองรัน terraform state push จริงด้วย lineage ที่ไม่ตรงกับ state ปัจจุบันของ backend จะเกิดอะไรขึ้น พิสูจน์ในโมดูลนี้?',
+    options: [
+      'Terraform silently overwrites the remote state',
+      'Terraform refuses with a real error naming both lineages, exactly like a real terraform state push run in this module',
+      'Terraform merges the two states automatically',
+      'Terraform prompts interactively for which lineage to keep',
+    ],
+    answer: 1,
+    explain: 'State File Anatomy พิสูจน์ด้วยข้อความปฏิเสธจริง: "cannot import state with lineage ... over unrelated state with lineage ..."',
+  },
+  {
+    q: 'terraform plan -out=tfplan สร้างอะไรลงดิสก์จริง ๆ?',
+    options: [
+      'A plain-text diff file',
+      'A real zip archive (provable with unzip -l) containing the plan, prior/post-refresh state, and a config snapshot',
+      'A binary-only format with no internal structure',
+      'A copy of terraform.tfstate with a .plan extension',
+    ],
+    answer: 1,
+    explain: 'Plan File and JSON Output พิสูจน์สด ๆ: file ระบุว่าเป็น "Zip archive data" และ unzip -l แสดง tfplan, tfstate, tfstate-prev, และ directory tfconfig/',
+  },
+  {
+    q: 'Terraform Core คุยกับ provider อย่าง hashicorp/google ระหว่าง plan จริง ๆ ได้อย่างไร?',
+    options: [
+      'Providers are compiled directly into the terraform binary',
+      'Terraform starts the provider as a separate subprocess and calls it over gRPC (protocol v5 or v6), provable with TF_LOG=TRACE',
+      'Providers run as remote SaaS APIs Terraform calls over plain HTTPS',
+      'Providers are shell scripts Terraform sources at runtime',
+    ],
+    answer: 1,
+    explain: 'Provider Plugin Protocol พิสูจน์ด้วย TF_LOG=TRACE จริงที่แสดง "starting plugin", "plugin address: ... network=unix", และ call GetProviderSchema จริงผ่าน gRPC',
+  },
+  {
+    q: 'ใน live tree ที่มี vpc, compute (depends on vpc), และ db (depends on vpc) log จริงของ terragrunt run --all --parallelism 1 -- plan พิสูจน์อะไรเรื่องลำดับการรัน?',
+    options: [
+      'Units run in alphabetical directory order regardless of dependencies',
+      'vpc runs to completion before either compute or db starts, because Terragrunt builds its own DAG from dependency blocks',
+      'All three run simultaneously regardless of --parallelism',
+      'Terragrunt picks a random valid order each run',
+    ],
+    answer: 1,
+    explain: 'Terragrunt Discovery and DAG พิสูจน์ด้วย log จริงที่มี timestamp: plan ของ vpc เสร็จก่อนที่บรรทัด dependency warning ของ compute หรือ db จะปรากฏด้วยซ้ำ',
+  },
+];
+
+<Quiz client:visible id="terraform-internals/index" questions={quizTerraformInternalsIndex} />
+
+<ProgressTracker client:visible id="terraform-internals/index" />

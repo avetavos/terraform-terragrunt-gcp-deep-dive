@@ -1,0 +1,146 @@
+---
+title: 'How Terraform Works'
+description: 'The dependency graph and the walk, the state file at the schema level, the plan file and its JSON output, the provider plugin protocol, and how Terragrunt discovers units and builds its own DAG — the mechanics behind every command you have already run in this course, proven with real terraform/terragrunt 1.16.4/1.1.0 runs, not guesses.'
+sidebar:
+  order: 0
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
+
+## What this module is for
+
+Every earlier module in this course taught you to *use* Terraform and Terragrunt: writing HCL, running `init`/`plan`/`apply`, storing state remotely, wiring variables and modules, building a multi-environment live tree, and shipping through CI with policy checks. None of it required knowing what `terraform plan` actually *builds* before it prints a diff, what `terraform.tfstate` actually *is* at the byte level, what `-out=tfplan` actually writes to disk, how `hashicorp/google` (or `aws`, or `azurerm`) actually talks to `terraform` as a *process*, or how `terragrunt run --all` actually decides which unit runs before which.
+
+That gap is exactly where AI-generated Terraform tooling and reviews fail in ways that look fine on the surface: a "policy check" script that greps `terraform plan` text output instead of reading the structured `resource_changes[].change.actions` array `terraform show -json` actually produces; a CI step that assumes `terraform apply -parallelism=50` is always faster with no idea what the flag bounds; a teammate who "fixes" a stuck state lock by hand-editing `terraform.tfstate`'s `serial` field, not knowing `state push` will simply refuse a stale one; a `dev_overrides` block copy-pasted from a blog post that silently breaks `init` for a reason nobody can explain from the error text alone. None of these are HCL syntax errors. None of them are caught by `terraform validate`. All of them are facts about the runtime this module makes provable.
+
+This module has one job: give you five pieces of runtime knowledge that let you look at **any** Terraform or Terragrunt output — a graph, a state file, a `-out` plan, a provider crash, a `run --all` log — and know exactly what produced it and why.
+
+1. **What does `terraform plan`/`apply` actually walk, and in what order?** ([The Graph and the Walk](/terraform-gcp/en/terraform-internals/the-graph-and-the-walk/) — a real `terraform graph`, DOT and Mermaid, `-parallelism`, `depends_on` vs implicit references)
+2. **What is `terraform.tfstate`, really, at the schema level?** ([State File Anatomy](/terraform-gcp/en/terraform-internals/state-file-anatomy/) — real `state pull` JSON, `serial`/`lineage` enforcement proven with a real refusal, `state replace-provider`, `show -json` vs raw state)
+3. **What is a saved plan file, and what does CI/policy tooling actually read from it?** ([Plan File and JSON Output](/terraform-gcp/en/terraform-internals/plan-file-and-json-output/) — `-out` is a real zip, proven with `unzip -l`; the full `resource_changes[].change.actions` matrix; `-detailed-exitcode`)
+4. **How does Terraform actually talk to a provider?** ([Provider Plugin Protocol](/terraform-gcp/en/terraform-internals/provider-plugin-protocol/) — go-plugin over gRPC, a real `TF_LOG=TRACE` handshake and `GetProviderSchema` call, why `init` downloads a binary per OS/arch, a real induced provider crash, `dev_overrides`)
+5. **How does Terragrunt decide what to run, and in what order?** ([Terragrunt Discovery and DAG](/terraform-gcp/en/terraform-internals/terragrunt-discovery-and-dag/) — real `terragrunt find`/`list --dag`, a real `run --all --parallelism 1` ordered log, `.terragrunt-cache`, `mock_outputs`)
+
+Every claim in this module is backed by one of three things: a real, reproduced local run against **Terraform 1.16.4** and **Terragrunt 1.1.0** (this course's pinned versions) — pasted below the claim, trimmed of machine-specific paths but never invented; the official docs at [developer.hashicorp.com](https://developer.hashicorp.com/terraform) or [terragrunt.gruntwork.io](https://terragrunt.gruntwork.io); or, where neither is possible offline, an explicit note saying so.
+
+<Callout title="The one-line takeaway">
+This module doesn't add new HCL — it explains the five mechanisms every `plan`, `apply`, `state`, and `run --all` you have already typed actually runs through: the **graph** (a DOT/Mermaid-renderable dependency graph Terraform builds from your configuration, then walks with up to `-parallelism` concurrent nodes — default **10**, proven below with real wall-clock timing), **state** (a versioned JSON document — `version`, `serial`, `lineage`, per-resource `schema_version` — that a real `state push` refuses to overwrite with anything older or unrelated), the **plan file** (`-out` writes a real zip containing the plan, the prior and post-refresh state, and a snapshot of your config, and `show -json` turns it into the exact `resource_changes[].change.actions` array policy tooling like Conftest/OPA reads), the **provider plugin protocol** (every provider is a separate binary Terraform starts as a subprocess and talks to over gRPC — protocol version 5 or 6 — with a real, visible handshake under `TF_LOG=TRACE`), and **Terragrunt's own DAG** (built from `dependency`/`dependencies` blocks across a live tree, independent of Terraform's own graph, and walked with its own `--parallelism`).
+</Callout>
+
+## What this module covers
+
+| Lesson | Answers the question |
+|---|---|
+| [The Graph and the Walk](/terraform-gcp/en/terraform-internals/the-graph-and-the-walk/) | What does Terraform actually build from your `.tf` files before it does anything, and how does `-parallelism` change what happens on `apply`? |
+| [State File Anatomy](/terraform-gcp/en/terraform-internals/state-file-anatomy/) | What, exactly, is inside `terraform.tfstate`, and what stops two people from silently clobbering each other's state? |
+| [Plan File and JSON Output](/terraform-gcp/en/terraform-internals/plan-file-and-json-output/) | What is a `-out` plan file made of, and what does a policy engine or cost tool actually parse out of `show -json`? |
+| [Provider Plugin Protocol](/terraform-gcp/en/terraform-internals/provider-plugin-protocol/) | What actually happens between `terraform init` and a provider being ready to plan, and what does a provider crash look like? |
+| [Terragrunt Discovery and DAG](/terraform-gcp/en/terraform-internals/terragrunt-discovery-and-dag/) | How does Terragrunt find your units, build its own dependency order, and decide what `run --all` does first? |
+
+[The State File](/terraform-gcp/en/state-management/the-state-file/) already introduced state as "a JSON file that maps configuration to real infrastructure." This module goes past that framing into the actual schema, the actual graph algorithm, the actual bytes on disk, and the actual process boundary between Terraform Core and a provider.
+
+<Mermaid title="One terraform apply, from HCL to a provider RPC" code={bigDiagram} />
+
+export const bigDiagram = `flowchart TD
+  hcl["Your .tf files"] --> graphbuild["Build the dependency graph\\n(The Graph and the Walk)"]
+  graphbuild --> walk["Walk the graph, up to -parallelism nodes concurrently\\n(default 10)"]
+  walk --> rpc["Per node: gRPC call to the provider plugin\\n(Provider Plugin Protocol)"]
+  rpc --> plan["Plan result assembled"]
+  plan --> outfile["terraform plan -out=tfplan\\n(a real zip -- Plan File and JSON Output)"]
+  outfile --> apply["terraform apply tfplan"]
+  apply --> state["Written to state\\n(State File Anatomy)"]
+  state --> tg["Terragrunt units: their own DAG over many state files\\n(Terragrunt Discovery and DAG)"]`;
+
+## Mental Model
+
+Everything in this module is one story told from five different points on the same pipeline: **Terraform never executes your configuration top to bottom — it compiles it into a graph, and every command (`plan`, `apply`, `destroy`, `graph` itself) is a walk over that graph, dispatching each node to whichever provider plugin owns it over gRPC, and recording the result in one versioned state document.** Terragrunt sits one layer above this and does the same thing at a coarser grain: instead of resources, its nodes are whole Terraform units (directories), its edges come from `dependency`/`dependencies` blocks instead of resource references, and its own `--parallelism` bounds how many *units* run concurrently — completely independent of the `-parallelism` any individual `terraform apply` inside a unit uses. Once you can place any fact in this module against "graph, walk, gRPC call, state write" (and, one layer up, "Terragrunt's own graph, walk, unit run"), reading an unfamiliar `plan` diff, a `state` file, a CI policy step, or a `run --all` log stops being five separate mysteries.
+
+## Common Misconceptions
+
+- **"`terraform apply` runs resources in the order they're written in the file."** [The Graph and the Walk](/terraform-gcp/en/terraform-internals/the-graph-and-the-walk/) proves the opposite with a real `terraform graph`: order comes entirely from the dependency graph (implicit references and explicit `depends_on`), and independent resources are dispatched concurrently, up to `-parallelism` (default 10) — proven with real wall-clock timing showing 5 independent 2-second operations finish in ~2s by default and ~10s at `-parallelism=1`.
+- **"State is just a cache; you can hand-edit it if `terraform state` commands are inconvenient."** [State File Anatomy](/terraform-gcp/en/terraform-internals/state-file-anatomy/) proves state is versioned and enforced: a real `terraform state push` with a stale `serial` or a mismatched `lineage` is refused outright with the real error text, not silently merged.
+- **"A saved plan file is basically the same as the human-readable `plan` output, just cached."** [Plan File and JSON Output](/terraform-gcp/en/terraform-internals/plan-file-and-json-output/) proves `-out` produces a real zip archive (`unzip -l` shown live) containing the plan, prior state, post-refresh state, and a full config snapshot — enough for `apply` to proceed with zero re-evaluation of your `.tf` files.
+- **"Terraform 'just knows' how to talk to AWS, Azure, and GCP built in."** [Provider Plugin Protocol](/terraform-gcp/en/terraform-internals/provider-plugin-protocol/) proves every provider is a separate subprocess Terraform starts and speaks gRPC to over a Unix socket, with a real, visible `GetProviderSchema` call captured under `TF_LOG=TRACE`.
+- **"`terragrunt run --all` walks units in the order `find` lists them."** [Terragrunt Discovery and DAG](/terraform-gcp/en/terraform-internals/terragrunt-discovery-and-dag/) proves ordering comes from `dependency`/`dependencies` blocks forming Terragrunt's own DAG, independent of alphabetical or discovery order — proven with a real `--parallelism 1` log showing a dependency unit's `plan` completing before either of its two dependents starts.
+
+## Reading AI-generated code
+
+The whole point of this module is this section, five times over — one per lesson. As a preview, here is the survey-level version: a CI "policy gate" script that looks reasonable and silently checks nothing.
+
+<SpotTheBug code={`#!/usr/bin/env bash
+# A teammate's "policy gate" before terraform apply in CI
+terraform plan -out=tfplan > plan_output.txt
+if grep -q "Plan: 0 to add, 0 to change, 0 to destroy" plan_output.txt; then
+  echo "no changes, skipping approval"
+else
+  echo "changes detected, needs approval"
+fi
+terraform apply tfplan`}>
+This greps the human-readable summary line, which is a localization- and formatting-fragile string, not a stable interface — Terraform has never documented that exact text as an API. [Plan File and JSON Output](/terraform-gcp/en/terraform-internals/plan-file-and-json-output/) proves the real, stable interface is `terraform show -json tfplan`, which exposes `resource_changes[].change.actions` as a real array (`["no-op"]`, `["create"]`, `["update"]`, `["delete","create"]`, `["forget"]`, ...) meant exactly for this use case — and `terraform plan -detailed-exitcode` (proven in the same lesson: exit code `2` for "changes present", `0` for "no changes", `1` for a real error) replaces the whole grep with a documented exit code the script can branch on directly, with no text parsing at all.
+</SpotTheBug>
+
+export const quizTerraformInternalsIndex = [
+  {
+    q: 'What does Terraform actually build from your .tf files before running plan or apply?',
+    options: [
+      'Nothing extra -- it evaluates resource blocks top to bottom as written',
+      'A dependency graph, which it then walks, dispatching independent nodes concurrently up to -parallelism',
+      'A single flat list of resources sorted alphabetically',
+      'A state file only, with no separate graph step',
+    ],
+    answer: 1,
+    explain: 'The Graph and the Walk proves this with a real terraform graph (DOT and Mermaid) and real timing showing independent resources run concurrently, not in file order.',
+  },
+  {
+    q: 'A real terraform state push is attempted with a lineage that does not match the backend\'s current state. What happens, proven in this module?',
+    options: [
+      'Terraform silently overwrites the remote state',
+      'Terraform refuses with a real error naming both lineages, exactly like a real terraform state push run in this module',
+      'Terraform merges the two states automatically',
+      'Terraform prompts interactively for which lineage to keep',
+    ],
+    answer: 1,
+    explain: 'State File Anatomy proves this with the real refusal text: "cannot import state with lineage ... over unrelated state with lineage ...".',
+  },
+  {
+    q: 'What does terraform plan -out=tfplan actually produce on disk?',
+    options: [
+      'A plain-text diff file',
+      'A real zip archive (provable with unzip -l) containing the plan, prior/post-refresh state, and a config snapshot',
+      'A binary-only format with no internal structure',
+      'A copy of terraform.tfstate with a .plan extension',
+    ],
+    answer: 1,
+    explain: 'Plan File and JSON Output proves this live: file identifies as "Zip archive data" and unzip -l lists tfplan, tfstate, tfstate-prev, and a tfconfig/ directory.',
+  },
+  {
+    q: 'How does Terraform Core actually communicate with a provider like hashicorp/google during a plan?',
+    options: [
+      'Providers are compiled directly into the terraform binary',
+      'Terraform starts the provider as a separate subprocess and calls it over gRPC (protocol v5 or v6), provable with TF_LOG=TRACE',
+      'Providers run as remote SaaS APIs Terraform calls over plain HTTPS',
+      'Providers are shell scripts Terraform sources at runtime',
+    ],
+    answer: 1,
+    explain: 'Provider Plugin Protocol proves this with a real TF_LOG=TRACE trace showing "starting plugin", "plugin address: ... network=unix", and a real GetProviderSchema gRPC call.',
+  },
+  {
+    q: 'In a live tree with vpc, compute (depends on vpc), and db (depends on vpc), what does a real terragrunt run --all --parallelism 1 -- plan log prove about ordering?',
+    options: [
+      'Units run in alphabetical directory order regardless of dependencies',
+      'vpc runs to completion before either compute or db starts, because Terragrunt builds its own DAG from dependency blocks',
+      'All three run simultaneously regardless of --parallelism',
+      'Terragrunt picks a random valid order each run',
+    ],
+    answer: 1,
+    explain: 'Terragrunt Discovery and DAG proves this with real timestamped log lines: vpc\'s plan completes before compute\'s or db\'s dependency warning line even appears.',
+  },
+];
+
+<Quiz client:visible id="terraform-internals/index" questions={quizTerraformInternalsIndex} />
+
+<ProgressTracker client:visible id="terraform-internals/index" />
